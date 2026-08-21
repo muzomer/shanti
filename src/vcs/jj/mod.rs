@@ -12,14 +12,20 @@
 //! (no pager, no colour, an explicit repository, a checked version, machine-
 //! readable output) hold everywhere by construction instead of by convention.
 //!
-//! This module is plumbing only — it does not implement
-//! [`Vcs`](crate::vcs::Vcs). Mapping jj workspaces onto
-//! [`Space`](crate::vcs::Space) is the next layer up and lives elsewhere.
+//! On top of that plumbing sits [`JjBackend`], the [`Vcs`](crate::vcs::Vcs)
+//! implementation: it maps jj workspaces onto [`Space`](crate::vcs::Space) and
+//! is the only jj type the rest of shanti needs to know about.
 
+mod backend;
 mod cmd;
 mod template;
+#[cfg(test)]
+mod testing;
 mod version;
+mod workspace;
 
+pub use backend::JjBackend;
 pub use cmd::{JjCli, WorkingCopy, JJ_BINARY_ENV};
 pub use template::{Record, Template, FIELD_SEPARATOR, RECORD_SEPARATOR};
 pub use version::{JjVersion, MINIMUM_JJ_VERSION};
+pub use workspace::{Workspace, WORKSPACES};

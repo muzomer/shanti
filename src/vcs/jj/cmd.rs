@@ -156,6 +156,22 @@ impl JjCli {
         template.parse(&stdout)
     }
 
+    /// Like [`JjCli::records`], but for subcommands that never draw a graph and
+    /// therefore reject `--no-graph` outright.
+    ///
+    /// `jj workspace list` is the case that forced this: it has no graph to
+    /// suppress, so passing the flag is a hard clap error rather than a no-op.
+    /// Kept as a separate entry point instead of a boolean argument so the call
+    /// site states which kind of subcommand it is reading, and so the default
+    /// (`records`, graph suppressed) stays the safe one.
+    pub fn plain_records(&self, args: &[&str], template: &Template) -> eyre::Result<Vec<Record>> {
+        let expression = template.expression();
+        let mut full = args.to_vec();
+        full.extend(["--template", expression.as_str()]);
+        let stdout = self.spawn(WorkingCopy::Ignore, &full)?;
+        template.parse(&stdout)
+    }
+
     fn spawn(&self, working_copy: WorkingCopy, args: &[&str]) -> eyre::Result<String> {
         let argv = self.argv(working_copy, args);
         let described = describe(&self.program, &argv);
