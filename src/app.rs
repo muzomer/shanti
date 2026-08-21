@@ -562,7 +562,7 @@ impl App {
                 HelpEntry::Binding("P", "New worktree from PR URL (auto-clone)"),
                 HelpEntry::Binding("d", "Delete with confirmation"),
                 HelpEntry::Binding("D", "Force delete"),
-                HelpEntry::Binding("Enter", "Copy path to clipboard & exit"),
+                HelpEntry::Binding("Enter", "Print path & exit"),
                 HelpEntry::Binding("?", "Show this help"),
                 HelpEntry::Binding("q / Ctrl+C", "Quit"),
                 HelpEntry::Blank,
@@ -579,7 +579,7 @@ impl App {
                 HelpEntry::Binding("↑ / Ctrl+K / Ctrl+P", "Move up in list"),
                 HelpEntry::Binding("↓ / Ctrl+J / Ctrl+N", "Move down in list"),
                 HelpEntry::Binding("Backspace", "Delete filter character"),
-                HelpEntry::Binding("Enter", "Copy path to clipboard & exit"),
+                HelpEntry::Binding("Enter", "Print path & exit"),
                 HelpEntry::Binding("Ctrl+C", "Quit"),
             ],
             (Focus::Repositories, InputMode::Normal) => vec![

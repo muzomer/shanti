@@ -30,7 +30,9 @@ fn resolve_normal(key: KeyEvent) -> Option<Action> {
         | (KeyCode::Char('G'), KeyModifiers::SHIFT)
         | (KeyCode::End, KeyModifiers::NONE) => Some(Action::GoLast),
         (KeyCode::Enter, KeyModifiers::NONE) => Some(Action::Select),
-        (KeyCode::Char('x'), KeyModifiers::NONE) => Some(Action::Delete),
+        // Deletion is intentionally only reachable through 'd' (confirmed) and
+        // 'D' (forced), both documented in the help popup. A bare 'x' used to
+        // delete without confirmation and appeared in no help list.
         (KeyCode::Char('d'), KeyModifiers::NONE) => Some(Action::DeleteWithConfirmation),
         (KeyCode::Char('D'), KeyModifiers::NONE) | (KeyCode::Char('D'), KeyModifiers::SHIFT) => {
             Some(Action::ForceDelete)
