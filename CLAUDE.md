@@ -6,6 +6,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Rust CLI tool for creating and managing git worktrees and jujutsu workspaces across multiple repositories to simplify working in multiple concurrent features in separate spaces and being able to manage these spaces easily.
 
+## Tech Stack & Tooling
+
+- Language: Rust
+- Library: Ratatui (v0.30+) + Crossterm
+
+## UI & Design Guidelines (Ratatui)
+
+- Avoid generic plain-text or default block layouts.
+- Theme: Use a dark-mode palette (e.g., Tokyo Night or Catppuccin Mocha).
+- Styling: Leverage Ratatui's `.stylize()` trait heavily. Use bold weights/accent colors for active headers, dimmed/grayed text for secondary details, and high-contrast background highlights for selected items.
+- Layout: Always use constraint-based layouts (`Layout::default()`) with strict minimums/percentages so it handles terminal resizes cleanly. Always include a vim-style keybinding footer (e.g., `q: Quit`, `↑/↓: Navigate`).
+
 ## Build & Test
 
 ```bash
@@ -71,8 +83,8 @@ src/
 - New TUI components should implement `draw(&mut self, frame: &mut Frame, area: Rect)` and `handle_key(&mut self, key: KeyEvent) -> EventState`.
 - Tests use `tempfile::tempdir()` for filesystem isolation.
 
-
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6cd5cc61 -->
+
 ## Beads Issue Tracker
 
 This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
@@ -110,6 +122,7 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 2. **Run quality gates** (if code changed) - Tests, linters, builds
 3. **Update issue status** - Close finished work, update in-progress items
 4. **Handle git/sync by active profile**:
+
    ```bash
    # Conservative/minimal/default: report status and proposed commands; wait for approval.
    git status
@@ -119,9 +132,11 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
    git push
    git status
    ```
+
 5. **Hand off** - Summarize changes, validation, issue status, and any blocked sync/commit/push step
 
 **Critical rules:**
+
 - Explicit user or orchestrator instructions override this Beads block.
 - Do not commit or push without clear authority from the active profile or the current user request.
 - If a required sync or push is blocked, stop and report the exact command and error.
