@@ -36,7 +36,7 @@ use color_eyre::eyre;
 pub use backend::Backend;
 pub use repo::{Repo, RepoId};
 pub use space::Space;
-pub use status::{LocalState, RemoteState, SpaceStatus};
+pub use status::{JjLocal, LocalState, RemoteState, SpaceStatus, StatusGlyph, Tone};
 
 /// How a backend is stored and passed around.
 ///
