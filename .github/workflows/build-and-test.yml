@@ -109,33 +109,23 @@ jobs:
         with:
           path: artifacts
 
+      # action-gh-release uploads assets under their on-disk basename and has
+      # no rename option, so give each binary its final asset name here
+      # before the release step, preserving the old asset_name values.
+      - name: Rename release assets
+        run: |
+          mv artifacts/shanti-linux-latest/shanti artifacts/shanti-linux-latest/shanti-linux-latest
+          mv artifacts/shanti-macos-latest/shanti artifacts/shanti-macos-latest/shanti-macos-latest
+
       - name: Create release
-        id: create_release
-        uses: actions/create-release@v1
+        uses: softprops/action-gh-release@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ github.ref_name }}
-          release_name: Release ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
           draft: false
           prerelease: false
-
-      - name: Upload Linux release asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: artifacts/shanti-linux-latest/shanti
-          asset_name: shanti-linux-latest
-          asset_content_type: application/octet-stream
-
-      - name: Upload macOS release asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: artifacts/shanti-macos-latest/shanti
-          asset_name: shanti-macos-latest
-          asset_content_type: application/octet-stream
+          files: |
+            artifacts/shanti-linux-latest/shanti-linux-latest
+            artifacts/shanti-macos-latest/shanti-macos-latest
