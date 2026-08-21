@@ -47,7 +47,37 @@ fn is_worktree_dirty(worktree_path: &str) -> bool {
     }
 }
 
-pub struct Repository(git2::Repository);
+/// Name a repository by its directory, not by string surgery on the git dir.
+///
+/// A non-bare repository is named after its working directory; a bare one has no
+/// working directory, so we fall back to the git dir and drop the conventional
+/// `.git` suffix (`/srv/shanti.git` -> `shanti`). Only that trailing suffix is
+/// stripped, so a directory that merely contains a dot keeps its full name.
+fn repository_name(repo: &git2::Repository) -> String {
+    match repo.workdir() {
+        Some(workdir) => directory_name(workdir),
+        None => {
+            let name = directory_name(repo.path());
+            name.strip_suffix(".git").unwrap_or(&name).to_string()
+        }
+    }
+}
+
+/// Last real component of `path`, lossily decoded so non-UTF-8 paths cannot panic.
+/// `Path::file_name` already ignores trailing separators and `.` components.
+fn directory_name(path: &Path) -> String {
+    path.file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned()
+}
+
+pub struct Repository {
+    inner: git2::Repository,
+    /// Derived once at open time: `name()` is called per repository per frame,
+    /// so it must not redo path surgery (or allocate) on every call.
+    name: String,
+}
 impl Repository {
     pub fn from_path(path: &str, run_fetch: bool) -> eyre::Result<Self> {
         let repo = git2::Repository::open(path)
@@ -66,14 +96,15 @@ impl Repository {
                 debug!("Could not fetch from remotes. Error: {}", err);
             }
         }
-        Ok(Self(repo))
+        let name = repository_name(&repo);
+        Ok(Self { inner: repo, name })
     }
     pub fn create_new_worktree(
         &self,
         worktree_name: &str,
         worktrees_dir: &str,
     ) -> eyre::Result<super::Worktree> {
-        let repo_worktrees_dir = PathBuf::from(worktrees_dir).join(self.name());
+        let repo_worktrees_dir = PathBuf::from(worktrees_dir).join(self.name_str());
         let new_worktree_dir = PathBuf::from(&repo_worktrees_dir).join(worktree_name);
 
         fs::create_dir_all(&repo_worktrees_dir).wrap_err_with(|| {
@@ -87,17 +118,20 @@ impl Repository {
         // Otherwise fall back to the repository's default branch, then HEAD.
         let remote_branch_name = format!("origin/{}", worktree_name);
         let local_branch = if let Ok(remote_branch) = self
-            .0
+            .inner
             .find_branch(&remote_branch_name, git2::BranchType::Remote)
         {
             let commit = remote_branch.get().peel_to_commit().wrap_err_with(|| {
                 format!("Could not resolve remote branch '{}'", remote_branch_name)
             })?;
-            let branch = match self.0.find_branch(worktree_name, git2::BranchType::Local) {
+            let branch = match self
+                .inner
+                .find_branch(worktree_name, git2::BranchType::Local)
+            {
                 Ok(existing) => existing,
                 Err(_) => {
                     let mut new_branch = self
-                        .0
+                        .inner
                         .branch(worktree_name, &commit, false)
                         .wrap_err_with(|| {
                             format!(
@@ -119,11 +153,11 @@ impl Repository {
             self.find_default_branch_name().and_then(|default_name| {
                 let remote_name = format!("origin/{}", default_name);
                 let default_branch = self
-                    .0
+                    .inner
                     .find_branch(&remote_name, git2::BranchType::Remote)
                     .ok()?;
                 let commit = default_branch.get().peel_to_commit().ok()?;
-                self.0.branch(worktree_name, &commit, false).ok()
+                self.inner.branch(worktree_name, &commit, false).ok()
             })
         };
 
@@ -134,7 +168,7 @@ impl Repository {
         }
 
         let created_worktree = self
-            .0
+            .inner
             .worktree(
                 worktree_name,
                 new_worktree_dir.as_path(),
@@ -143,7 +177,7 @@ impl Repository {
             .wrap_err_with(|| format!("Could not create worktree '{}'", worktree_name))?;
 
         let branch = self
-            .0
+            .inner
             .find_branch(worktree_name, git2::BranchType::Local)
             .wrap_err_with(|| {
                 format!(
@@ -152,7 +186,7 @@ impl Repository {
                 )
             })?;
 
-        let remote_status = remote_status_of_branch(&self.0, &branch);
+        let remote_status = remote_status_of_branch(&self.inner, &branch);
         Ok(super::Worktree {
             git_worktree: created_worktree,
             remote_status,
@@ -163,7 +197,7 @@ impl Repository {
     /// Returns the short name of the default remote branch (e.g. "main"), by checking
     /// `refs/remotes/origin/HEAD` first, then falling back to common names.
     fn find_default_branch_name(&self) -> Option<String> {
-        if let Ok(head_ref) = self.0.find_reference("refs/remotes/origin/HEAD") {
+        if let Ok(head_ref) = self.inner.find_reference("refs/remotes/origin/HEAD") {
             if let Ok(resolved) = head_ref.resolve() {
                 if let Some(name) = resolved.shorthand() {
                     let short = name.strip_prefix("origin/").unwrap_or(name).to_string();
@@ -174,7 +208,7 @@ impl Repository {
         for default in &["main", "master"] {
             let remote_name = format!("origin/{}", default);
             if self
-                .0
+                .inner
                 .find_branch(&remote_name, git2::BranchType::Remote)
                 .is_ok()
             {
@@ -188,7 +222,7 @@ impl Repository {
     pub fn resolve_base_branch(&self, worktree_name: &str) -> String {
         let remote_branch_name = format!("origin/{}", worktree_name);
         if self
-            .0
+            .inner
             .find_branch(&remote_branch_name, git2::BranchType::Remote)
             .is_ok()
         {
@@ -200,26 +234,28 @@ impl Repository {
         "Will be created from HEAD".to_string()
     }
 
+    /// Borrowed repository name — prefer this over [`Repository::name`] in hot paths.
+    pub fn name_str(&self) -> &str {
+        &self.name
+    }
+
     pub fn name(&self) -> String {
-        let path = String::from(self.0.path().to_str().unwrap());
-        path.replace("/.git/", "")
-            .split("/")
-            .last()
-            .unwrap()
-            .to_string()
+        self.name.clone()
     }
 
     pub fn worktrees(&self) -> Vec<super::Worktree> {
         let mut git_worktrees: Vec<super::Worktree> = Vec::new();
-        match self.0.worktrees() {
+        match self.inner.worktrees() {
             Ok(worktrees_arr) => {
                 worktrees_arr.iter().for_each(|worktree| {
                     if let Some(worktree_name) = worktree {
-                        if let Ok(git_worktree) = self.0.find_worktree(worktree_name) {
-                            let branch = self.0.find_branch(worktree_name, git2::BranchType::Local);
+                        if let Ok(git_worktree) = self.inner.find_worktree(worktree_name) {
+                            let branch = self
+                                .inner
+                                .find_branch(worktree_name, git2::BranchType::Local);
 
                             let remote_status = match branch {
-                                Ok(ref b) => remote_status_of_branch(&self.0, b),
+                                Ok(ref b) => remote_status_of_branch(&self.inner, b),
                                 Err(_) => RemoteStatus::NeverPushed,
                             };
 
@@ -408,5 +444,47 @@ mod tests {
                 expected_dir.to_str().unwrap()
             )
         }
+    }
+
+    #[test]
+    fn test_name_of_normal_repository() {
+        let temp_dir = tempdir().expect("Could not create temporary directory");
+        let path = temp_dir.path().join("my-repo");
+        git2::Repository::init(&path).expect("Could not init repository");
+
+        let repo = Repository::from_path(path.to_str().unwrap(), false).expect("Could not open");
+        assert_eq!(repo.name(), "my-repo");
+        assert_eq!(repo.name_str(), "my-repo");
+    }
+
+    #[test]
+    fn test_name_ignores_trailing_separator() {
+        let temp_dir = tempdir().expect("Could not create temporary directory");
+        let path = temp_dir.path().join("my-repo");
+        git2::Repository::init(&path).expect("Could not init repository");
+
+        let with_slash = format!("{}/", path.to_str().unwrap());
+        let repo = Repository::from_path(&with_slash, false).expect("Could not open");
+        assert_eq!(repo.name(), "my-repo");
+    }
+
+    #[test]
+    fn test_name_keeps_dots_in_the_directory_name() {
+        let temp_dir = tempdir().expect("Could not create temporary directory");
+        let path = temp_dir.path().join("my.repo.v2");
+        git2::Repository::init(&path).expect("Could not init repository");
+
+        let repo = Repository::from_path(path.to_str().unwrap(), false).expect("Could not open");
+        assert_eq!(repo.name(), "my.repo.v2");
+    }
+
+    #[test]
+    fn test_name_of_bare_repository() {
+        let temp_dir = tempdir().expect("Could not create temporary directory");
+        let path = temp_dir.path().join("bare-repo.git");
+        git2::Repository::init_bare(&path).expect("Could not init bare repository");
+
+        let repo = Repository::from_path(path.to_str().unwrap(), false).expect("Could not open");
+        assert_eq!(repo.name(), "bare-repo");
     }
 }
