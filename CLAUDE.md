@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 # Shanti
 
-Rust CLI tool for creating and managing git worktrees across multiple repositories. Uses a ratatui TUI, git2 for git operations, and color-eyre for error handling.
+Rust CLI tool for creating and managing git worktrees and jujutsu workspaces across multiple repositories to simplify working in multiple concurrent features in separate spaces and being able to manage these spaces easily.
 
 ## Build & Test
 
@@ -58,9 +58,9 @@ src/
 
 ## Environment Variables
 
-| Variable | CLI flag | Description |
-|---|---|---|
-| `SHANTI_REPOS_DIR` | `--repos-dir` | Directory containing git repositories |
+| Variable               | CLI flag          | Description                           |
+| ---------------------- | ----------------- | ------------------------------------- |
+| `SHANTI_REPOS_DIR`     | `--repos-dir`     | Directory containing git repositories |
 | `SHANTI_WORKTREES_DIR` | `--worktrees-dir` | Directory where worktrees are created |
 
 ## Conventions
@@ -70,4 +70,3 @@ src/
 - SSH agent auth is used for git fetch (`Cred::ssh_key_from_agent`). HTTPS auth is not yet implemented (see TODO in `repository.rs`).
 - New TUI components should implement `draw(&mut self, frame: &mut Frame, area: Rect)` and `handle_key(&mut self, key: KeyEvent) -> EventState`.
 - Tests use `tempfile::tempdir()` for filesystem isolation.
-
