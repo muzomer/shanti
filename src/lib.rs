@@ -6,6 +6,7 @@ mod git;
 mod github;
 pub mod keymap;
 pub mod logs;
+pub mod vcs;
 
 use std::io;
 
