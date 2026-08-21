@@ -1,6 +1,7 @@
 pub mod app;
 mod cli;
 mod components;
+pub mod config;
 mod dirs;
 mod git;
 mod github;
