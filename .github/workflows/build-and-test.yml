@@ -6,8 +6,61 @@ on:
       - main
     tags:
       - "v*.*.*"
+  # Verify a branch *before* it lands, not after it has already been merged.
+  pull_request:
+    branches:
+      - main
+
+# A new push to a PR makes the in-flight run obsolete; cancel it to keep the
+# queue short. Pushes to main and tags are never cancelled — each one is a
+# distinct group and must produce its own artifacts/release.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
 
 jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt
+          # Formatting never compiles the crate, so a cargo cache would only
+          # cost upload/download time.
+          cache: false
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: clippy
+          # Distinct key: this job builds debug artifacts, the build job builds
+          # release ones. Sharing one cache entry would thrash both.
+          cache-key: clippy
+
+      # --all-targets covers tests and examples, not just the library/binary.
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
   build_and_test:
     name: build and test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -26,7 +79,9 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
-          profile: minimal
+          # Caches ~/.cargo (registry, git DB) and ./target, keyed per OS, so
+          # the jobs added above do not double the wall-clock time of CI.
+          cache-key: release
 
       - name: Build
         run: cargo build --verbose --release
@@ -43,9 +98,11 @@ jobs:
 
   release:
     name: release
-    needs: build_and_test
+    needs: [fmt, clippy, build_and_test]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
