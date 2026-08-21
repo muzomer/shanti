@@ -257,7 +257,8 @@ impl ListComponent<Repository> for RepositoriesComponent {
                 Some((r, total))
             })
             .collect();
-        scored.sort_by(|a, b| b.1.cmp(&a.1));
+        // Highest fuzzy score first; sort_by_key keeps the stable order of equal scores.
+        scored.sort_by_key(|&(_, score)| std::cmp::Reverse(score));
         scored.into_iter().map(|(r, _)| r).collect()
     }
 

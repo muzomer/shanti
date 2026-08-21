@@ -382,7 +382,8 @@ impl ListComponent<git::Worktree> for WorktreesComponent {
                 Some((wt, total))
             })
             .collect();
-        scored.sort_by(|a, b| b.1.cmp(&a.1));
+        // Highest fuzzy score first; sort_by_key keeps the stable order of equal scores.
+        scored.sort_by_key(|&(_, score)| std::cmp::Reverse(score));
         scored.into_iter().map(|(wt, _)| wt).collect()
     }
 
