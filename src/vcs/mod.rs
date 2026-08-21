@@ -24,6 +24,7 @@
 //!    in return position on the trait.
 
 mod backend;
+pub mod discover;
 pub mod git;
 pub mod jj;
 mod repo;
@@ -35,6 +36,7 @@ use std::path::Path;
 use color_eyre::eyre;
 
 pub use backend::Backend;
+pub use discover::{backend_at, discover, Discovered};
 pub use repo::{Repo, RepoId};
 pub use space::Space;
 pub use status::{JjLocal, LocalState, RemoteState, SpaceStatus, StatusGlyph, Tone};
