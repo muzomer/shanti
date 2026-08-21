@@ -24,6 +24,7 @@
 //!    in return position on the trait.
 
 mod backend;
+pub mod git;
 pub mod jj;
 mod repo;
 mod space;

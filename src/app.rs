@@ -10,8 +10,9 @@ use crate::{
         Action, ConfirmComponent, CreateWorktreeComponent, EventState, HelpComponent, HelpEntry,
         PrWorktreeComponent, RepositoriesComponent, SelectDirectoryComponent, WorktreesComponent,
     },
-    git, github,
+    github,
     keymap::{self, InputMode},
+    vcs::git,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -334,7 +335,7 @@ impl App {
                     } else {
                         self.repositories_component
                             .selected_repository()
-                            .map(|r| r.resolve_base_branch(&name))
+                            .map(|r| r.resolve_base(&name))
                     };
                 }
                 result
@@ -452,7 +453,7 @@ impl App {
         }
 
         let repo_path = format!("{}/{}", repos_dir, pr_url.repo);
-        match git::Repository::from_path(&repo_path, false) {
+        match git::GitBackend::from_path(&repo_path, false) {
             Ok(repo) => {
                 self.repositories_component.add_repository(repo);
                 self.repositories_component
@@ -533,7 +534,7 @@ impl App {
 
             let (repo_name, base_branch_hint) =
                 if let Some(r) = self.repositories_component.selected_repository() {
-                    (r.name(), Some(r.resolve_base_branch(&branch)))
+                    (r.name(), Some(r.resolve_base(&branch)))
                 } else {
                     (String::new(), None)
                 };

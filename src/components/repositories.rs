@@ -4,7 +4,7 @@ use nucleo_matcher::{
 };
 
 use super::list::ItemOrder;
-use crate::git::Repository;
+use crate::vcs::git::GitBackend;
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{
@@ -27,7 +27,7 @@ use super::{
 use crate::keymap::InputMode;
 
 pub struct RepositoriesComponent {
-    repositories: Vec<Repository>,
+    repositories: Vec<GitBackend>,
     filter: FilterComponent,
     state: ListState,
     selected_index: Option<usize>,
@@ -35,7 +35,7 @@ pub struct RepositoriesComponent {
 }
 
 impl RepositoriesComponent {
-    pub fn new(repositories: Vec<Repository>) -> Self {
+    pub fn new(repositories: Vec<GitBackend>) -> Self {
         Self {
             repositories,
             filter: FilterComponent::new(),
@@ -191,11 +191,11 @@ impl RepositoriesComponent {
         }
     }
 
-    pub fn add_repository(&mut self, repo: Repository) {
+    pub fn add_repository(&mut self, repo: GitBackend) {
         self.repositories.push(repo);
     }
 
-    pub fn selected_repository(&mut self) -> Option<&Repository> {
+    pub fn selected_repository(&mut self) -> Option<&GitBackend> {
         match self.selected_index {
             Some(index) => {
                 let filtered_repositories = self.filtered_items();
@@ -219,11 +219,11 @@ fn repos_keybinding_hint() -> Line<'static> {
     .right_aligned()
 }
 
-impl ListComponent<Repository> for RepositoriesComponent {
-    fn filtered_items(&mut self) -> Vec<&Repository> {
+impl ListComponent<GitBackend> for RepositoriesComponent {
+    fn filtered_items(&mut self) -> Vec<&GitBackend> {
         let query = self.filter.value.as_str();
         if query.is_empty() {
-            let mut items: Vec<&Repository> = self.repositories.iter().collect();
+            let mut items: Vec<&GitBackend> = self.repositories.iter().collect();
             items.sort_by_key(|a| a.name());
             return items;
         }
@@ -242,7 +242,7 @@ impl ListComponent<Repository> for RepositoriesComponent {
             })
             .collect();
         let mut buf = Vec::new();
-        let mut scored: Vec<(&Repository, u32)> = self
+        let mut scored: Vec<(&GitBackend, u32)> = self
             .repositories
             .iter()
             .filter_map(|r| {

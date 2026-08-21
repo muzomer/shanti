@@ -1,4 +1,4 @@
-use crate::git::{self, RemoteStatus};
+use crate::vcs::git::{self, RemoteStatus};
 use color_eyre::eyre;
 use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
