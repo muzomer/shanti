@@ -6,14 +6,17 @@
 //! therefore means adding a `Modal` implementation, not another field and
 //! another match arm on `App`.
 
+use color_eyre::eyre::{self, eyre};
 use ratatui::{
     layout::{Constraint, Flex, Layout, Rect},
     Frame,
 };
 
-use crate::{cli, keymap::InputMode};
+use crate::{cli, keymap::InputMode, vcs};
 
-use super::{Action, EventState, HelpEntry, RepositoriesComponent, WorktreesComponent};
+use super::{
+    worktrees::SpaceEntry, Action, EventState, HelpEntry, RepositoriesComponent, WorktreesComponent,
+};
 
 /// The state that outlives any single popup, lent to a modal while it runs.
 ///
@@ -23,6 +26,27 @@ pub struct AppContext<'a> {
     pub worktrees: &'a mut WorktreesComponent,
     pub repositories: &'a mut RepositoriesComponent,
     pub args: &'a cli::Args,
+}
+
+impl AppContext<'_> {
+    /// Creates a space named `name` in the selected repository and shows it.
+    ///
+    /// Lives on the context because two flows need it — the name prompt and the
+    /// PR flow — and both must apply the same layout policy and go through the
+    /// same backend. Reporting is left to the caller: only it knows whether
+    /// success is worth a message of its own.
+    pub fn create_space(&mut self, name: &str) -> eyre::Result<()> {
+        let repo = self
+            .repositories
+            .selected_repository()
+            .ok_or_else(|| eyre!("no repository is selected"))?;
+        let repo_name = repo.repo().name.clone();
+        let dest = vcs::space_dest(&self.args.worktrees_dir, &repo_name, name);
+        let space = repo.create_space(name, &dest)?;
+
+        self.worktrees.add(SpaceEntry { repo_name, space });
+        Ok(())
+    }
 }
 
 /// Work a modal defers to whoever confirms it. The confirming modal is generic;

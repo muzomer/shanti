@@ -17,7 +17,7 @@ use super::{
 use crate::{
     github::{self, PrFetcher},
     keymap::InputMode,
-    vcs::git::GitBackend,
+    vcs,
 };
 
 pub struct PrWorktreeComponent {
@@ -250,8 +250,11 @@ fn clone_into(
         return ModalFlow::Close;
     }
 
-    let repo_path = format!("{}/{}", repos_dir, pr_url.repo);
-    match GitBackend::from_path(&repo_path, false) {
+    let repo_path = std::path::PathBuf::from(&repos_dir).join(&pr_url.repo);
+    // Opened by layout rather than as "a git repo we just cloned": the clone may
+    // land somewhere that is already colocated with jj, and one rule for picking
+    // a backend is the whole point of the seam.
+    match vcs::open_at(&repo_path, false) {
         Ok(repo) => {
             ctx.repositories.add_repository(repo);
             ctx.repositories.select_repository_by_name(&pr_url.repo);
@@ -281,20 +284,15 @@ fn open_worktree_for_pr(ctx: &mut AppContext, pr_info: github::PrInfo, auto: boo
     let merged_warning = || "Warning: PR is merged, branch may be deleted on remote".to_string();
 
     if auto {
-        if let Some(repo) = ctx.repositories.selected_repository() {
-            match repo.create_new_worktree(&branch, &ctx.args.worktrees_dir) {
-                Ok(worktree) => {
-                    ctx.worktrees.last_error = pr_info.is_merged.then(merged_warning);
-                    ctx.worktrees.add(worktree);
-                }
-                Err(e) => ctx.worktrees.last_error = Some(format!("{:#}", e)),
-            }
+        match ctx.create_space(&branch) {
+            Ok(()) => ctx.worktrees.last_error = pr_info.is_merged.then(merged_warning),
+            Err(e) => ctx.worktrees.last_error = Some(format!("{:#}", e)),
         }
         return ModalFlow::Close;
     }
 
     let (repo_name, base_branch_hint) = match ctx.repositories.selected_repository() {
-        Some(repo) => (repo.name(), Some(repo.resolve_base(&branch))),
+        Some(repo) => (repo.repo().name.clone(), Some(repo.resolve_base(&branch))),
         None => (String::new(), None),
     };
 

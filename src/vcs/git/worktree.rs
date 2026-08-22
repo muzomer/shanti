@@ -1,52 +1,14 @@
-//! A git worktree, as the UI still sees it today.
+//! Removing a git worktree, in the order that keeps its branch reachable.
 //!
-//! [`Worktree`] is the pre-[`Space`](crate::vcs::Space) representation: it keeps
-//! a live `git2::Worktree` handle, which is exactly what the domain model
-//! forbids. It survives until the UI is ported to `Space` (shanti-12z.6); new
-//! code should go through [`GitBackend`](super::GitBackend) instead.
+//! Nothing here is part of shanti's domain model: the only caller is
+//! [`GitBackend::delete_space`](super::GitBackend), which speaks
+//! [`Space`](crate::vcs::Space) on both sides of it.
 
 use color_eyre::eyre;
 use color_eyre::eyre::WrapErr;
 use git2::Repository;
 use std::fs;
 use tracing::debug;
-
-#[derive(Clone, Copy)]
-pub enum RemoteStatus {
-    /// Upstream is configured and the remote tracking ref exists.
-    Exists,
-    /// Upstream was configured but the remote tracking ref is gone (merged/deleted).
-    Gone,
-    /// No upstream has ever been configured (never pushed).
-    NeverPushed,
-}
-
-pub struct Worktree {
-    pub git_worktree: git2::Worktree,
-    pub remote_status: RemoteStatus,
-    pub is_dirty: bool,
-}
-impl Worktree {
-    pub fn path(&self) -> &str {
-        self.git_worktree
-            .path()
-            .to_str()
-            .expect("Could not get worktree path")
-    }
-
-    pub fn name(&self) -> &str {
-        self.git_worktree
-            .name()
-            .expect("Could not get worktree name")
-    }
-}
-
-pub fn delete_worktree(worktree: &Worktree) -> eyre::Result<()> {
-    // The UI still hands us a bare worktree, with no handle on the repository it
-    // belongs to, so `remove_worktree` has to recover one through the worktree
-    // itself. Goes away once the UI speaks `Space` and calls `delete_space`.
-    remove_worktree(None, &worktree.git_worktree, worktree.name())
-}
 
 /// Remove `git_worktree`: its registration, then its branch, then its directory.
 ///
@@ -58,16 +20,14 @@ pub fn delete_worktree(worktree: &Worktree) -> eyre::Result<()> {
 /// — destroyed the very state the branch lookup needs, which is what made branch
 /// deletion look unreliable enough to be downgraded to a debug log.
 ///
-/// `parent` is the repository owning the worktree, when the caller has one open.
-/// It matters only when the working directory was already removed by hand: the
-/// branch is otherwise resolved, and deleted, through the worktree itself.
+/// `parent` is the repository the worktree belongs to. It is what makes the
+/// branch reachable even when the working directory was already removed by hand;
+/// the caller is the backend, which always has it open.
 ///
-/// Shared by the legacy [`delete_worktree`] and by
-/// [`GitBackend::delete_space`](super::GitBackend), so the two can never drift
-/// apart while both exist. `name` is passed in because it is only readable from
-/// the handle while the worktree is still registered.
+/// `name` is passed in because it is only readable from the handle while the
+/// worktree is still registered.
 pub(super) fn remove_worktree(
-    parent: Option<&Repository>,
+    parent: &Repository,
     git_worktree: &git2::Worktree,
     name: &str,
 ) -> eyre::Result<()> {
@@ -101,16 +61,12 @@ pub(super) fn remove_worktree(
 
     // With the registration gone, nothing has the branch checked out any more,
     // so this is an ordinary reference delete rather than a best-effort attempt.
-    // Prefer the caller's handle: it is the only one open when the working
-    // directory was already missing above.
-    match (parent.or(from_worktree.as_ref()), branch_ref) {
-        (Some(repo), Some(refname)) => delete_branch(repo, &refname, name)?,
-        // Detached HEAD: there is no branch of ours to delete.
-        (Some(_), None) => {}
-        (None, _) => debug!(
-            "No repository handle for worktree '{}'; leaving its branch in place",
-            name
-        ),
+    // It goes through the caller's handle: the worktree's own is unusable once
+    // the working directory is missing, which is exactly the case that used to
+    // leave orphaned branches behind. A detached worktree has no branch of ours
+    // to delete, which is the `None` this skips.
+    if let Some(refname) = branch_ref {
+        delete_branch(parent, &refname, name)?;
     }
 
     let worktree_path = git_worktree.path();
@@ -172,7 +128,7 @@ mod tests {
     use std::path::Path;
 
     /// A repository with one commit and a worktree named `feature`.
-    fn repo_with_worktree(base: &Path) -> (Repository, Worktree) {
+    fn repo_with_worktree(base: &Path) -> (Repository, git2::Worktree) {
         let repo = Repository::init(base.join("repo")).expect("Could not init repository");
         let signature =
             git2::Signature::now("shanti", "shanti@example.com").expect("Could not sign");
@@ -190,12 +146,7 @@ mod tests {
         let git_worktree = repo
             .worktree("feature", &spaces.join("feature"), None)
             .expect("Could not create worktree");
-        let worktree = Worktree {
-            git_worktree,
-            remote_status: RemoteStatus::NeverPushed,
-            is_dirty: false,
-        };
-        (repo, worktree)
+        (repo, git_worktree)
     }
 
     fn has_branch(repo: &Repository, name: &str) -> bool {
@@ -217,9 +168,9 @@ mod tests {
     fn test_delete_removes_registration_branch_and_directory() {
         let temp_dir = tempfile::tempdir().expect("Could not create temporary directory");
         let (repo, worktree) = repo_with_worktree(temp_dir.path());
-        let path = worktree.git_worktree.path().to_path_buf();
+        let path = worktree.path().to_path_buf();
 
-        delete_worktree(&worktree).expect("Deleting the worktree should succeed");
+        remove_worktree(&repo, &worktree, "feature").expect("Deleting the worktree should succeed");
 
         assert!(worktree_names(&repo).is_empty(), "registration still there");
         assert!(!has_branch(&repo, "feature"), "branch still there");
@@ -231,12 +182,11 @@ mod tests {
     fn test_delete_cleans_up_when_the_directory_is_already_gone() {
         let temp_dir = tempfile::tempdir().expect("Could not create temporary directory");
         let (repo, worktree) = repo_with_worktree(temp_dir.path());
-        fs::remove_dir_all(worktree.git_worktree.path()).expect("Could not remove directory");
+        fs::remove_dir_all(worktree.path()).expect("Could not remove directory");
 
         // The parent handle is what lets the branch be found without the
-        // worktree; this is the `delete_space` case.
-        remove_worktree(Some(&repo), &worktree.git_worktree, "feature")
-            .expect("Deleting the worktree should succeed");
+        // worktree.
+        remove_worktree(&repo, &worktree, "feature").expect("Deleting the worktree should succeed");
 
         assert!(worktree_names(&repo).is_empty(), "registration still there");
         assert!(!has_branch(&repo, "feature"), "branch still there");
@@ -253,8 +203,7 @@ mod tests {
             .delete()
             .expect("Could not delete branch");
 
-        remove_worktree(Some(&repo), &worktree.git_worktree, "feature")
-            .expect("Deleting the worktree should succeed");
+        remove_worktree(&repo, &worktree, "feature").expect("Deleting the worktree should succeed");
 
         assert!(worktree_names(&repo).is_empty(), "registration still there");
     }

@@ -3,31 +3,44 @@
 use color_eyre::eyre;
 use color_eyre::eyre::WrapErr;
 use git2::{Cred, RemoteCallbacks};
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{fs, path::Path};
 use tracing::{debug, error};
 
-use crate::vcs::{Backend, LocalState, RemoteState, Repo, Space, SpaceStatus, Vcs};
+use crate::vcs::{Backend, RemoteState, Repo, Space, SpaceStatus, Vcs};
 
 use super::worktree::remove_worktree;
-use super::{RemoteStatus, Worktree};
 
-fn remote_status_of_branch(repo: &git2::Repository, branch: &git2::Branch) -> RemoteStatus {
-    let refname = match branch.get().name() {
-        Some(n) => n,
-        None => return RemoteStatus::NeverPushed,
+/// How `branch` relates to its upstream, counts included.
+///
+/// The counts are what let the renderer distinguish "ahead", "behind" and
+/// "diverged" instead of collapsing all three onto one "has an upstream" tick,
+/// and they are the git half of the vocabulary jj already speaks.
+fn remote_state_of_branch(repo: &git2::Repository, branch: &git2::Branch) -> RemoteState {
+    let Some(refname) = branch.get().name() else {
+        return RemoteState::Untracked;
     };
-    match repo.branch_upstream_name(refname) {
-        Err(_) => RemoteStatus::NeverPushed,
-        Ok(_) => {
-            if branch.upstream().is_ok() {
-                RemoteStatus::Exists
-            } else {
-                RemoteStatus::Gone
-            }
-        }
+    if repo.branch_upstream_name(refname).is_err() {
+        return RemoteState::Untracked;
+    }
+    // Configured, but the tracking ref itself has gone (merged or deleted).
+    let Ok(upstream) = branch.upstream() else {
+        return RemoteState::Gone;
+    };
+
+    let counts = branch
+        .get()
+        .target()
+        .zip(upstream.get().target())
+        .and_then(|(local, remote)| repo.graph_ahead_behind(local, remote).ok());
+    match counts {
+        Some((ahead, behind)) => RemoteState::Tracked {
+            ahead: ahead as u32,
+            behind: behind as u32,
+        },
+        // The upstream exists but the walk failed (a corrupt or partial object
+        // store). "Unknown" says so; "in sync" would be a guess dressed up as a
+        // fact.
+        None => RemoteState::Unknown,
     }
 }
 
@@ -172,7 +185,7 @@ impl GitBackend {
     ///
     /// The base is resolved in three steps: a remote branch of the same name, the
     /// repository's default branch, and finally HEAD (by letting git pick).
-    fn add_worktree(&self, worktree_name: &str, dest: &Path) -> eyre::Result<Worktree> {
+    fn add_worktree(&self, worktree_name: &str, dest: &Path) -> eyre::Result<Space> {
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)
                 .wrap_err_with(|| format!("Could not create worktrees directory {:?}", parent))?;
@@ -246,97 +259,24 @@ impl GitBackend {
                 )
             })?;
 
-        let remote_status = remote_status_of_branch(&self.inner, &branch);
-        Ok(Worktree {
-            git_worktree: created_worktree,
-            remote_status,
-            is_dirty: false,
-        })
-    }
-
-    /// Where a space named `name` lives under `worktrees_dir`.
-    ///
-    /// Layout policy that [`Vcs::create_space`] deliberately leaves to the
-    /// caller; it stays here only while the UI still calls
-    /// [`GitBackend::create_new_worktree`].
-    fn worktree_dest(&self, worktrees_dir: &str, name: &str) -> PathBuf {
-        PathBuf::from(worktrees_dir)
-            .join(self.name_str())
-            .join(name)
-    }
-
-    /// Legacy entry point kept for the UI, which still speaks in worktrees.
-    /// Replaced by [`Vcs::create_space`] in shanti-12z.6.
-    pub fn create_new_worktree(
-        &self,
-        worktree_name: &str,
-        worktrees_dir: &str,
-    ) -> eyre::Result<Worktree> {
-        let dest = self.worktree_dest(worktrees_dir, worktree_name);
-        self.add_worktree(worktree_name, &dest)
-    }
-
-    /// Legacy listing kept for the UI. Replaced by [`Vcs::spaces`] in shanti-12z.6.
-    pub fn git_worktrees(&self) -> Vec<Worktree> {
-        let mut git_worktrees: Vec<Worktree> = Vec::new();
-        match self.inner.worktrees() {
-            Ok(worktrees_arr) => {
-                worktrees_arr.iter().for_each(|worktree| {
-                    if let Some(worktree_name) = worktree {
-                        if let Ok(git_worktree) = self.inner.find_worktree(worktree_name) {
-                            let branch = self
-                                .inner
-                                .find_branch(worktree_name, git2::BranchType::Local);
-
-                            let remote_status = match branch {
-                                Ok(ref b) => remote_status_of_branch(&self.inner, b),
-                                Err(_) => RemoteStatus::NeverPushed,
-                            };
-
-                            let worktree_path =
-                                git_worktree.path().to_str().unwrap_or("").to_string();
-                            let is_dirty = is_worktree_dirty(&worktree_path);
-
-                            git_worktrees.push(Worktree {
-                                git_worktree,
-                                remote_status,
-                                is_dirty,
-                            });
-                        }
-                    }
-                });
-            }
-            Err(error) => {
-                error!("Could not list the worktrees for repository {}", error);
-            }
-        };
-        git_worktrees
+        Ok(self.space_of(worktree_name, created_worktree.path(), Some(&branch)))
     }
 
     /// Translate a git worktree into the backend-neutral snapshot.
-    fn space_of(&self, worktree: &Worktree) -> Space {
-        let status = SpaceStatus {
-            remote: match worktree.remote_status {
-                // The legacy `RemoteStatus` carries no ahead/behind counts, so
-                // there is nothing truthful to put here yet. 0/0 renders as the
-                // same "in sync" glyph `Exists` already showed, keeping this a
-                // pure refactor; computing real counts is shanti-12z.6.
-                RemoteStatus::Exists => RemoteState::Tracked {
-                    ahead: 0,
-                    behind: 0,
-                },
-                RemoteStatus::Gone => RemoteState::Gone,
-                RemoteStatus::NeverPushed => RemoteState::Untracked,
-            },
-            local: LocalState::Git {
-                dirty: worktree.is_dirty,
-            },
-        };
+    ///
+    /// `branch` is the local branch the worktree has checked out, when there is
+    /// one; a detached worktree has no upstream to describe, so it reads as
+    /// untracked rather than as an error.
+    fn space_of(&self, name: &str, path: &Path, branch: Option<&git2::Branch>) -> Space {
+        let remote = branch.map_or(RemoteState::Untracked, |branch| {
+            remote_state_of_branch(&self.inner, branch)
+        });
+        let dirty = is_worktree_dirty(&path.to_string_lossy());
         Space::new(
             self.repo.id.clone(),
-            worktree.name(),
-            worktree.path(),
-            status,
+            name,
+            path,
+            SpaceStatus::git(remote, dirty),
         )
     }
 }
@@ -346,19 +286,36 @@ impl Vcs for GitBackend {
         &self.repo
     }
 
+    /// Only *linked* worktrees are spaces. The repository's own working copy is
+    /// not one — shanti did not create it, and `git worktree list`'s inclusion
+    /// of it is a listing convenience, not a statement that it is disposable.
     fn spaces(&self) -> eyre::Result<Vec<Space>> {
-        // Listing never fails as a whole: a repository whose worktrees cannot be
-        // read logs and yields none, which is what the UI has always shown.
-        Ok(self
-            .git_worktrees()
+        let names = self
+            .inner
+            .worktrees()
+            .wrap_err_with(|| format!("Could not list the worktrees of {}", self.repo.name))?;
+
+        Ok(names
             .iter()
-            .map(|worktree| self.space_of(worktree))
+            .flatten()
+            .filter_map(|name| {
+                let worktree = match self.inner.find_worktree(name) {
+                    Ok(worktree) => worktree,
+                    Err(error) => {
+                        // A registration we cannot open is one broken space, not
+                        // a broken repository; the rest still list.
+                        error!("Could not open the worktree {}: {}", name, error);
+                        return None;
+                    }
+                };
+                let branch = self.inner.find_branch(name, git2::BranchType::Local).ok();
+                Some(self.space_of(name, worktree.path(), branch.as_ref()))
+            })
             .collect())
     }
 
     fn create_space(&self, name: &str, dest: &Path) -> eyre::Result<Space> {
-        let worktree = self.add_worktree(name, dest)?;
-        Ok(self.space_of(&worktree))
+        self.add_worktree(name, dest)
     }
 
     fn delete_space(&self, space: &Space) -> eyre::Result<()> {
@@ -366,9 +323,7 @@ impl Vcs for GitBackend {
             .inner
             .find_worktree(&space.name)
             .wrap_err_with(|| format!("Could not find worktree '{}'", space.name))?;
-        // Unlike the legacy path, this one already holds the repository, so the
-        // branch can still be cleaned up when the space's directory is gone.
-        remove_worktree(Some(&self.inner), &worktree, &space.name)
+        remove_worktree(&self.inner, &worktree, &space.name)
     }
 
     fn fetch(&self) -> eyre::Result<()> {

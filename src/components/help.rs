@@ -135,10 +135,20 @@ pub fn worktrees_bindings() -> Vec<HelpEntry> {
         HelpEntry::Binding("?", "Show this help"),
         HelpEntry::Binding("q / Ctrl+C", "Quit"),
         HelpEntry::Blank,
-        HelpEntry::Section("Worktree State"),
-        HelpEntry::Binding("✔", "Remote branch exists"),
-        HelpEntry::Binding("✘", "Merged / deleted remotely"),
-        HelpEntry::Binding("⬆", "Never pushed to remote"),
-        HelpEntry::Binding("*", "Dirty working tree"),
+        // Two slots per row: the first says how the space stands to its
+        // upstream, the second what its own working state is. The wording
+        // mirrors `SpaceStatus::glyphs`, which is what actually draws them.
+        HelpEntry::Section("Space State — upstream"),
+        HelpEntry::Binding("✔", "In sync with upstream"),
+        HelpEntry::Binding("↑ / ↓ / ↕", "Ahead / behind / diverged"),
+        HelpEntry::Binding("✘", "Upstream is gone (merged or deleted)"),
+        HelpEntry::Binding("⬆", "Never pushed"),
+        HelpEntry::Blank,
+        HelpEntry::Section("Space State — local"),
+        HelpEntry::Binding("*", "Uncommitted changes (git)"),
+        HelpEntry::Binding("!", "Change has conflicts (jj)"),
+        HelpEntry::Binding("≠", "Change is divergent (jj)"),
+        HelpEntry::Binding("∅", "Working copy is empty (jj)"),
+        HelpEntry::Binding("·", "Not checked yet"),
     ]
 }

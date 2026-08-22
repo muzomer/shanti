@@ -1,8 +1,11 @@
+use std::path::{Path, PathBuf};
+
 use crossterm::event::KeyEvent;
 use ratatui::{
     layout::{Constraint, Layout},
     Frame,
 };
+use tracing::debug;
 
 use crate::{
     cli,
@@ -13,7 +16,7 @@ use crate::{
     },
     github,
     keymap::{self, InputMode},
-    vcs::git,
+    vcs::{self, Backend, Discovered},
 };
 
 /// The worktree list plus a stack of modals on top of it.
@@ -39,22 +42,39 @@ pub struct App {
 impl App {
     pub fn new() -> App {
         let args = cli::Args::new();
-        let repositories: Vec<_> = args
-            .repos_dirs
-            .iter()
-            .flat_map(|dir| git::list_repositories(dir, args.run_fetch))
-            .collect();
-        let worktrees = git::worktrees_of_repositories(&repositories);
+        let found = Self::discover_repositories(&args);
+        let repositories = RepositoriesComponent::new(vcs::open_backends(&found, args.run_fetch));
+
+        // Spaces are collected through the `Vcs` trait, so a jj repository shows
+        // up here on exactly the same terms as a git one.
+        let (spaces, failed) = repositories.collect_spaces();
+        let mut worktrees_component = WorktreesComponent::new(spaces);
+        worktrees_component.last_error = listing_failure_notice(&failed);
 
         Self {
-            worktrees_component: WorktreesComponent::new(worktrees, args.worktrees_dir.clone()),
-            repositories_component: RepositoriesComponent::new(repositories),
+            worktrees_component,
+            repositories_component: repositories,
             modals: Vec::new(),
             args,
             pr_fetcher: github::live_fetcher(),
             mode: InputMode::Normal,
             selected_path: None,
         }
+    }
+
+    /// Walk every configured repos dir once, skipping the worktrees dir.
+    ///
+    /// The exclusion is what stops a worktrees dir nested inside a repos dir
+    /// from having its spaces rediscovered as repositories in their own right.
+    fn discover_repositories(args: &cli::Args) -> Vec<Discovered> {
+        let excluded = vec![PathBuf::from(&args.worktrees_dir)];
+        args.repos_dirs
+            .iter()
+            .flat_map(|dir| {
+                debug!("Listing repositories in: {}", dir);
+                vcs::discover(Path::new(dir), &excluded)
+            })
+            .collect()
     }
 
     /// Points the PR flow at a different lookup than the live GitHub one.
@@ -216,7 +236,11 @@ impl App {
             }
             Action::DeleteWithConfirmation => {
                 if let Some(path) = self.worktrees_component.selected_worktree_path() {
-                    self.modals.push(Box::new(confirm_delete(path)));
+                    let backend = self
+                        .worktrees_component
+                        .selected_space_backend()
+                        .unwrap_or(Backend::Git);
+                    self.modals.push(Box::new(confirm_delete(backend, path)));
                 }
                 EventState::Consumed
             }
@@ -250,21 +274,44 @@ impl App {
     }
 
     fn delete_selected_worktree(&mut self) {
-        match self.worktrees_component.delete_selected_worktree() {
-            Ok(()) => self.worktrees_component.last_error = None,
-            Err(e) => self.worktrees_component.last_error = Some(format!("{:#}", e)),
+        let Self {
+            worktrees_component,
+            repositories_component,
+            ..
+        } = self;
+        match worktrees_component.delete_selected_space(repositories_component) {
+            Ok(()) => worktrees_component.last_error = None,
+            Err(e) => worktrees_component.last_error = Some(format!("{:#}", e)),
         }
     }
 }
 
+/// Tell the user which repositories could not be asked for their spaces.
+///
+/// A backend method that fails must never be silent: the list would simply be
+/// short, and a missing space reads as shanti having lost it.
+fn listing_failure_notice(failed: &[String]) -> Option<String> {
+    if failed.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Could not list the spaces of {}",
+        failed.join(", ")
+    ))
+}
+
 /// The one confirmation the worktree list itself raises.
-fn confirm_delete(path: String) -> ConfirmComponent {
+///
+/// Worded in the vocabulary of whichever backend owns the space, so a jj user is
+/// not asked about a "worktree" they have never had.
+fn confirm_delete(backend: Backend, path: String) -> ConfirmComponent {
+    let noun = backend.space_noun();
     ConfirmComponent::new(
-        "Delete Worktree".to_string(),
-        "Delete this worktree?".to_string(),
+        format!("Delete {}", noun),
+        format!("Delete this {}?", noun),
         path,
         Box::new(|ctx| {
-            match ctx.worktrees.delete_selected_worktree() {
+            match ctx.worktrees.delete_selected_space(ctx.repositories) {
                 Ok(()) => ctx.worktrees.last_error = None,
                 Err(e) => ctx.worktrees.last_error = Some(format!("{:#}", e)),
             }

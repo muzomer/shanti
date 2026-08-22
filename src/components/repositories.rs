@@ -4,7 +4,7 @@ use nucleo_matcher::{
 };
 
 use super::list::ItemOrder;
-use crate::vcs::git::GitBackend;
+use crate::vcs::{BoxedVcs, Space, Vcs};
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{
@@ -24,12 +24,19 @@ use super::{
     create_worktree::CreateWorktreeComponent,
     filter::FilterComponent,
     list::{Focus, ListComponent},
+    worktrees::SpaceEntry,
     Action, AppContext, EventState, HelpEntry, Modal, ModalFlow, SELECTED_STYLE,
 };
 use crate::keymap::InputMode;
+use tracing::error;
 
+/// The repositories shanti found, each behind the backend that drives it.
+///
+/// Storing [`BoxedVcs`] rather than a concrete backend is what makes the list
+/// heterogeneous: git and jj repositories sit side by side and nothing above
+/// this type asks which is which.
 pub struct RepositoriesComponent {
-    repositories: Vec<GitBackend>,
+    repositories: Vec<BoxedVcs>,
     filter: FilterComponent,
     state: ListState,
     selected_index: Option<usize>,
@@ -37,7 +44,7 @@ pub struct RepositoriesComponent {
 }
 
 impl RepositoriesComponent {
-    pub fn new(repositories: Vec<GitBackend>) -> Self {
+    pub fn new(repositories: Vec<BoxedVcs>) -> Self {
         Self {
             repositories,
             filter: FilterComponent::new(),
@@ -111,7 +118,7 @@ impl RepositoriesComponent {
         let items: Vec<ListItem> = self
             .filtered_items()
             .iter()
-            .map(|r| ListItem::new(r.name()))
+            .map(|r| ListItem::new(r.repo().name.clone()))
             .collect();
         let list = List::new(items)
             .style(Style::new().white())
@@ -183,7 +190,10 @@ impl RepositoriesComponent {
     /// Returns `true` if found, `false` otherwise.
     pub fn select_repository_by_name(&mut self, name: &str) -> bool {
         self.filter.clear();
-        let index = self.filtered_items().iter().position(|r| r.name() == name);
+        let index = self
+            .filtered_items()
+            .iter()
+            .position(|r| r.repo().name == name);
         if let Some(idx) = index {
             self.selected_index = Some(idx);
             self.state.select(Some(idx));
@@ -193,21 +203,53 @@ impl RepositoriesComponent {
         }
     }
 
-    pub fn add_repository(&mut self, repo: GitBackend) {
+    pub fn add_repository(&mut self, repo: BoxedVcs) {
         self.repositories.push(repo);
     }
 
-    pub fn selected_repository(&mut self) -> Option<&GitBackend> {
-        match self.selected_index {
-            Some(index) => {
-                let filtered_repositories = self.filtered_items();
-                match filtered_repositories.get(index) {
-                    Some(selected_repository) => Some(selected_repository),
-                    None => None,
+    pub fn selected_repository(&mut self) -> Option<&dyn Vcs> {
+        let index = self.selected_index?;
+        // Copy the borrow out of the temporary Vec: its elements already point
+        // into `self`, so the `&dyn Vcs` outlives the filtered list itself.
+        let selected: &BoxedVcs = *self.filtered_items().get(index)?;
+        Some(selected.as_ref())
+    }
+
+    /// The backend that owns `space`, if it is still open.
+    ///
+    /// A [`Space`] is an inert snapshot; every action on one — deleting it above
+    /// all — has to go back through the repository it came from, and this list is
+    /// the only place those live.
+    pub fn backend_for(&self, space: &Space) -> Option<&dyn Vcs> {
+        self.repositories
+            .iter()
+            .find(|backend| backend.repo().id == space.repo)
+            .map(|backend| backend.as_ref())
+    }
+
+    /// Every space of every repository, and the names of the repositories that
+    /// could not be asked.
+    ///
+    /// Listing is per repository and each one can fail on its own (an unreadable
+    /// worktree registration, a `jj` that will not run), so a failure is reported
+    /// alongside the spaces that *did* list rather than replacing them.
+    pub fn collect_spaces(&self) -> (Vec<SpaceEntry>, Vec<String>) {
+        let mut spaces = Vec::new();
+        let mut failed = Vec::new();
+        for backend in &self.repositories {
+            let repo_name = &backend.repo().name;
+            match backend.spaces() {
+                Ok(found) => spaces.extend(found.into_iter().map(|space| SpaceEntry {
+                    repo_name: repo_name.clone(),
+                    space,
+                })),
+                Err(error) => {
+                    error!(repo = %repo_name, %error, "could not list the spaces");
+                    failed.push(repo_name.clone());
                 }
             }
-            None => None,
         }
+        (spaces, failed)
     }
 }
 
@@ -221,12 +263,12 @@ fn repos_keybinding_hint() -> Line<'static> {
     .right_aligned()
 }
 
-impl ListComponent<GitBackend> for RepositoriesComponent {
-    fn filtered_items(&mut self) -> Vec<&GitBackend> {
+impl ListComponent<BoxedVcs> for RepositoriesComponent {
+    fn filtered_items(&mut self) -> Vec<&BoxedVcs> {
         let query = self.filter.value.as_str();
         if query.is_empty() {
-            let mut items: Vec<&GitBackend> = self.repositories.iter().collect();
-            items.sort_by_key(|a| a.name());
+            let mut items: Vec<&BoxedVcs> = self.repositories.iter().collect();
+            items.sort_by(|a, b| a.repo().name.cmp(&b.repo().name));
             return items;
         }
         let mut matcher = Matcher::new(Config::DEFAULT);
@@ -244,14 +286,14 @@ impl ListComponent<GitBackend> for RepositoriesComponent {
             })
             .collect();
         let mut buf = Vec::new();
-        let mut scored: Vec<(&GitBackend, u32)> = self
+        let mut scored: Vec<(&BoxedVcs, u32)> = self
             .repositories
             .iter()
             .filter_map(|r| {
-                let name = r.name();
+                let name = &r.repo().name;
                 let mut total = 0u32;
                 for (pattern, min_score) in &patterns {
-                    match pattern.score(Utf32Str::new(&name, &mut buf), &mut matcher) {
+                    match pattern.score(Utf32Str::new(name, &mut buf), &mut matcher) {
                         Some(s) if s >= *min_score => total += s,
                         _ => return None,
                     }
@@ -315,7 +357,7 @@ impl Modal for RepositoriesModal {
                 let repo_name = ctx
                     .repositories
                     .selected_repository()
-                    .map(|r| r.name())
+                    .map(|r| r.repo().name.clone())
                     .unwrap_or_default();
                 // Replace, not stack: cancelling the name prompt returns to the
                 // worktree list, it does not re-open the picker.

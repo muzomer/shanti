@@ -1,5 +1,4 @@
-use crate::vcs::git::{self, RemoteStatus};
-use color_eyre::eyre;
+use color_eyre::eyre::{self, eyre};
 use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
     Config, Matcher, Utf32Str,
@@ -18,54 +17,69 @@ use ratatui::{
     Frame,
 };
 
-use super::{filter::FilterComponent, Action, EventState};
+use super::{filter::FilterComponent, Action, EventState, RepositoriesComponent};
 use super::{
     list::{Focus, ItemOrder, ListComponent},
     SELECTED_STYLE,
 };
 use crate::keymap::InputMode;
+use crate::vcs::{Space, Tone};
+
+/// A space, plus the name of the repository it belongs to.
+///
+/// [`Space`] names its repository by an opaque [`RepoId`](crate::vcs::RepoId),
+/// which is exactly right for identity and useless as a label. The backend that
+/// produced the space is the one that knows the human name, so the two are
+/// paired at the moment of collection — rather than having the list reach back
+/// into the repository list every time it draws a row.
+pub struct SpaceEntry {
+    pub repo_name: String,
+    pub space: Space,
+}
+
+impl SpaceEntry {
+    /// The one string this row is drawn from and filtered on, so that what the
+    /// user sees is exactly what they can type at.
+    fn label(&self) -> String {
+        format!("{} / {}", self.repo_name, self.space.name)
+    }
+}
 
 pub struct WorktreesComponent {
-    worktrees: Vec<git::Worktree>,
+    spaces: Vec<SpaceEntry>,
     filter: FilterComponent,
     state: ListState,
     focus: Focus,
     selected_index: Option<usize>,
     pub last_error: Option<String>,
-    worktrees_dir: String,
 }
 
 impl WorktreesComponent {
-    pub fn new(worktrees: Vec<git::Worktree>, worktrees_dir: String) -> WorktreesComponent {
-        let selected_index = if worktrees.is_empty() { None } else { Some(0) };
+    pub fn new(spaces: Vec<SpaceEntry>) -> WorktreesComponent {
+        let selected_index = if spaces.is_empty() { None } else { Some(0) };
         Self {
             filter: FilterComponent::new(),
             state: ListState::default().with_selected(selected_index),
             focus: Focus::Filter,
             selected_index,
-            worktrees_dir: worktrees_dir.trim_end_matches('/').to_string(),
-            worktrees,
+            spaces,
             last_error: None,
         }
     }
 
     pub fn draw(&mut self, f: &mut Frame, rect: Rect, mode: InputMode, is_active: bool) {
-        let worktrees_dir = self.worktrees_dir.clone();
-
         // Collect display data — ends the filtered_items() borrow before we need &self again.
-        let display_data: Vec<(RemoteStatus, bool, String)> = {
+        let display_data: Vec<(Space, String)> = {
             let filtered = self.filtered_items();
             filtered
                 .iter()
-                .map(|wt| (wt.remote_status, wt.is_dirty, wt.path().to_string()))
+                .map(|entry| (entry.space.clone(), entry.label()))
                 .collect()
         };
         let total = display_data.len();
         let items: Vec<ListItem<'static>> = display_data
             .iter()
-            .map(|(remote_status, is_dirty, path)| {
-                worktree_to_list_item(*remote_status, *is_dirty, path, &worktrees_dir)
-            })
+            .map(|(space, label)| space_to_list_item(space, label))
             .collect();
 
         // B: cap current to total so a stale selected_index never shows x > y in (x/y)
@@ -225,10 +239,10 @@ impl WorktreesComponent {
         matches!(self.focus, Focus::Filter)
     }
 
-    /// Clears any active filter, finds the worktree matching the given branch name,
+    /// Clears any active filter, finds the space matching the given branch name,
     /// and selects it. Returns `true` if found, `false` otherwise.
     pub fn select_worktree_by_branch(&mut self, branch: &str) -> bool {
-        let exists = self.worktrees.iter().any(|wt| wt.name() == branch);
+        let exists = self.spaces.iter().any(|entry| entry.space.name == branch);
         if !exists {
             return false;
         }
@@ -236,7 +250,7 @@ impl WorktreesComponent {
         let index = self
             .filtered_items()
             .iter()
-            .position(|wt| wt.name() == branch);
+            .position(|entry| entry.space.name == branch);
         if let Some(idx) = index {
             self.selected_index = Some(idx);
             self.state.select(Some(idx));
@@ -246,26 +260,49 @@ impl WorktreesComponent {
         }
     }
 
-    pub fn add(&mut self, new_worktree: git::Worktree) {
-        let new_worktree_path = new_worktree.path().to_string();
-        self.worktrees.push(new_worktree);
-        let new_worktree_index = self
+    pub fn add(&mut self, entry: SpaceEntry) {
+        let path = entry.space.path.clone();
+        self.spaces.push(entry);
+        let index = self
             .filtered_items()
             .iter()
-            .position(|wt| wt.path().to_string().eq(&new_worktree_path));
+            .position(|entry| entry.space.path == path);
 
-        self.state.select(new_worktree_index);
-        self.selected_index = new_worktree_index;
+        self.state.select(index);
+        self.selected_index = index;
     }
 
-    pub fn delete_selected_worktree(&mut self) -> eyre::Result<()> {
-        if let Some(path) = self.selected_worktree_path() {
-            if let Some(index) = self.worktrees.iter().position(|w| w.path() == path) {
-                let result = git::delete_worktree(&self.worktrees[index]);
-                self.worktrees.remove(index);
-                result?;
-            }
-        }
+    /// Deletes the selected space through the backend that owns it.
+    ///
+    /// The backend comes from the repository list rather than from the space,
+    /// because a [`Space`] is a snapshot with no way to act on itself — which is
+    /// what lets the list hold spaces of both backends side by side.
+    ///
+    /// The row is dropped only when the deletion actually succeeded: a backend
+    /// may refuse (jj will not forget a repository's own working copy), and a
+    /// space that still exists must not vanish from the list.
+    pub fn delete_selected_space(&mut self, repos: &RepositoriesComponent) -> eyre::Result<()> {
+        let Some(path) = self.selected_worktree_path() else {
+            return Ok(());
+        };
+        let Some(index) = self
+            .spaces
+            .iter()
+            .position(|entry| entry.space.path.to_string_lossy() == path)
+        else {
+            return Ok(());
+        };
+
+        let space = &self.spaces[index].space;
+        let backend = repos.backend_for(space).ok_or_else(|| {
+            eyre!(
+                "no open repository for the space {:?}; it cannot be deleted",
+                space.name
+            )
+        })?;
+        backend.delete_space(space)?;
+
+        self.spaces.remove(index);
         Ok(())
     }
 
@@ -273,81 +310,81 @@ impl WorktreesComponent {
         self.selected_index.and_then(|index| {
             self.filtered_items()
                 .get(index)
-                .map(|wt| wt.path().to_string())
+                .map(|entry| entry.space.path.to_string_lossy().into_owned())
+        })
+    }
+
+    /// The backend-neutral status of the selected space, for callers that need
+    /// to word a message in the vocabulary of whatever drives it.
+    pub fn selected_space_backend(&mut self) -> Option<crate::vcs::Backend> {
+        self.selected_index.and_then(|index| {
+            self.filtered_items()
+                .get(index)
+                .map(|entry| entry.space.status.backend())
         })
     }
 }
 
-fn worktree_to_list_item(
-    remote_status: RemoteStatus,
-    is_dirty: bool,
-    path: &str,
-    worktrees_dir: &str,
-) -> ListItem<'static> {
-    let (remote_indicator, indicator_color) = match remote_status {
-        RemoteStatus::Exists => ("✔", GREEN.c400),
-        RemoteStatus::Gone => ("✘", RED.c400),
-        RemoteStatus::NeverPushed => ("⬆", AMBER.c400),
-    };
+/// One row: the two status slots, then `<repo> / <space>`.
+///
+/// The renderer is deliberately dumb about state — it asks the status for its
+/// glyphs and maps tones to colours. Matching on the backend here is what would
+/// force every new jj state to be taught to the UI as well.
+fn space_to_list_item(space: &Space, label: &str) -> ListItem<'static> {
+    let mut spans: Vec<Span<'static>> = space
+        .status
+        .glyphs()
+        .iter()
+        .map(|glyph| {
+            Span::styled(
+                glyph.symbol.to_string(),
+                Style::default()
+                    .fg(tone_color(glyph.tone))
+                    .add_modifier(Modifier::BOLD),
+            )
+        })
+        .collect();
+    spans.push(Span::raw(" "));
 
-    let indicator_span = Span::styled(
-        format!("{} ", remote_indicator),
-        Style::default()
-            .fg(indicator_color)
-            .add_modifier(Modifier::BOLD),
-    );
-
-    let path = path.trim_end_matches('/');
-    let relative = path
-        .strip_prefix(worktrees_dir)
-        .unwrap_or(path)
-        .trim_start_matches('/');
-
-    let line = if let Some(sep) = relative.find('/') {
-        let repo = &relative[..sep];
-        let branch = relative[sep + 1..].trim_end_matches('/');
-        let repo_span = Span::styled(repo.to_string(), Style::default().fg(SLATE.c400));
-        let sep_span = Span::styled(" / ", Style::default().fg(SLATE.c600));
-        let branch_span = Span::styled(
-            branch.to_string(),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        );
-        if is_dirty {
-            let dirty_span = Span::styled(" *", Style::default().fg(AMBER.c400));
-            Line::from(vec![
-                indicator_span,
-                repo_span,
-                sep_span,
-                branch_span,
-                dirty_span,
-            ])
-        } else {
-            Line::from(vec![indicator_span, repo_span, sep_span, branch_span])
+    match label.split_once(" / ") {
+        Some((repo, name)) => {
+            spans.push(Span::styled(
+                repo.to_string(),
+                Style::default().fg(SLATE.c400),
+            ));
+            spans.push(Span::styled(" / ", Style::default().fg(SLATE.c600)));
+            spans.push(Span::styled(
+                name.to_string(),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ));
         }
-    } else {
-        let path_span = Span::from(relative.to_string());
-        if is_dirty {
-            let dirty_span = Span::styled(" *", Style::default().fg(AMBER.c400));
-            Line::from(vec![indicator_span, path_span, dirty_span])
-        } else {
-            Line::from(vec![indicator_span, path_span])
-        }
-    };
+        None => spans.push(Span::from(label.to_string())),
+    }
 
-    ListItem::new(line)
+    ListItem::new(Line::from(spans))
 }
 
-impl ListComponent<git::Worktree> for WorktreesComponent {
-    fn filtered_items(&mut self) -> Vec<&git::Worktree> {
+/// The single match the renderer keeps: five tones, five colours.
+fn tone_color(tone: Tone) -> Color {
+    match tone {
+        Tone::Muted => SLATE.c500,
+        Tone::Ok => GREEN.c400,
+        Tone::Info => BLUE.c400,
+        Tone::Warn => AMBER.c400,
+        Tone::Danger => RED.c400,
+    }
+}
+
+impl ListComponent<SpaceEntry> for WorktreesComponent {
+    fn filtered_items(&mut self) -> Vec<&SpaceEntry> {
         let query = self.filter.value.as_str();
         if query.is_empty() {
-            let mut items: Vec<&git::Worktree> = self.worktrees.iter().collect();
-            items.sort_by(|a, b| a.path().cmp(b.path()));
+            let mut items: Vec<&SpaceEntry> = self.spaces.iter().collect();
+            items.sort_by(|a, b| (&a.repo_name, &a.space.name).cmp(&(&b.repo_name, &b.space.name)));
             return items;
         }
-        let worktrees_dir = self.worktrees_dir.as_str();
         let mut matcher = Matcher::new(Config::DEFAULT);
         // Pair each word with its per-word minimum score threshold.
         // Short words (1-2 chars) have low scores due to gap penalties on
@@ -363,28 +400,24 @@ impl ListComponent<git::Worktree> for WorktreesComponent {
             })
             .collect();
         let mut buf = Vec::new();
-        let mut scored: Vec<(&git::Worktree, u32)> = self
-            .worktrees
+        let mut scored: Vec<(&SpaceEntry, u32)> = self
+            .spaces
             .iter()
-            .filter_map(|wt| {
-                let path = wt.path().trim_end_matches('/');
-                let display = path
-                    .strip_prefix(worktrees_dir)
-                    .unwrap_or(path)
-                    .trim_start_matches('/');
+            .filter_map(|entry| {
+                let label = entry.label();
                 let mut total = 0u32;
                 for (pattern, min_score) in &patterns {
-                    match pattern.score(Utf32Str::new(display, &mut buf), &mut matcher) {
+                    match pattern.score(Utf32Str::new(&label, &mut buf), &mut matcher) {
                         Some(s) if s >= *min_score => total += s,
                         _ => return None,
                     }
                 }
-                Some((wt, total))
+                Some((entry, total))
             })
             .collect();
         // Highest fuzzy score first; sort_by_key keeps the stable order of equal scores.
         scored.sort_by_key(|&(_, score)| std::cmp::Reverse(score));
-        scored.into_iter().map(|(wt, _)| wt).collect()
+        scored.into_iter().map(|(entry, _)| entry).collect()
     }
 
     fn get_state(&mut self) -> &mut ListState {

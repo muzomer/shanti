@@ -31,15 +31,20 @@ mod repo;
 mod space;
 pub mod status;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use color_eyre::eyre;
+use rayon::prelude::*;
+use tracing::{debug, error};
 
 pub use backend::Backend;
 pub use discover::{backend_at, discover, Discovered};
 pub use repo::{Repo, RepoId};
 pub use space::Space;
 pub use status::{JjLocal, LocalState, RemoteState, SpaceStatus, StatusGlyph, Tone};
+
+use git::GitBackend;
+use jj::JjBackend;
 
 /// How a backend is stored and passed around.
 ///
@@ -56,8 +61,10 @@ pub type BoxedVcs = Box<dyn Vcs>;
 /// to be faked by the jj adapter.
 ///
 /// All methods are blocking. Callers that must stay responsive are expected to
-/// run them off the render thread, which the owned return types allow.
-pub trait Vcs {
+/// run them off the render thread, which the owned return types allow — hence
+/// the `Send` bound: opening repositories is already done in parallel, and the
+/// background refresh of Track D will want to own a backend on a worker thread.
+pub trait Vcs: Send {
     /// The repository this instance drives.
     ///
     /// Backends are per-repo, so the UI can recover the identity and paths of
@@ -110,6 +117,83 @@ pub trait Vcs {
     fn resolve_base(&self, name: &str) -> String;
 }
 
+/// Where a space named `space_name` of repository `repo_name` lives on disk.
+///
+/// The one place that knows shanti's layout. [`Vcs::create_space`] deliberately
+/// takes the destination rather than deriving it, so the policy is not
+/// re-implemented — and allowed to drift — once per backend.
+pub fn space_dest(worktrees_dir: &str, repo_name: &str, space_name: &str) -> PathBuf {
+    PathBuf::from(worktrees_dir)
+        .join(repo_name)
+        .join(space_name)
+}
+
+/// Open every repository a walk found, in parallel, as the backend that owns it.
+///
+/// Opening is the expensive half of listing — it reads refs, spawns `jj`, and
+/// optionally fetches — hence `par_iter`. A repository that will not open is
+/// logged and skipped rather than taking the whole list down with it: one broken
+/// checkout in a repos dir must not cost the user every other one.
+pub fn open_backends(found: &[Discovered], run_fetch: bool) -> Vec<BoxedVcs> {
+    found
+        .par_iter()
+        .filter_map(|found| match open(found, run_fetch) {
+            Ok(backend) => Some(backend),
+            Err(error) => {
+                error!(path = %found.path.display(), %error, "could not open the repository");
+                None
+            }
+        })
+        .collect()
+}
+
+/// Open the repository at `path`, letting the layout on disk decide which
+/// backend drives it.
+///
+/// The entry point for a repository that appears *after* the initial walk — a
+/// fresh clone, say — so that it is bound to a backend by the same rule.
+pub fn open_at(path: &Path, run_fetch: bool) -> eyre::Result<BoxedVcs> {
+    let backend = backend_at(path)
+        .ok_or_else(|| eyre::eyre!("{} is not a repository shanti can drive", path.display()))?;
+    open(
+        &Discovered {
+            path: path.to_path_buf(),
+            backend,
+        },
+        run_fetch,
+    )
+}
+
+/// Bind one find to its backend.
+///
+/// This match is the *only* place that turns a [`Backend`] tag into an
+/// implementation; everything above it holds a [`BoxedVcs`] and never asks which
+/// one it got. A colocated repository (`.git` *and* `.jj`) therefore reaches jj,
+/// because the walk said so — driving it with raw git behind jj's back would
+/// leave jj's view of the working copy stale.
+fn open(found: &Discovered, run_fetch: bool) -> eyre::Result<BoxedVcs> {
+    match found.backend {
+        Backend::Git => {
+            // `from_path` fetches for us, tolerating failure, so there is
+            // nothing extra to do for git here.
+            let backend = GitBackend::from_path(&found.path.display().to_string(), run_fetch)?;
+            Ok(Box::new(backend))
+        }
+        Backend::Jj => {
+            let backend = JjBackend::discover(&found.path)?;
+            if run_fetch {
+                // A backend that cannot fetch — jj's, until shanti-nhe.6 — is
+                // still worth listing: the cost is a stale view of the remotes,
+                // exactly what a failed git fetch costs too.
+                if let Err(error) = backend.fetch() {
+                    debug!(repo = %backend.repo().name, %error, "could not fetch");
+                }
+            }
+            Ok(Box::new(backend))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,5 +210,29 @@ mod tests {
     fn repo_id_is_derived_from_path() {
         let repo = Repo::new("shanti", "/tmp/repos/shanti", Backend::Git);
         assert_eq!(repo.id, RepoId::from_path("/tmp/repos/shanti"));
+    }
+
+    /// The layout policy is what keeps `create_space`'s `dest` argument honest.
+    #[test]
+    fn space_dest_nests_the_space_under_its_repository() {
+        assert_eq!(
+            space_dest("/tmp/spaces", "shanti", "feature"),
+            Path::new("/tmp/spaces/shanti/feature")
+        );
+    }
+
+    /// A jj-native find must never be handed to git2, which could only fail to
+    /// open it — and a *colocated* one must not be either, however happily git
+    /// would open that one.
+    #[test]
+    fn opening_a_find_honours_the_backend_the_walk_chose() {
+        let found = Discovered {
+            path: PathBuf::from("/nowhere/jj-only"),
+            backend: Backend::Jj,
+        };
+        // Nothing is there, so this can only fail — the point is *how*: through
+        // the jj adapter, never through git2.
+        assert!(open(&found, false).is_err());
+        assert!(open_backends(std::slice::from_ref(&found), false).is_empty());
     }
 }

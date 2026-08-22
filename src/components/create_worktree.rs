@@ -191,16 +191,9 @@ impl Modal for CreateWorktreeComponent {
         match action {
             Action::Select => {
                 if !self.new_worktree_name.is_empty() {
-                    if let Some(repository) = ctx.repositories.selected_repository() {
-                        match repository
-                            .create_new_worktree(&self.new_worktree_name, &ctx.args.worktrees_dir)
-                        {
-                            Ok(created) => {
-                                ctx.worktrees.last_error = None;
-                                ctx.worktrees.add(created);
-                            }
-                            Err(e) => ctx.worktrees.last_error = Some(format!("{:#}", e)),
-                        }
+                    match ctx.create_space(&self.new_worktree_name) {
+                        Ok(()) => ctx.worktrees.last_error = None,
+                        Err(e) => ctx.worktrees.last_error = Some(format!("{:#}", e)),
                     }
                 }
                 ModalFlow::Close
