@@ -21,13 +21,17 @@
 //! directory" checks) happens once, in [`resolve`], *after* the winner of each
 //! setting is known. That way a `~` in the config file is expanded exactly like
 //! a `~` on the command line, and the logic exists in one copy.
+//!
+//! The repository list is deliberately the lenient one: a missing entry is
+//! skipped with a warning and only an empty result is fatal. See
+//! [`resolve_repos_dirs`].
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use clap::{parser::ValueSource, ArgMatches, CommandFactory, FromArgMatches, Parser};
 use color_eyre::eyre::{eyre, Result, WrapErr};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::config::{Backend, Config};
 
@@ -210,7 +214,7 @@ impl Args {
         let cli = Cli::from_arg_matches(matches)?;
 
         let config_path = match &cli.config {
-            Some(path) => expand(path, "--config")?,
+            Some(path) => expand(path).wrap_err("--config")?,
             None => Config::path()?,
         };
         let config = Config::load_from(&config_path)?;
@@ -350,22 +354,20 @@ fn resolve(cli: Cli, sources: Sources, config: Config, config_path: PathBuf) -> 
     debug!(?origins, "Resolved the configuration sources");
 
     // Normalisation happens once, here, so it applies to whichever layer won.
-    let repos_dirs = repos_dirs
-        .iter()
-        .map(|dir| resolve_existing_dir(dir, &label("--repos-dir", repos_origin)))
-        .collect::<Result<Vec<_>>>()?;
+    let repos_dirs = resolve_repos_dirs(&repos_dirs, &label("--repos-dir", repos_origin))?;
 
     // The worktrees directory is an output location, so create it rather than
     // making the user run `mkdir` before their first worktree.
     let worktrees_label = label("--worktrees-dir", worktrees_origin);
-    let expanded = expand(&worktrees_dir, &worktrees_label)?;
+    let expanded = expand(&worktrees_dir).wrap_err_with(|| worktrees_label.clone())?;
     std::fs::create_dir_all(&expanded).wrap_err_with(|| {
         format!(
             "{worktrees_label}: could not create '{}'",
             expanded.display()
         )
     })?;
-    let worktrees_dir = resolve_existing_dir(&worktrees_dir, &worktrees_label)?;
+    let worktrees_dir =
+        resolve_existing_dir(&worktrees_dir).wrap_err_with(|| worktrees_label.clone())?;
 
     Ok(Args {
         worktrees_dir,
@@ -389,39 +391,94 @@ fn label(flag: &str, origin: Origin) -> String {
     }
 }
 
-/// Expands a leading `~`, failing with the setting name so the user knows which
-/// value to fix.
-fn expand(dir: &Path, label: &str) -> Result<PathBuf> {
-    expand_tilde::expand_tilde(dir)
-        .map(|expanded| expanded.into_owned())
-        .wrap_err_with(|| format!("{label}: could not expand '~' in '{}'", dir.display()))
-}
+/// Resolves every entry of the repository list, tolerating the ones that are
+/// gone.
+///
+/// The list names places to *look*, not places that must all be there: a stale
+/// entry left over from an old machine should not veto the directories that are
+/// still perfectly good, so each failure is skipped with a warning. Only an
+/// empty result is fatal, and that error repeats every entry with its own
+/// reason, because the user of a TUI that never starts has no log to consult.
+///
+/// This is also what keeps a single directory typed after `--repos-dir` a hard
+/// error: it is the only candidate, so nothing survives it and the fatal branch
+/// is taken. The same holds for a single-entry environment variable or config
+/// file value, which is why the errors are labelled with their origin.
+fn resolve_repos_dirs(dirs: &[PathBuf], label: &str) -> Result<Vec<String>> {
+    let mut resolved = Vec::with_capacity(dirs.len());
+    let mut skipped = Vec::new();
 
-/// Resolves `dir` to an absolute path, requiring it to exist.
-fn resolve_existing_dir(dir: &Path, label: &str) -> Result<String> {
-    let expanded = expand(dir, label)?;
-    let canonical = std::fs::canonicalize(&expanded)
-        .wrap_err_with(|| format!("{label}: could not open directory '{}'", expanded.display()))?;
+    for dir in dirs {
+        match resolve_existing_dir(dir) {
+            Ok(path) => resolved.push(path),
+            // The reason is kept as text rather than as an error so it can be
+            // reported once per entry, either as a warning or inside the
+            // combined failure below.
+            Err(error) => skipped.push((dir, format!("{error:#}"))),
+        }
+    }
 
-    if !canonical.is_dir() {
+    if resolved.is_empty() {
+        // With a single entry there is no list to summarise, so the reason is
+        // reported on its own — this is the `--repos-dir /gone` case, and it
+        // reads exactly as it did before the list became tolerant.
+        if let [(_, reason)] = skipped.as_slice() {
+            return Err(eyre!("{label}: {reason}"));
+        }
+
+        // Every reason already names the entry it is about, so the entry is
+        // not repeated in front of it.
+        let reasons = skipped
+            .iter()
+            .map(|(_, reason)| format!("\n  {reason}"))
+            .collect::<String>();
         return Err(eyre!(
-            "{label}: '{}' is not a directory",
-            canonical.display()
+            "{label}: none of the repository directories could be opened:{reasons}"
         ));
     }
 
-    into_utf8(canonical, label)
+    for (dir, reason) in skipped {
+        warn!(
+            setting = %label,
+            directory = %dir.display(),
+            %reason,
+            "Skipping a repository directory that could not be opened"
+        );
+    }
+
+    Ok(resolved)
+}
+
+/// Expands a leading `~`.
+///
+/// The setting name is not part of the message: callers add it with
+/// `wrap_err`, which lets [`resolve_repos_dirs`] reuse the bare reason for one
+/// entry of a list.
+fn expand(dir: &Path) -> Result<PathBuf> {
+    expand_tilde::expand_tilde(dir)
+        .map(|expanded| expanded.into_owned())
+        .wrap_err_with(|| format!("could not expand '~' in '{}'", dir.display()))
+}
+
+/// Resolves `dir` to an absolute path, requiring it to exist.
+fn resolve_existing_dir(dir: &Path) -> Result<String> {
+    let expanded = expand(dir)?;
+    let canonical = std::fs::canonicalize(&expanded)
+        .wrap_err_with(|| format!("could not open directory '{}'", expanded.display()))?;
+
+    if !canonical.is_dir() {
+        return Err(eyre!("'{}' is not a directory", canonical.display()));
+    }
+
+    into_utf8(canonical)
 }
 
 /// The rest of the program stores directories as `String`, so a path the OS
 /// accepts but Rust cannot represent as UTF-8 has to be rejected here.
-fn into_utf8(path: PathBuf, label: &str) -> Result<String> {
-    path.into_os_string().into_string().map_err(|raw| {
-        eyre!(
-            "{label}: path is not valid UTF-8: '{}'",
-            Path::new(&raw).display()
-        )
-    })
+fn into_utf8(path: PathBuf) -> Result<String> {
+    path.into_os_string()
+        .into_string()
+        .map_err(|raw| eyre!("path is not valid UTF-8: '{}'", Path::new(&raw).display()))
 }
 
 #[cfg(test)]
@@ -499,6 +556,48 @@ mod tests {
 
     fn temp() -> tempfile::TempDir {
         tempfile::tempdir().expect("could not create a temporary directory")
+    }
+
+    /// Runs `body` with a scoped tracing subscriber and returns what it logged.
+    ///
+    /// Skipping an entry is only visible as a warning, so the test has to read
+    /// the log to check that the user is told about it.
+    fn capturing_logs<T>(body: impl FnOnce() -> T) -> (T, String) {
+        let buffer = Logs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buffer.clone())
+            .with_ansi(false)
+            .finish();
+
+        let value = tracing::subscriber::with_default(subscriber, body);
+        let written = buffer.0.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        (value, String::from_utf8_lossy(&written).into_owned())
+    }
+
+    /// A `MakeWriter` that keeps everything in memory.
+    #[derive(Clone, Default)]
+    struct Logs(std::sync::Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Logs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl tracing_subscriber::fmt::MakeWriter<'_> for Logs {
+        type Writer = Self;
+
+        fn make_writer(&self) -> Self::Writer {
+            self.clone()
+        }
     }
 
     fn canonical(path: &Path) -> String {
@@ -729,6 +828,83 @@ mod tests {
         let message = format!("{:#}", resolve_with(&["shanti"], config).unwrap_err());
         assert!(message.contains("--worktrees-dir"), "{message}");
         assert!(message.contains("worktrees_dir"), "{message}");
+    }
+
+    /// A stale entry must not veto the entries that are still there: the
+    /// maintainer's own `SHANTI_REPOS_DIR` holds one of each.
+    #[test]
+    fn a_missing_entry_in_the_repos_dir_list_is_skipped() {
+        let dir = temp();
+        let missing = dir.path().join("gone");
+        let list = format!("{}:{}", missing.display(), dir.path().display());
+
+        let (result, logs) = capturing_logs(|| {
+            resolve_with_env(
+                &[
+                    ("SHANTI_REPOS_DIR", list.as_str()),
+                    ("SHANTI_WORKTREES_DIR", dir.path().to_str().unwrap()),
+                ],
+                &["shanti"],
+                Config::default(),
+            )
+        });
+
+        let args = result.unwrap();
+        assert_eq!(args.repos_dirs, vec![canonical(dir.path())]);
+        assert_eq!(args.origins.repos_dirs, Origin::Environment);
+        // The skip is reported, with the path and where the setting came from.
+        assert!(logs.contains("WARN"), "{logs}");
+        assert!(logs.contains("gone"), "{logs}");
+        assert!(logs.contains("from the environment"), "{logs}");
+    }
+
+    #[test]
+    fn every_repos_dir_entry_missing_is_rejected_naming_all_of_them() {
+        let dir = temp();
+        let first = dir.path().join("gone-one");
+        let second = dir.path().join("gone-two");
+        let list = format!("{}:{}", first.display(), second.display());
+
+        let error = resolve_with_env(
+            &[
+                ("SHANTI_REPOS_DIR", list.as_str()),
+                ("SHANTI_WORKTREES_DIR", dir.path().to_str().unwrap()),
+            ],
+            &["shanti"],
+            Config::default(),
+        )
+        .unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(message.contains("gone-one"), "{message}");
+        assert!(message.contains("gone-two"), "{message}");
+        assert!(message.contains("from the environment"), "{message}");
+        // Every entry is accounted for with its own reason.
+        assert_eq!(message.matches("No such file or directory").count(), 2);
+    }
+
+    /// The deliberate asymmetry: a list tolerates a stale member, but a single
+    /// directory the user typed does not.
+    #[test]
+    fn a_single_missing_repos_dir_flag_stays_a_hard_error() {
+        let dir = temp();
+        let missing = dir.path().join("gone");
+
+        let error = resolve_with(
+            &[
+                "shanti",
+                "--repos-dir",
+                missing.to_str().unwrap(),
+                "--worktrees-dir",
+                dir.path().to_str().unwrap(),
+            ],
+            Config::default(),
+        )
+        .unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(message.contains("gone"), "{message}");
+        assert!(message.contains("No such file or directory"), "{message}");
     }
 
     #[test]
