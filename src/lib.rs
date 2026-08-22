@@ -7,6 +7,7 @@ pub mod events;
 pub mod github;
 pub mod keymap;
 pub mod logs;
+mod theme;
 pub mod vcs;
 
 use color_eyre::eyre::{Result, WrapErr};

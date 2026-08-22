@@ -1,16 +1,14 @@
 use crate::keymap::InputMode;
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::{
-        palette::tailwind::{AMBER, GREEN, RED, SLATE},
-        Color, Style,
-    },
+    style::Style,
     text::{Line, Span},
     widgets::{Block, BorderType, Clear, Padding, Paragraph, Widget},
     Frame,
 };
 
 use super::{centered, Action, AppContext, EventState, HelpEntry, Modal, ModalFlow};
+use crate::theme;
 use crate::vcs::Backend;
 
 /// Title case for a backend's own word for a space ("worktree" -> "Worktree").
@@ -77,23 +75,24 @@ impl CreateWorktreeComponent {
 
         let input_border_style =
             if self.new_worktree_name.is_empty() || is_valid_branch_name(&self.new_worktree_name) {
-                super::ACTIVE_BORDER_STYLE
+                theme::BORDER_INPUT_FOCUSED
             } else {
-                Style::new().fg(Color::Red)
+                Style::new().fg(theme::DANGER)
             };
 
         let outer_block = Block::bordered()
             .border_type(BorderType::Rounded)
-            .border_style(super::POPUP_BORDER_STYLE)
+            .border_style(theme::BORDER_FOCUSED)
+            .style(theme::POPUP_SURFACE)
             // Titled in the vocabulary of the backend that will do the work, so
             // a jj user is not offered a "worktree" they will never see.
             .title(
                 Line::from(format!(" New {} ", capitalised(self.backend.space_noun())))
-                    .style(Style::new().fg(GREEN.c300).bold()),
+                    .style(theme::TITLE),
             )
             .title_top(
                 Line::from(format!(" repo: {} · {} ", self.repo_name, self.backend))
-                    .style(Style::new().fg(SLATE.c400))
+                    .style(theme::SECONDARY)
                     .right_aligned(),
             )
             .title_bottom(keybinding_hint());
@@ -114,7 +113,7 @@ impl CreateWorktreeComponent {
             Backend::Git => "Branch name:",
             Backend::Jj => "Bookmark name:",
         })
-        .style(Style::new().fg(SLATE.c300))
+        .style(theme::SECONDARY)
         .render(label_area, frame.buffer_mut());
 
         // A colocated repository could take either backend, so the default is
@@ -125,7 +124,7 @@ impl CreateWorktreeComponent {
                 self.backend,
                 self.backend.space_noun()
             ))
-            .style(Style::new().fg(AMBER.c300))
+            .style(Style::new().fg(theme::WARNING))
             .right_aligned()
             .render(label_area, frame.buffer_mut());
         }
@@ -141,11 +140,11 @@ impl CreateWorktreeComponent {
 
         if let Some(warning) = &self.warning {
             Paragraph::new(warning.as_str())
-                .style(Style::new().fg(AMBER.c300))
+                .style(Style::new().fg(theme::WARNING))
                 .render(hint_area, frame.buffer_mut());
         } else if let Some(hint) = &self.base_branch_hint {
             Paragraph::new(hint.as_str())
-                .style(Style::new().fg(SLATE.c400))
+                .style(theme::SECONDARY)
                 .render(hint_area, frame.buffer_mut());
         }
 
@@ -277,10 +276,10 @@ impl Modal for CreateWorktreeComponent {
 
 fn keybinding_hint() -> Line<'static> {
     Line::from(vec![
-        Span::styled("[Enter] ", Style::new().fg(GREEN.c400).bold()),
-        Span::styled("confirm", Style::new().fg(SLATE.c500)),
-        Span::styled("  [Esc] ", Style::new().fg(RED.c400).bold()),
-        Span::styled("cancel ", Style::new().fg(SLATE.c500)),
+        Span::styled("[Enter] ", theme::KEY),
+        Span::styled("confirm", theme::MUTED),
+        Span::styled("  [Esc] ", theme::KEY_DESTRUCTIVE),
+        Span::styled("cancel ", theme::MUTED),
     ])
     .right_aligned()
 }

@@ -4,13 +4,10 @@ use nucleo_matcher::{
 };
 
 use super::list::ItemOrder;
+use crate::theme;
 use crate::vcs::{Backend, BoxedVcs, RepoId, Space, Vcs};
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
-    style::{
-        palette::tailwind::{GREEN, RED, SLATE},
-        Style,
-    },
     text::{Line, Span},
     widgets::{
         Block, BorderType, Clear, List, ListDirection, ListItem, ListState, Paragraph, Scrollbar,
@@ -25,7 +22,7 @@ use super::{
     filter::FilterComponent,
     list::{Focus, ListComponent},
     worktrees::SpaceEntry,
-    Action, AppContext, EventState, HelpEntry, Modal, ModalFlow, SELECTED_STYLE,
+    Action, AppContext, EventState, HelpEntry, Modal, ModalFlow,
 };
 use crate::keymap::InputMode;
 use tracing::error;
@@ -61,13 +58,13 @@ impl RepositoriesComponent {
         let title = {
             let mut spans = vec![
                 Span::raw(" "),
-                Span::styled("Repositories", Style::new().fg(GREEN.c400).bold()),
-                Span::styled(format!(" ({}) ", total), Style::new().fg(SLATE.c400)),
+                Span::styled("Repositories", theme::TITLE),
+                Span::styled(format!(" ({}) ", total), theme::SECONDARY),
             ];
             if !self.filter.value.is_empty() && matches!(mode, InputMode::Normal) {
                 spans.push(Span::styled(
                     format!("/{} ", self.filter.value),
-                    Style::new().fg(SLATE.c500),
+                    theme::MUTED,
                 ));
             }
             Line::from(spans).alignment(Alignment::Center)
@@ -75,7 +72,8 @@ impl RepositoriesComponent {
 
         let mut block = Block::bordered()
             .border_type(BorderType::Rounded)
-            .border_style(super::POPUP_BORDER_STYLE)
+            .border_style(theme::BORDER_FOCUSED)
+            .style(theme::POPUP_SURFACE)
             .title(title);
         if matches!(mode, InputMode::Normal) {
             block = block.title_bottom(repos_keybinding_hint());
@@ -96,8 +94,8 @@ impl RepositoriesComponent {
 
             f.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled(" / ", Style::new().fg(GREEN.c300).bold()),
-                    Span::styled(self.filter.value.clone(), Style::new().white()),
+                    Span::styled(" / ", theme::KEY),
+                    Span::styled(self.filter.value.clone(), theme::TEXT),
                 ])),
                 filter_line,
             );
@@ -106,8 +104,7 @@ impl RepositoriesComponent {
                 filter_line.y,
             ));
             f.render_widget(
-                Paragraph::new("─".repeat(sep_line.width as usize))
-                    .style(Style::new().fg(SLATE.c700)),
+                Paragraph::new("─".repeat(sep_line.width as usize)).style(theme::RULE),
                 sep_line,
             );
             list_area
@@ -121,8 +118,8 @@ impl RepositoriesComponent {
             .map(|r| ListItem::new(r.repo().name.clone()))
             .collect();
         let list = List::new(items)
-            .style(Style::new().white())
-            .highlight_style(SELECTED_STYLE)
+            .style(theme::TEXT)
+            .highlight_style(theme::SELECTED_ROW)
             .direction(ListDirection::TopToBottom);
         StatefulWidget::render(list, list_area, f.buffer_mut(), &mut self.state);
 
@@ -130,8 +127,8 @@ impl RepositoriesComponent {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
             .end_symbol(None)
-            .thumb_style(Style::new().dark_gray())
-            .track_style(Style::new().dark_gray());
+            .thumb_style(theme::RULE)
+            .track_style(theme::RULE);
         f.render_stateful_widget(scrollbar, list_area, &mut scroll_state);
     }
 
@@ -302,10 +299,10 @@ impl RepositoriesComponent {
 
 fn repos_keybinding_hint() -> Line<'static> {
     Line::from(vec![
-        Span::styled("[Enter] ", Style::new().fg(GREEN.c400).bold()),
-        Span::styled("select", Style::new().fg(SLATE.c500)),
-        Span::styled("  [Esc] ", Style::new().fg(RED.c400).bold()),
-        Span::styled("close ", Style::new().fg(SLATE.c500)),
+        Span::styled("[Enter] ", theme::KEY),
+        Span::styled("select", theme::MUTED),
+        Span::styled("  [Esc] ", theme::KEY_DESTRUCTIVE),
+        Span::styled("close ", theme::MUTED),
     ])
     .right_aligned()
 }

@@ -1,9 +1,6 @@
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::{
-        palette::tailwind::{GREEN, RED, SLATE},
-        Style,
-    },
+    style::Style,
     text::{Line, Span},
     widgets::{Block, BorderType, Clear, Paragraph, Widget},
     Frame,
@@ -12,6 +9,7 @@ use ratatui::{
 use super::{
     centered, Action, AppContext, ConfirmCallback, EventState, HelpEntry, Modal, ModalFlow,
 };
+use crate::theme;
 
 /// A generic yes/no dialog. It knows nothing about what "yes" means: the caller
 /// hands it the work to run on confirmation, so no `ConfirmAction` discriminant
@@ -37,14 +35,15 @@ impl ConfirmComponent {
         frame.render_widget(Clear, area);
 
         let title = Line::from(vec![
-            Span::styled(" ⚠ ", Style::new().fg(RED.c400).bold()),
-            Span::styled(self.title.clone(), Style::new().fg(GREEN.c300).bold()),
+            Span::styled(" ⚠ ", theme::KEY_DESTRUCTIVE),
+            Span::styled(self.title.clone(), theme::TITLE),
             Span::raw(" "),
         ]);
 
         let outer_block = Block::bordered()
             .border_type(BorderType::Rounded)
-            .border_style(super::POPUP_BORDER_STYLE)
+            .border_style(theme::BORDER_DESTRUCTIVE)
+            .style(theme::POPUP_SURFACE)
             .title(title)
             .title_bottom(keybinding_hint());
 
@@ -61,10 +60,15 @@ impl ConfirmComponent {
         .areas(inner_area);
 
         Paragraph::new(self.label.as_str())
-            .style(Style::new().fg(SLATE.c200).bold())
+            .style(theme::TEXT.bold())
             .render(label_area, frame.buffer_mut());
         Paragraph::new(format!(" {} ", self.detail))
-            .style(Style::new().fg(RED.c300).bg(RED.c950).bold())
+            .style(
+                Style::new()
+                    .fg(theme::DANGER)
+                    .bg(theme::DESTRUCTIVE_SURFACE)
+                    .bold(),
+            )
             .render(detail_area, frame.buffer_mut());
     }
 
@@ -106,10 +110,10 @@ impl Modal for ConfirmComponent {
 
 fn keybinding_hint() -> Line<'static> {
     Line::from(vec![
-        Span::styled("[Enter] ", Style::new().fg(RED.c400).bold()),
-        Span::styled("confirm", Style::new().fg(SLATE.c500)),
-        Span::styled("  [Esc] ", Style::new().fg(GREEN.c400).bold()),
-        Span::styled("cancel ", Style::new().fg(SLATE.c500)),
+        Span::styled("[Enter] ", theme::KEY_DESTRUCTIVE),
+        Span::styled("confirm", theme::MUTED),
+        Span::styled("  [Esc] ", theme::KEY_SAFE),
+        Span::styled("cancel ", theme::MUTED),
     ])
     .right_aligned()
 }

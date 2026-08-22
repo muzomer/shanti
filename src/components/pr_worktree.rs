@@ -1,9 +1,6 @@
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::{
-        palette::tailwind::{GREEN, RED, SLATE},
-        Style,
-    },
+    style::Style,
     text::{Line, Span},
     widgets::{Block, BorderType, Clear, Padding, Paragraph, Widget},
     Frame,
@@ -14,6 +11,7 @@ use super::{
     Action, AppContext, ConfirmCallback, ConfirmComponent, EventState, HelpEntry, Modal, ModalFlow,
     SelectCallback,
 };
+use crate::theme;
 use crate::{
     github::{self, PrFetcher},
     keymap::InputMode,
@@ -52,8 +50,9 @@ impl PrWorktreeComponent {
 
         let outer_block = Block::bordered()
             .border_type(BorderType::Rounded)
-            .border_style(super::POPUP_BORDER_STYLE)
-            .title(Line::from(" Worktree from PR ").style(Style::new().fg(GREEN.c300).bold()))
+            .border_style(theme::BORDER_FOCUSED)
+            .style(theme::POPUP_SURFACE)
+            .title(Line::from(" Worktree from PR ").style(theme::TITLE))
             .title_bottom(keybinding_hint());
 
         let inner_area = outer_block.inner(area);
@@ -69,21 +68,21 @@ impl PrWorktreeComponent {
         .areas(inner_area);
 
         Paragraph::new("GitHub PR URL:")
-            .style(Style::new().fg(SLATE.c300))
+            .style(theme::SECONDARY)
             .render(label_area, frame.buffer_mut());
 
         Paragraph::new(self.input.as_str())
             .block(
                 Block::bordered()
                     .border_type(BorderType::Rounded)
-                    .border_style(super::ACTIVE_BORDER_STYLE)
+                    .border_style(theme::BORDER_INPUT_FOCUSED)
                     .padding(Padding::horizontal(1)),
             )
             .render(input_area, frame.buffer_mut());
 
         if let Some(err) = &self.error {
             Paragraph::new(err.as_str())
-                .style(Style::new().fg(RED.c400))
+                .style(Style::new().fg(theme::DANGER))
                 .render(status_area, frame.buffer_mut());
         }
 
@@ -324,10 +323,10 @@ fn open_worktree_for_pr(ctx: &mut AppContext, pr_info: github::PrInfo, auto: boo
 
 fn keybinding_hint() -> Line<'static> {
     Line::from(vec![
-        Span::styled("[Enter] ", Style::new().fg(GREEN.c400).bold()),
-        Span::styled("open", Style::new().fg(SLATE.c500)),
-        Span::styled("  [Esc] ", Style::new().fg(RED.c400).bold()),
-        Span::styled("cancel ", Style::new().fg(SLATE.c500)),
+        Span::styled("[Enter] ", theme::KEY),
+        Span::styled("open", theme::MUTED),
+        Span::styled("  [Esc] ", theme::KEY_DESTRUCTIVE),
+        Span::styled("cancel ", theme::MUTED),
     ])
     .right_aligned()
 }

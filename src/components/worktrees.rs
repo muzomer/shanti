@@ -5,10 +5,7 @@ use nucleo_matcher::{
 };
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::{
-        palette::tailwind::{AMBER, BLUE, GREEN, RED, SLATE},
-        Color, Modifier, Style, Stylize,
-    },
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{
         Block, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
@@ -17,13 +14,11 @@ use ratatui::{
     Frame,
 };
 
+use super::list::{Focus, ItemOrder, ListComponent};
 use super::{filter::FilterComponent, Action, EventState, RepositoriesComponent};
-use super::{
-    list::{Focus, ItemOrder, ListComponent},
-    SELECTED_STYLE,
-};
 use crate::keymap::InputMode;
-use crate::vcs::{Space, Tone};
+use crate::theme;
+use crate::vcs::Space;
 
 /// A space, plus the name of the repository it belongs to.
 ///
@@ -89,11 +84,11 @@ impl WorktreesComponent {
         let current = self.selected_index.map(|i| (i + 1).min(total)).unwrap_or(0);
 
         let mode_indicator = match mode {
-            InputMode::Normal => Line::from(" NORMAL ").style(Style::new().fg(GREEN.c400).bold()),
-            InputMode::Insert => Line::from(" INSERT ").style(Style::new().fg(AMBER.c300).bold()),
+            InputMode::Normal => Line::from(" NORMAL ").style(theme::SUCCESS_TEXT),
+            InputMode::Insert => Line::from(" INSERT ").style(theme::WARNING_TEXT),
         };
         let bottom_left = match &self.last_error {
-            Some(err) => Line::from(format!(" {} ", err)).red().bold(),
+            Some(err) => Line::from(format!(" {} ", err)).style(theme::DANGER_TEXT),
             None => mode_indicator,
         };
 
@@ -101,16 +96,13 @@ impl WorktreesComponent {
         let title = {
             let mut spans = vec![
                 Span::raw(" "),
-                Span::styled("Worktrees", Style::new().fg(GREEN.c400).bold()),
-                Span::styled(
-                    format!(" ({}/{}) ", current, total),
-                    Style::new().fg(SLATE.c400),
-                ),
+                Span::styled("Worktrees", theme::TITLE),
+                Span::styled(format!(" ({}/{}) ", current, total), theme::SECONDARY),
             ];
             if !self.filter.value.is_empty() && matches!(mode, InputMode::Normal) {
                 spans.push(Span::styled(
                     format!("/{} ", self.filter.value),
-                    Style::new().fg(SLATE.c500),
+                    theme::MUTED,
                 ));
             }
             Line::from(spans)
@@ -118,16 +110,16 @@ impl WorktreesComponent {
 
         let mut block = Block::bordered()
             .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(super::BORDER_STYLE)
+            .border_style(theme::BORDER)
+            .style(theme::CANVAS)
             .title(title)
             .title_bottom(bottom_left);
 
-        // C: style ? help hint with AMBER.c300 to match the rest of the keybinding palette
         if matches!(mode, InputMode::Normal) {
             block = block.title_bottom(
                 Line::from(vec![
-                    Span::styled(" ? ", Style::new().fg(BLUE.c400).bold()),
-                    Span::styled("help ", Style::new().fg(SLATE.c500)),
+                    Span::styled(" ? ", theme::KEY),
+                    Span::styled("help ", theme::MUTED),
                 ])
                 .right_aligned(),
             );
@@ -151,8 +143,8 @@ impl WorktreesComponent {
 
             f.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled(" / ", Style::new().fg(GREEN.c300).bold()),
-                    Span::styled(self.filter.value.clone(), Style::new().white()),
+                    Span::styled(" / ", theme::KEY),
+                    Span::styled(self.filter.value.clone(), theme::TEXT),
                 ])),
                 filter_line,
             );
@@ -162,8 +154,7 @@ impl WorktreesComponent {
                 filter_line.y,
             ));
             f.render_widget(
-                Paragraph::new("─".repeat(sep_line.width as usize))
-                    .style(Style::new().fg(SLATE.c700)),
+                Paragraph::new("─".repeat(sep_line.width as usize)).style(theme::RULE),
                 sep_line,
             );
             list_area
@@ -172,8 +163,8 @@ impl WorktreesComponent {
         };
 
         let list = List::new(items)
-            .style(Style::new().white())
-            .highlight_style(SELECTED_STYLE)
+            .style(theme::TEXT)
+            .highlight_style(theme::SELECTED_ROW)
             .direction(ratatui::widgets::ListDirection::TopToBottom);
         StatefulWidget::render(list, list_area, f.buffer_mut(), &mut self.state);
 
@@ -345,7 +336,7 @@ fn space_to_list_item(space: &Space, label: &str) -> ListItem<'static> {
             Span::styled(
                 glyph.symbol.to_string(),
                 Style::default()
-                    .fg(tone_color(glyph.tone))
+                    .fg(theme::tone(glyph.tone))
                     .add_modifier(Modifier::BOLD),
             )
         })
@@ -358,38 +349,22 @@ fn space_to_list_item(space: &Space, label: &str) -> ListItem<'static> {
     // when deleted. Padded so the repo names still line up in a column.
     spans.push(Span::styled(
         format!("{:<3} ", space.backend.label()),
-        Style::default().fg(SLATE.c600),
+        theme::MUTED,
     ));
 
     match label.split_once(" / ") {
         Some((repo, name)) => {
-            spans.push(Span::styled(
-                repo.to_string(),
-                Style::default().fg(SLATE.c400),
-            ));
-            spans.push(Span::styled(" / ", Style::default().fg(SLATE.c600)));
+            spans.push(Span::styled(repo.to_string(), theme::SECONDARY));
+            spans.push(Span::styled(" / ", theme::MUTED));
             spans.push(Span::styled(
                 name.to_string(),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
+                theme::TEXT.add_modifier(Modifier::BOLD),
             ));
         }
         None => spans.push(Span::from(label.to_string())),
     }
 
     ListItem::new(Line::from(spans))
-}
-
-/// The single match the renderer keeps: five tones, five colours.
-fn tone_color(tone: Tone) -> Color {
-    match tone {
-        Tone::Muted => SLATE.c500,
-        Tone::Ok => GREEN.c400,
-        Tone::Info => BLUE.c400,
-        Tone::Warn => AMBER.c400,
-        Tone::Danger => RED.c400,
-    }
 }
 
 impl ListComponent<SpaceEntry> for WorktreesComponent {

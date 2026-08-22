@@ -1,9 +1,5 @@
 use ratatui::{
     layout::{Alignment, Rect},
-    style::{
-        palette::tailwind::{GREEN, RED, SLATE},
-        Style,
-    },
     text::{Line, Span},
     widgets::{
         Block, BorderType, Clear, List, ListDirection, ListItem, ListState, Scrollbar,
@@ -16,8 +12,8 @@ use super::{
     centered,
     list::{ItemOrder, ListComponent},
     Action, AppContext, EventState, HelpEntry, Modal, ModalFlow, SelectCallback,
-    POPUP_BORDER_STYLE, SELECTED_STYLE,
 };
+use crate::theme;
 use ratatui::layout::Constraint;
 
 /// Picks one directory and hands it to the work supplied by the caller, the same
@@ -46,15 +42,13 @@ impl SelectDirectoryComponent {
     pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
         frame.render_widget(Clear, area);
 
-        let title = Line::from(vec![Span::styled(
-            " Select Clone Directory ",
-            Style::new().fg(GREEN.c400).bold(),
-        )])
-        .alignment(Alignment::Center);
+        let title = Line::from(vec![Span::styled(" Select Clone Directory ", theme::TITLE)])
+            .alignment(Alignment::Center);
 
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
-            .border_style(POPUP_BORDER_STYLE)
+            .border_style(theme::BORDER_FOCUSED)
+            .style(theme::POPUP_SURFACE)
             .title(title)
             .title_bottom(dir_keybinding_hint());
 
@@ -68,8 +62,8 @@ impl SelectDirectoryComponent {
             .map(|d| ListItem::new(d.as_str()))
             .collect();
         let list = List::new(items)
-            .style(Style::new().white())
-            .highlight_style(SELECTED_STYLE)
+            .style(theme::TEXT)
+            .highlight_style(theme::SELECTED_ROW)
             .direction(ListDirection::TopToBottom);
         StatefulWidget::render(list, inner_area, frame.buffer_mut(), &mut self.state);
 
@@ -77,8 +71,8 @@ impl SelectDirectoryComponent {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
             .end_symbol(None)
-            .thumb_style(Style::new().dark_gray())
-            .track_style(Style::new().dark_gray());
+            .thumb_style(theme::RULE)
+            .track_style(theme::RULE);
         frame.render_stateful_widget(scrollbar, inner_area, &mut scroll_state);
     }
 
@@ -146,10 +140,10 @@ impl Modal for SelectDirectoryComponent {
 
 fn dir_keybinding_hint() -> Line<'static> {
     Line::from(vec![
-        Span::styled("[Enter] ", Style::new().fg(GREEN.c400).bold()),
-        Span::styled("select", Style::new().fg(SLATE.c500)),
-        Span::styled("  [Esc] ", Style::new().fg(RED.c400).bold()),
-        Span::styled("cancel ", Style::new().fg(SLATE.c500)),
+        Span::styled("[Enter] ", theme::KEY),
+        Span::styled("select", theme::MUTED),
+        Span::styled("  [Esc] ", theme::KEY_DESTRUCTIVE),
+        Span::styled("cancel ", theme::MUTED),
     ])
     .right_aligned()
 }
