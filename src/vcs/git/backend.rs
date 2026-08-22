@@ -44,28 +44,48 @@ fn remote_state_of_branch(repo: &git2::Repository, branch: &git2::Branch) -> Rem
     }
 }
 
-/// Whether the git worktree at `worktree_path` has tracked changes.
+/// How many files in the worktree at `worktree_path` hold work no commit has,
+/// or `None` when the question could not be answered.
 ///
-/// Answers the git question and only the git question. It used to return
+/// **What is counted, and why:** every file `git status` would list — modified,
+/// staged, *and* untracked — with ignored files and submodules left out.
+/// Deletion removes the directory, so an untracked file is destroyed exactly as
+/// thoroughly as a modified one; a count that quietly left it out would be worse
+/// than no count, because the user would trust it. Ignored files are excluded
+/// for the same reason inverted: they are build output the user does not think
+/// of as work, and counting a `target/` would drown the number that matters.
+/// Untracked *directories* count as one entry each (git2's default), which is
+/// what `git status` shows and what keeps a fresh `node_modules` from reading as
+/// forty thousand losses.
+///
+/// This answers the git question and only the git question. It used to answer
 /// `false` for anything holding a `.jj` directory, because the old status model
 /// had no way to say "this space is driven by jj" — so it said "clean", which
 /// was a lie rather than an absence. jj spaces now carry their own state (see
 /// [`crate::vcs::LocalState`]) and never reach this function: discovery hands
 /// every colocated repository to the jj backend.
+fn count_uncommitted(worktree_path: &Path) -> Option<u32> {
+    let repo = git2::Repository::open(worktree_path).ok()?;
+    let mut opts = git2::StatusOptions::new();
+    opts.include_untracked(true);
+    // An untracked directory is one entry rather than one per file inside it —
+    // the reading a user recognises from `git status`.
+    opts.recurse_untracked_dirs(false);
+    opts.include_ignored(false);
+    opts.exclude_submodules(true);
+    let statuses = repo.statuses(Some(&mut opts)).ok()?;
+    Some(statuses.len() as u32)
+}
+
+/// Whether the git worktree at `worktree_path` holds work no commit has.
+///
+/// Deliberately the same walk as [`count_uncommitted`], reduced to a yes/no:
+/// two independent dirty-checks would eventually disagree, and the one that
+/// guards deletion has to agree with the number the dialog prints. A worktree we
+/// cannot open reads as clean here, as it always has — the delete guard treats
+/// an unprobed *space* cautiously, which is a different question.
 fn is_worktree_dirty(worktree_path: &str) -> bool {
-    let path = Path::new(worktree_path);
-    match git2::Repository::open(path) {
-        Ok(repo) => {
-            let mut opts = git2::StatusOptions::new();
-            opts.include_untracked(false);
-            opts.exclude_submodules(true);
-            match repo.statuses(Some(&mut opts)) {
-                Ok(statuses) => !statuses.is_empty(),
-                Err(_) => false,
-            }
-        }
-        Err(_) => false,
-    }
+    count_uncommitted(Path::new(worktree_path)).is_some_and(|files| files > 0)
 }
 
 /// Name a repository by its directory, not by string surgery on the git dir.
@@ -345,6 +365,16 @@ impl Vcs for GitBackend {
     fn resolve_base(&self, name: &str) -> String {
         // The inherent method is the implementation; see its doc comment.
         GitBackend::resolve_base(self, name)
+    }
+
+    /// See [`count_uncommitted`] for what the number counts.
+    ///
+    /// Taken from the space's directory rather than from its status snapshot,
+    /// because the snapshot only carries a yes/no. That costs one extra status
+    /// walk, which is affordable precisely because this is asked once, when a
+    /// delete dialog opens — never per frame and never per row.
+    fn uncommitted_files(&self, space: &Space) -> Option<u32> {
+        count_uncommitted(space.path())
     }
 }
 

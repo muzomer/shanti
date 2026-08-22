@@ -869,6 +869,63 @@ fn the_dialog_names_what_would_be_lost() {
     );
 }
 
+/// The count rises with the number of files, and untracked files are in it:
+/// deletion removes the directory, so a file that was never `git add`ed is lost
+/// exactly as thoroughly as an edited one.
+#[test]
+fn the_dialog_counts_every_file_it_says_it_counts() {
+    let mut f = Fixture::new();
+    f.push("alpha", "feature-one");
+    f.dirty("alpha", "feature-one");
+    std::fs::write(
+        f.worktree_path("alpha", "feature-one").join("scratch.txt"),
+        "never added\n",
+    )
+    .expect("could not write an untracked file");
+    f.reload();
+
+    f.press_char('d');
+    let screen = f.screen();
+    assert!(
+        screen.contains("2 uncommitted files (modified, staged or untracked)"),
+        "an untracked file must be counted alongside the edited one:\n{}",
+        screen
+    );
+}
+
+/// The branch is deleted with the worktree, and that is true even when nothing
+/// is at risk — the case whose dialog lists no losses at all. A user must not
+/// have to infer it from "the directory goes".
+#[test]
+fn the_dialog_says_the_branch_goes_with_the_worktree() {
+    let mut f = Fixture::new();
+    f.push("alpha", "feature-one");
+
+    f.press_char('d');
+    let screen = f.screen();
+    assert!(
+        screen.contains("Deleting also removes:"),
+        "the dialog must say what deletion removes:\n{}",
+        screen
+    );
+    assert!(
+        screen.contains("the branch it has checked out"),
+        "the branch goes too and the dialog must say so:\n{}",
+        screen
+    );
+    assert!(
+        screen.contains("the worktree directory and its registration"),
+        "the directory and the registration both go:\n{}",
+        screen
+    );
+    // git has no bookmark to spare; that sentence belongs to jj alone.
+    assert!(
+        !screen.contains("bookmark"),
+        "git's dialog must not speak jj's vocabulary:\n{}",
+        screen
+    );
+}
+
 /// Pushing the branch is not enough while the working tree still differs from
 /// it: the file the user edited exists in no object store anywhere.
 #[test]
@@ -880,9 +937,12 @@ fn uncommitted_changes_are_guarded_even_when_the_branch_is_pushed() {
 
     f.press_char('d');
     let screen = f.screen();
+    // A number, not a phrase: "1 uncommitted file" stops a user where
+    // "uncommitted changes" does not. The parenthetical says what was counted,
+    // so the figure cannot be read as narrower than it is.
     assert!(
-        screen.contains("uncommitted changes in the working tree"),
-        "the dialog must name the uncommitted work:\n{}",
+        screen.contains("1 uncommitted file (modified, staged or untracked)"),
+        "the dialog must count the uncommitted work:\n{}",
         screen
     );
 

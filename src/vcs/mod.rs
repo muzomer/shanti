@@ -41,7 +41,7 @@ use rayon::prelude::*;
 use tracing::{debug, error};
 
 pub use backend::Backend;
-pub use delete::{AtRisk, Consequence, DeletionRisk};
+pub use delete::{AtRisk, Consequence, DeletionRisk, Removed};
 pub use discover::{backend_at, backends_at, discover, Discovered};
 pub use repo::{Repo, RepoId};
 pub use space::Space;
@@ -110,6 +110,21 @@ pub trait Vcs: Send {
     /// fail for reasons outside shanti's control; failures should be surfaced,
     /// not swallowed, so the UI can say the status shown is stale.
     fn fetch(&self) -> eyre::Result<()>;
+
+    /// How many files in `space` hold work no commit has.
+    ///
+    /// `None` means "no number can be given", and the two reasons are
+    /// deliberately not distinguished by the caller: the backend has no such
+    /// concept (jj auto-commits, so there is nothing uncommitted to count), or
+    /// it has one but could not take the reading. Either way the dialog falls
+    /// back to describing the loss without a number rather than printing a
+    /// figure it does not stand behind.
+    ///
+    /// Asked once, when a delete dialog opens — never per frame — so an
+    /// implementation may walk the working tree.
+    fn uncommitted_files(&self, _space: &Space) -> Option<u32> {
+        None
+    }
 
     /// The base a new space named `name` would be created from, as a short
     /// display string (for example `origin/main`).

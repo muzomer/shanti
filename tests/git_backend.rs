@@ -400,8 +400,8 @@ fn a_dirty_space_is_a_permanent_loss() {
     let fixture = Fixture::with_origin(&["feature"]);
     let space = fixture.create("feature");
 
-    // Staged rather than merely written: the fixture's history is an empty
-    // tree, so an untracked file alone is not what "dirty" means here.
+    // Staged rather than merely written, so this test keeps describing the
+    // tracked-file case; the untracked one has a test of its own below.
     let worktree = Repository::open(&space.path).expect("could not open the space");
     fs::write(space.path.join("a.txt"), "work in progress\n").expect("could not write");
     let mut index = worktree.index().expect("could not open the index");
@@ -420,6 +420,114 @@ fn a_dirty_space_is_a_permanent_loss() {
     assert!(!risk.is_safe(), "a dirty worktree must not delete freely");
     assert_eq!(risk.consequence(), Consequence::PermanentLoss);
     assert_eq!(risk.losses(), ["uncommitted changes in the working tree"]);
+
+    // The snapshot carries no number; the backend is what supplies one.
+    let counted = risk.counting_files(fixture.backend.uncommitted_files(listed));
+    assert_eq!(
+        counted.losses(),
+        ["1 uncommitted file (modified, staged or untracked)"]
+    );
+}
+
+/// A file the user wrote but never ran `git add` on is destroyed by deletion
+/// exactly as thoroughly as a staged one, so it has to be both counted and
+/// guarded. Excluding it would produce the worst possible outcome: a confident
+/// number that omits the work most likely to be lost.
+#[test]
+fn an_untracked_file_is_counted_and_guarded() {
+    let fixture = Fixture::with_origin(&["feature"]);
+    let space = fixture.create("feature");
+
+    fs::write(space.path.join("notes.md"), "never added\n").expect("could not write");
+
+    let spaces = fixture.backend.spaces().expect("could not list spaces");
+    let listed = spaces
+        .iter()
+        .find(|space| space.name == "feature")
+        .expect("the space should be listed");
+
+    let risk = DeletionRisk::of(listed).counting_files(fixture.backend.uncommitted_files(listed));
+    assert_eq!(risk.consequence(), Consequence::PermanentLoss);
+    assert_eq!(
+        risk.losses(),
+        ["1 uncommitted file (modified, staged or untracked)"]
+    );
+}
+
+/// The count is the number of *files*, and it agrees with what the dialog says
+/// it counted: one edited, one staged, one never added.
+#[test]
+fn the_count_covers_modified_staged_and_untracked_files() {
+    let fixture = Fixture::with_origin(&["feature"]);
+    let space = fixture.create("feature");
+    let worktree = Repository::open(&space.path).expect("could not open the space");
+
+    // Committed first, so that editing it afterwards is a *modification* rather
+    // than a third untracked file.
+    fs::write(space.path.join("tracked.txt"), "original\n").expect("could not write");
+    let mut index = worktree.index().expect("could not open the index");
+    index
+        .add_path(Path::new("tracked.txt"))
+        .expect("could not stage");
+    index.write().expect("could not write the index");
+    let tree_id = index.write_tree().expect("could not write the tree");
+    let tree = worktree
+        .find_tree(tree_id)
+        .expect("could not find the tree");
+    let signature =
+        git2::Signature::now("shanti", "shanti@example.com").expect("could not build a signature");
+    let parent = worktree
+        .head()
+        .and_then(|head| head.peel_to_commit())
+        .expect("could not read HEAD");
+    worktree
+        .commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "add tracked.txt",
+            &tree,
+            &[&parent],
+        )
+        .expect("could not commit");
+    drop(tree);
+
+    fs::write(space.path.join("tracked.txt"), "edited\n").expect("could not write");
+    fs::write(space.path.join("staged.txt"), "staged\n").expect("could not write");
+    let mut index = worktree.index().expect("could not open the index");
+    index
+        .add_path(Path::new("staged.txt"))
+        .expect("could not stage");
+    index.write().expect("could not write the index");
+    fs::write(space.path.join("new.txt"), "never added\n").expect("could not write");
+
+    assert_eq!(fixture.backend.uncommitted_files(&space), Some(3));
+}
+
+/// Ignored files are build output, not work. Counting a `target/` would drown
+/// the number that matters, which is the number the user is about to lose.
+#[test]
+fn ignored_files_are_not_counted() {
+    let fixture = Fixture::with_origin(&["feature"]);
+    let space = fixture.create("feature");
+
+    fs::write(space.path.join(".gitignore"), "build/\n").expect("could not write");
+    fs::create_dir(space.path.join("build")).expect("could not create dir");
+    fs::write(space.path.join("build/out.o"), "binary\n").expect("could not write");
+
+    // The .gitignore itself is untracked, and is the only thing counted.
+    assert_eq!(fixture.backend.uncommitted_files(&space), Some(1));
+}
+
+/// A space whose directory is gone cannot be walked. That is "no answer", not
+/// "nothing to lose" — the guard's own verdict is what decides safety.
+#[test]
+fn a_missing_directory_yields_no_count() {
+    let fixture = Fixture::with_origin(&["feature"]);
+    let space = fixture.create("feature");
+    fs::remove_dir_all(&space.path).expect("could not remove the space");
+
+    assert_eq!(fixture.backend.uncommitted_files(&space), None);
 }
 
 /// A branch with no upstream is unpushed work even with a spotless working
@@ -432,4 +540,13 @@ fn a_never_pushed_space_is_not_free_to_delete() {
     let risk = DeletionRisk::of(&space);
     assert!(!risk.is_safe());
     assert_eq!(risk.losses(), ["a branch that was never pushed"]);
+    // `delete_space` really does delete refs/heads/<name>, so the dialog is
+    // entitled to promise it — see `delete_space_removes_the_branch`.
+    assert_eq!(
+        risk.removals(),
+        [
+            "the worktree directory and its registration",
+            "the branch it has checked out"
+        ]
+    );
 }

@@ -28,8 +28,15 @@ use super::{Backend, LocalState, RemoteState, Space, SpaceStatus};
 /// without touching prose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AtRisk {
-    /// Git: tracked files differ from the index/HEAD. Has no jj equivalent.
-    Uncommitted,
+    /// Git: the working tree holds files no commit has — modified, staged or
+    /// untracked. Has no jj equivalent, which auto-commits.
+    ///
+    /// The count is optional because it does not come from the same place as the
+    /// reading: the status snapshot only says *whether* the tree is dirty, and
+    /// the number is filled in later by [`DeletionRisk::counting_files`] from the
+    /// owning backend. `None` prints the loss without a figure rather than
+    /// guessing one.
+    Uncommitted(Option<u32>),
     /// The space was never probed, so nothing can be promised about it.
     Unprobed,
     /// jj: the change carries unresolved conflict markers.
@@ -59,7 +66,16 @@ impl AtRisk {
             Backend::Jj => "bookmark",
         };
         match self {
-            AtRisk::Uncommitted => "uncommitted changes in the working tree".to_string(),
+            // The wording names exactly what was counted. "3 uncommitted files"
+            // that silently omitted the untracked ones would be a number the
+            // user trusts and should not.
+            AtRisk::Uncommitted(None) => "uncommitted changes in the working tree".to_string(),
+            AtRisk::Uncommitted(Some(1)) => {
+                "1 uncommitted file (modified, staged or untracked)".to_string()
+            }
+            AtRisk::Uncommitted(Some(n)) => {
+                format!("{} uncommitted files (modified, staged or untracked)", n)
+            }
             AtRisk::Unprobed => "work shanti could not check for".to_string(),
             AtRisk::Conflicted => "a change with unresolved conflicts".to_string(),
             AtRisk::Divergent => "a divergent change".to_string(),
@@ -86,6 +102,37 @@ pub enum Consequence {
     RecoverableLoss,
     /// Work lives only here and deleting it destroys it.
     PermanentLoss,
+}
+
+/// A thing deletion takes away whether or not any work was at risk.
+///
+/// Separate from [`AtRisk`] because the two answer different questions: `AtRisk`
+/// is "what would be *lost*", this is "what will be *removed*". A clean, pushed
+/// space loses nothing and still has its branch deleted, and the user should not
+/// have to infer that from a dialog that lists no losses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Removed {
+    /// The space itself: the directory on disk and the backend's registration of
+    /// it (`git worktree prune`, `jj workspace forget`).
+    Space,
+    /// git only: `delete_space` deletes the branch the worktree has checked out,
+    /// because a git worktree owns its branch — nothing else can have it checked
+    /// out while the worktree does. jj has no equivalent, which is why this is
+    /// not a neutral "pointer": a bookmark belongs to the repository and
+    /// outlives the workspace.
+    Branch,
+}
+
+impl Removed {
+    /// One line of plain English, in `backend`'s vocabulary.
+    pub fn describe(self, backend: Backend) -> &'static str {
+        match (self, backend) {
+            (Removed::Space, Backend::Git) => "the worktree directory and its registration",
+            (Removed::Space, Backend::Jj) => "the workspace directory and its registration",
+            // Only ever reached for git; see the variant's own note.
+            (Removed::Branch, _) => "the branch it has checked out",
+        }
+    }
 }
 
 /// The verdict on one space: how bad deleting it would be, and why.
@@ -145,6 +192,53 @@ impl DeletionRisk {
         &self.at_risk
     }
 
+    /// Fill in the number of uncommitted files, which the status snapshot does
+    /// not carry.
+    ///
+    /// This only ever refines the *wording* of a loss the gate has already
+    /// decided on — it touches no item that is not already there, so it can
+    /// never turn a safe space into an unsafe one or the other way round.
+    /// `Some(0)` is taken as no answer: it means the tree changed between the
+    /// status snapshot and the count, and "0 uncommitted files" printed under
+    /// "This would destroy:" would be nonsense.
+    pub fn counting_files(mut self, files: Option<u32>) -> Self {
+        let files = files.filter(|&n| n > 0);
+        for item in &mut self.at_risk {
+            if let AtRisk::Uncommitted(count) = item {
+                *count = files;
+            }
+        }
+        self
+    }
+
+    /// What deletion removes besides the files, in the owning backend's words.
+    ///
+    /// Always non-empty: deleting a space always costs at least the space.
+    pub fn removals(&self) -> Vec<&'static str> {
+        let mut removed = vec![Removed::Space];
+        // git deletes `refs/heads/<name>` along with the worktree; jj does not
+        // touch bookmarks, which belong to the repository, not to a workspace.
+        if self.backend == Backend::Git {
+            removed.push(Removed::Branch);
+        }
+        removed
+            .into_iter()
+            .map(|item| item.describe(self.backend))
+            .collect()
+    }
+
+    /// What deletion notably leaves behind, when the answer would otherwise be
+    /// guessed from the other backend's behaviour.
+    ///
+    /// Only jj has one: a user who has watched shanti delete a git branch would
+    /// reasonably assume the bookmark goes the same way, and it does not.
+    pub fn retained(&self) -> Option<&'static str> {
+        match self.backend {
+            Backend::Git => None,
+            Backend::Jj => Some("The bookmark stays in the repository."),
+        }
+    }
+
     /// One line per thing that would be lost, in the owning backend's words.
     pub fn losses(&self) -> Vec<String> {
         self.at_risk
@@ -175,7 +269,8 @@ fn items_at_risk(status: &SpaceStatus) -> Vec<AtRisk> {
     let mut items = Vec::new();
     match status.local {
         LocalState::Unknown { .. } => items.push(AtRisk::Unprobed),
-        LocalState::Git { dirty: true } => items.push(AtRisk::Uncommitted),
+        // The count is not in the snapshot; `counting_files` fills it in.
+        LocalState::Git { dirty: true } => items.push(AtRisk::Uncommitted(None)),
         LocalState::Git { dirty: false } => {}
         LocalState::Jj(jj) => {
             // Both, when both are true: they are independent failures and the
@@ -236,6 +331,117 @@ mod tests {
         let risk = git(RemoteState::in_sync(), true);
         assert_eq!(risk.consequence(), Consequence::PermanentLoss);
         assert_eq!(risk.losses(), ["uncommitted changes in the working tree"]);
+    }
+
+    /// The number is what stops a user; "uncommitted changes" is a phrase they
+    /// scroll past. The parenthetical is not decoration — it says what was
+    /// counted, so a user who sees "3" cannot read it as "3 files I edited" when
+    /// one of the three is a file they never added.
+    #[test]
+    fn a_counted_dirty_worktree_says_how_many_files() {
+        let risk = git(RemoteState::in_sync(), true).counting_files(Some(3));
+        assert_eq!(
+            risk.losses(),
+            ["3 uncommitted files (modified, staged or untracked)"]
+        );
+
+        let one = git(RemoteState::in_sync(), true).counting_files(Some(1));
+        assert_eq!(
+            one.losses(),
+            ["1 uncommitted file (modified, staged or untracked)"]
+        );
+    }
+
+    /// A backend that cannot count still gets a warning, just not a number: an
+    /// invented figure would be worse than the vague phrase.
+    #[test]
+    fn an_uncounted_dirty_worktree_still_names_the_loss() {
+        let risk = git(RemoteState::in_sync(), true).counting_files(None);
+        assert_eq!(risk.losses(), ["uncommitted changes in the working tree"]);
+    }
+
+    /// The count is taken after the status snapshot, so it can disagree with it.
+    /// "0 uncommitted files" listed under "This would destroy:" is nonsense, so
+    /// zero reads as "no answer" rather than as a quantity.
+    #[test]
+    fn a_zero_count_is_treated_as_no_answer() {
+        let risk = git(RemoteState::in_sync(), true).counting_files(Some(0));
+        assert_eq!(risk.losses(), ["uncommitted changes in the working tree"]);
+        assert_eq!(risk.consequence(), Consequence::PermanentLoss);
+    }
+
+    /// Counting is wording and nothing else. If it could move the gate, a slow
+    /// or failing count would decide whether work is protected.
+    #[test]
+    fn counting_files_never_moves_the_gate() {
+        for dirty in [true, false] {
+            for remote in [RemoteState::in_sync(), RemoteState::Untracked] {
+                let before = git(remote, dirty);
+                for count in [None, Some(0), Some(1), Some(9)] {
+                    let after = before.clone().counting_files(count);
+                    assert_eq!(before.is_safe(), after.is_safe(), "{remote:?} {dirty}");
+                    assert_eq!(before.consequence(), after.consequence());
+                    assert_eq!(before.items().len(), after.items().len());
+                }
+            }
+        }
+    }
+
+    /// A jj space has nothing to count — it auto-commits — so a count that
+    /// somehow arrives must not invent an "uncommitted" line jj cannot have.
+    #[test]
+    fn counting_files_says_nothing_about_a_jj_space() {
+        let conflicted = JjLocal {
+            conflicted: true,
+            ..JjLocal::clean()
+        };
+        let risk = jj(RemoteState::in_sync(), conflicted).counting_files(Some(4));
+        assert_eq!(risk.losses(), ["a change with unresolved conflicts"]);
+    }
+
+    /// The point of the removals list: the branch goes with the worktree even
+    /// when there is nothing to lose, and the user should not have to infer it.
+    #[test]
+    fn git_says_the_branch_goes_with_the_worktree() {
+        let risk = git(RemoteState::in_sync(), false);
+        assert!(risk.is_safe(), "this is the case that lists no losses");
+        assert_eq!(
+            risk.removals(),
+            [
+                "the worktree directory and its registration",
+                "the branch it has checked out"
+            ]
+        );
+        assert_eq!(risk.retained(), None);
+    }
+
+    /// jj bookmarks are repo-level and outlive the workspace, so claiming the
+    /// bookmark goes would be a lie in the other direction.
+    #[test]
+    fn jj_says_the_bookmark_stays() {
+        let risk = jj(RemoteState::in_sync(), JjLocal::clean());
+        assert_eq!(
+            risk.removals(),
+            ["the workspace directory and its registration"]
+        );
+        assert_eq!(
+            risk.retained(),
+            Some("The bookmark stays in the repository.")
+        );
+    }
+
+    /// Deleting always costs at least the space, whatever the verdict, so the
+    /// dialog is never left with nothing to say about what it removes.
+    #[test]
+    fn every_deletion_removes_something() {
+        for backend in [Backend::Git, Backend::Jj] {
+            for status in [
+                SpaceStatus::unknown(backend),
+                SpaceStatus::git(RemoteState::in_sync(), false),
+            ] {
+                assert!(!DeletionRisk::assess(backend, &status).removals().is_empty());
+            }
+        }
     }
 
     /// The asymmetry that the dialog exists to tell the truth about: the same

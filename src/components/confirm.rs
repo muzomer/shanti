@@ -78,6 +78,12 @@ pub struct ConfirmComponent {
     losses: Vec<String>,
     /// Whether there is a way back, in one short sentence.
     aftermath: Option<String>,
+    /// One line per thing that goes whether or not any work is at risk — the
+    /// branch, the registration, the directory. Shown even on a dialog with no
+    /// losses, because "the branch goes too" is the part a user cannot infer.
+    removals: Vec<String>,
+    /// One short sentence naming what deletion deliberately leaves behind.
+    retained: Option<String>,
     gate: Gate,
     on_confirm: Option<ConfirmCallback>,
 }
@@ -90,6 +96,8 @@ impl ConfirmComponent {
             detail,
             losses: Vec::new(),
             aftermath: None,
+            removals: Vec::new(),
+            retained: None,
             gate: Gate::Enter,
             on_confirm: Some(on_confirm),
         }
@@ -120,6 +128,17 @@ impl ConfirmComponent {
         self
     }
 
+    /// Says what confirming removes regardless of risk, and what it spares.
+    ///
+    /// Separate from [`ConfirmComponent::at_risk`] because it is shown in cases
+    /// that have no losses at all: a clean, pushed space destroys nothing and
+    /// still has its branch deleted.
+    pub fn removing(mut self, removals: Vec<String>, retained: Option<String>) -> Self {
+        self.removals = removals;
+        self.retained = retained;
+        self
+    }
+
     /// The body, top to bottom. Built once per frame and also used to size the
     /// popup, so what is drawn and what is reserved can never disagree.
     fn body(&self) -> Vec<Line<'static>> {
@@ -145,6 +164,25 @@ impl ConfirmComponent {
                     Span::styled("  • ", theme::MUTED),
                     Span::styled(loss.clone(), theme::WARNING_TEXT),
                 ]));
+            }
+        }
+
+        if !self.removals.is_empty() {
+            lines.push(Line::default());
+            lines.push(Line::from(Span::styled(
+                "Deleting also removes:",
+                theme::MUTED,
+            )));
+            for removal in &self.removals {
+                lines.push(Line::from(vec![
+                    Span::styled("  • ", theme::MUTED),
+                    // Dimmer than a loss: this is a statement of fact about what
+                    // deletion does, not a warning about work disappearing.
+                    Span::styled(removal.clone(), theme::SECONDARY),
+                ]));
+            }
+            if let Some(retained) = &self.retained {
+                lines.push(Line::from(Span::styled(retained.clone(), theme::MUTED)));
             }
         }
 

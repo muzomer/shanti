@@ -295,7 +295,15 @@ impl App {
     /// list is empty.
     fn selected_space_risk(&mut self) -> Option<(Space, DeletionRisk)> {
         let space = self.worktrees_component.selected_space()?;
-        let risk = DeletionRisk::of(&space);
+        // The status snapshot says whether the space is dirty, never by how
+        // much, so the number is asked of the owning backend here — once, as the
+        // dialog opens. A repository we cannot find a backend for still gets a
+        // verdict; it just gets it without a count.
+        let files = self
+            .repositories_component
+            .backend_for(&space)
+            .and_then(|vcs| vcs.uncommitted_files(&space));
+        let risk = DeletionRisk::of(&space).counting_files(files);
         Some((space, risk))
     }
 
@@ -360,6 +368,14 @@ fn confirm_delete(space: &Space, risk: DeletionRisk) -> ConfirmComponent {
             }
             ModalFlow::Close
         }),
+    )
+    // Said on every shape of the dialog, including the safe one: a clean,
+    // pushed git space loses no work and still has its branch deleted, and
+    // "the directory goes" is not something the user should have to extend
+    // to the branch on their own.
+    .removing(
+        risk.removals().into_iter().map(str::to_string).collect(),
+        risk.retained().map(str::to_string),
     );
 
     match risk.consequence() {
