@@ -1,22 +1,32 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to coding agents (Claude Code, and anything reading `AGENTS.md`) when working with code in this repository.
 
 # Shanti
 
-Rust CLI tool for creating and managing git worktrees and jujutsu workspaces across multiple repositories to simplify working in multiple concurrent features in separate spaces and being able to manage these spaces easily.
+Rust TUI for creating and managing **spaces** — git worktrees and jujutsu workspaces — across many repositories, so several concurrent features or PRs each get their own checked-out directory that is easy to switch between.
+
+`README.md` documents the tool for the person _using_ it (features, keybindings, configuration, status glyphs). This file is orientation for the person _editing_ it; read the README once for the user-facing behaviour instead of re-deriving it here.
 
 ## Tech Stack & Tooling
 
 - Language: Rust
-- Library: Ratatui (v0.30+) + Crossterm
+- UI: Ratatui (v0.30+) + Crossterm
+- git: the `git2` library. jujutsu: the `jj` **command-line tool** (never a linked library).
 
 ## UI & Design Guidelines (Ratatui)
 
 - Avoid generic plain-text or default block layouts.
-- Theme: Use a dark-mode palette (e.g., Tokyo Night or Catppuccin Mocha).
-- Styling: Leverage Ratatui's `.stylize()` trait heavily. Use bold weights/accent colors for active headers, dimmed/grayed text for secondary details, and high-contrast background highlights for selected items.
-- Layout: Always use constraint-based layouts (`Layout::default()`) with strict minimums/percentages so it handles terminal resizes cleanly. Always include a vim-style keybinding footer (e.g., `q: Quit`, `↑/↓: Navigate`).
+- **Colour lives in `src/theme.rs` and nowhere else.** No component names a raw
+  `Color`; it names the _meaning_ (`theme::TITLE`, `theme::MUTED`,
+  `theme::SELECTED_ROW`, `theme::BORDER_DESTRUCTIVE`, …). The palette is Tokyo
+  Night (night variant); `theme::tone(Tone)` is the single mapping from a domain
+  `Tone` to a colour.
+- Styling: bold accent colours for active headers, dimmed text for secondary
+  detail, a high-contrast background band for the selected row.
+- Layout: constraint-based layouts (`Layout`) with strict minimums/percentages so
+  resizes behave. Always include a vim-style keybinding footer (e.g. `q: Quit`,
+  `↑/↓: Navigate`).
 
 ## Build & Test
 
@@ -29,60 +39,197 @@ cargo fmt --check                # format check (must pass)
 cargo fmt                        # auto-format
 ```
 
+The jj tests need a real `jj` (0.28.0+) on `PATH`; when it is missing the
+fixtures in `src/vcs/jj/testing.rs` make those tests **skip**, not fail.
+
 ## Project Structure
 
 ```
 src/
-  main.rs                        # entry point, terminal setup/teardown, event loop
-  app.rs                         # App struct: holds all components, routes key events, manages Focus
-  cli.rs                         # clap CLI args (--repos-dir, --worktrees-dir, --run-fetch)
-  keymap.rs                      # key→Action resolution; InputMode (Normal/Insert)
-  github.rs                      # GitHub PR URL parsing, PR info fetching, repo cloning
-  lib.rs                         # re-exports
+  main.rs                        # entry point: terminal setup/teardown; prints the selected path on stdout
+  lib.rs                         # run_app (draw + event loop) and Outcome::{Selected, Quit}
+  app.rs                         # App: the space list plus a stack of modals; routes keys to actions
+  cli.rs                         # clap args and the configuration precedence rules
+  config.rs                      # the TOML configuration file (~/.config/shanti/config.toml)
+  events.rs                      # AppEvent / EventSource: keys, paste, ticks and jobs on one channel
+  keymap.rs                      # key → Action resolution; InputMode (Normal/Insert)
+  theme.rs                       # the one place a colour is chosen (Tokyo Night) + tone() mapping
+  github.rs                      # PR URL parsing, PrFetcher, PR lookup, repository cloning
   logs.rs                        # tracing setup
-  dirs.rs                        # directory resolution helpers
-  git/
-    mod.rs                       # public API: list_repositories, worktrees_of_repositories
-    repository.rs                # Repository wrapper around git2::Repository; worktree creation, fetch
-    worktree.rs                  # Worktree wrapper; delete_worktree
+  dirs.rs                        # data/config directory resolution
   components/
-    mod.rs                       # Action enum, EventState enum, shared style constants
-    worktrees.rs                 # WorktreesComponent — main list view (default focus)
-    repositories.rs              # RepositoriesComponent — popup for repo selection
-    create_worktree.rs           # CreateWorktreeComponent — popup text input for branch name
-    confirm.rs                   # ConfirmComponent — generic yes/no confirmation dialog
-    help.rs                      # HelpComponent — context-sensitive keybinding help popup
-    pr_worktree.rs               # PrWorktreeComponent — popup text input for GitHub PR URL
-    list.rs                      # generic list widget used by worktrees/repositories components
-    filter.rs                    # filter/search logic for lists
+    mod.rs                       # Action and EventState enums; re-exports
+    modal.rs                     # Modal trait, ModalFlow, AppContext, Confirm/SelectCallback, centered()
+    worktrees.rs                 # WorktreesComponent — the main list of spaces (SpaceEntry rows)
+    repositories.rs              # RepositoriesComponent (owns the backends) + RepositoriesModal
+    create_worktree.rs           # popup text input for a new space name
+    pr_worktree.rs               # popup text input for a GitHub PR URL, and the flow behind it
+    select_directory.rs          # popup to pick one of the repos dirs (used when cloning)
+    confirm.rs                   # generic yes/no dialog, deferring the "yes" to a callback
+    help.rs                      # context-sensitive keybinding help popup; HelpEntry
+    list.rs                      # generic list widget shared by the list views
+    filter.rs                    # filter/search input state
+  vcs/
+    mod.rs                       # the Vcs trait, BoxedVcs, open_backends/open_at, refresh, space_dest
+    backend.rs                   # Backend enum (Git | Jj) with its labels and nouns
+    repo.rs                      # Repo and RepoId
+    space.rs                     # Space — the backend-neutral unit of work
+    status.rs                    # SpaceStatus, RemoteState, LocalState, JjLocal, StatusGlyph, Tone
+    delete.rs                    # DeletionRisk / Consequence: what deleting a space would cost
+    discover.rs                  # the on-disk walk; Discovered, backend_at, backends_at
+    git/                         # the git backend: mod.rs, backend.rs (GitBackend), worktree.rs
+    jj/                          # the jj backend: backend.rs (JjBackend), cmd.rs (JjCli), base.rs,
+                                 #   status.rs, template.rs, version.rs, workspace.rs, testing.rs
+tests/
+  state.rs                       # App state machine driven through real key events
+  git_backend.rs                 # git backend end to end, against real repositories on disk
+  jj_backend.rs                  # jj backend end to end (skips when jj is missing)
+  colocated.rs                   # a repository with both .git and .jj
 ```
 
 ## Key Concepts
 
-- **Focus** (`app.rs`): six variants — `Worktrees`, `Repositories`, `CreateWorktree`, `Confirm`, `Help`, `PrWorktree`. Only one has keyboard focus at a time.
-- **InputMode** (`keymap.rs`): `Normal` (vi-style nav) or `Insert` (text entry). `keymap::resolve(mode, key)` maps a `KeyEvent` to an `Action`.
-- **Action** (`components/mod.rs`): enum of all user intents (e.g. `MoveDown`, `Select`, `Delete`, `OpenPrWorktree`). `App::handle_key` resolves keys to actions then dispatches to the focused component handler.
-- **EventState** (`components/mod.rs`): `Consumed`, `NotConsumed`, `Exit`. Components return this from `handle_action` to indicate whether they handled the event.
-- **Worktrees** are stored under `SHANTI_WORKTREES_DIR/<repo-name>/<branch-name>/`.
-- **Repositories** are discovered by recursively scanning `SHANTI_REPOS_DIR` for `.git` directories.
-- **`has_remote_branch`** on `Worktree` indicates whether the local branch has a tracking upstream.
-- **GitHub integration** (`github.rs`): `p` opens a PR URL prompt; `P` does the same but auto-creates the worktree. Auth uses `gh` CLI first (with `GITHUB_TOKEN` if set), then falls back to `ureq` + `GITHUB_TOKEN`. If the repo isn't found locally, the user is prompted to clone it via SSH.
+### The VCS seam
 
-## Environment Variables
+- **`Vcs`** (`vcs/mod.rs`) is the single seam every backend implements: `spaces`,
+  `create_space`, `delete_space`, `fetch`, `resolve_base`, `repo`, `backend`. It
+  is deliberately **object-safe** — git and jj repositories live in one
+  collection — so backends are stored as **`BoxedVcs`** (`Box<dyn Vcs>`). No
+  generic methods, no `async`, no `Self` in return position.
+- Everything in `vcs/` is an **owned snapshot**: no type holds a
+  `git2::Repository`, a file handle or a child process, so lists survive across
+  frames and can move between threads.
+- **`Space`** is the backend-neutral word for one checked-out directory — a git
+  _worktree_ or a jj _workspace_. The UI holds `Space`, never a git-specific
+  type. `Backend::space_noun()` supplies the backend's own word for messages.
+- **Layout policy lives in one place**: `vcs::space_dest(worktrees_dir, repo, name)`
+  → `<worktrees dir>/<repo-name>/<space-name>`. `create_space` takes the
+  destination rather than deriving it, so no backend can drift from it.
+- **`vcs::discover`** walks the repos dirs cheaply (`stat` only, bounded depth,
+  the worktrees dir excluded) and decides the backend from the layout: `.jj` → jj,
+  `.git` only → git, **both (colocated) → jj owns it**, with git kept as an
+  _additional_ backend so pre-existing git worktrees are still listed. Only the
+  owner failing to open is fatal.
+- **`SpaceStatus`** (`vcs/status.rs`) renders as **two glyphs**: the remote half
+  (`RemoteState`) means the same for a git branch and a jj bookmark; the local
+  half genuinely differs (git: dirty working tree; jj: empty / conflicted /
+  divergent, since jj auto-commits). Each `StatusGlyph` carries a symbol, a
+  plain-English `meaning`, and a semantic **`Tone`**
+  (`Muted`/`Ok`/`Info`/`Warn`/`Danger`) — the domain model never names a colour.
+- **`vcs::delete`** turns a `SpaceStatus` into a `DeletionRisk`, so the UI can
+  pick a proportionate confirmation. Safety is decided by
+  `SpaceStatus::has_unsaved_work` / `RemoteState::has_unpushed_work` and never
+  re-derived elsewhere.
+- **jj is driven through the CLI.** `vcs/jj/cmd.rs` (`JjCli`) is the only place in
+  the codebase that spawns a process; it guarantees no pager, no colour, an
+  explicit repository, a checked version floor (0.28.0) and template-based,
+  machine-readable output. Never link `jj_lib`, and never parse jj's
+  human-facing output — add a template in `vcs/jj/template.rs` instead.
+- Likewise, `vcs/git/` is the only place allowed to name a `git2` type.
 
-| Variable               | CLI flag          | Description                           |
-| ---------------------- | ----------------- | ------------------------------------- |
-| `SHANTI_REPOS_DIR`     | `--repos-dir`     | Directory containing git repositories |
-| `SHANTI_WORKTREES_DIR` | `--worktrees-dir` | Directory where worktrees are created |
+### The UI
+
+- **Modal stack** (`app.rs` + `components/modal.rs`): there is no `Focus` enum.
+  `App` holds `modals: Vec<Box<dyn Modal>>` over the space list. Drawing walks
+  the stack bottom-to-top; the effective `InputMode` is the top modal's, so
+  popping restores the layer below by construction. A modal returns a
+  **`ModalFlow`** (`Consumed`, `Ignored`, `Close`, `Replace(next)`) saying what
+  should happen to the stack — `App` never learns what a modal is _for_. Adding a
+  popup means adding a `Modal` implementation, not another field on `App`.
+- **`AppContext`** is the state lent to a modal while it runs (the space list,
+  the repositories, the resolved `cli::Args`) plus shared work such as
+  `create_space`. `ConfirmCallback` / `SelectCallback` let a generic dialog defer
+  the meaning of "yes" to whoever opened it.
+- **`InputMode`** (`keymap.rs`): `Normal` (vi-style nav) or `Insert` (text entry).
+  `keymap::resolve(mode, key)` maps a `KeyEvent` to an `Action`.
+- **`Action`** (`components/mod.rs`): every user intent (`MoveDown`, `Select`,
+  `Delete`, `OpenPrWorktree`, …). `App::handle_key` resolves the key, then
+  dispatches to the top modal or to the list.
+- **`EventState`** (`components/mod.rs`): `Consumed`, `NotConsumed`, `Exit`.
+- **`events.rs`**: terminal input, bracketed paste, a periodic tick and (later)
+  background jobs all arrive on **one channel** (`EventSource` → `AppEvent`), so
+  the loop never blocks on any single source and can redraw while nothing is
+  typed. Dropping `EventSource` stops its producer threads and joins them.
+- **`App::with_args(args, pr_fetcher)`** is the construction seam: it reads no
+  argv, no environment and no configuration file, so tests can point an `App` at
+  their own temp directories and their own PR lookup without disturbing anything
+  else. `App::new()` is the thin wrapper that resolves the real configuration.
+- **GitHub integration** (`github.rs`): `p` opens a PR URL prompt; `P` does the
+  same and clones the repository first if it is missing. Lookups go through
+  `PrFetcher` (`Arc<dyn Fn(&PrUrl) -> Result<PrInfo>>`) — `github::live_fetcher()`
+  in production, a stub in tests. The live one uses the `gh` CLI when available,
+  otherwise HTTPS with `GITHUB_TOKEN`. A clone made this way is always a plain
+  git clone.
+
+## Configuration
+
+Four layers, later wins: built-in defaults → configuration file → environment
+variables → command line flags. `cli.rs` decides the precedence and records
+where each value came from (`--show-config` prints the winner and its origin).
+
+| Variable               | CLI flag          | Description                                                     |
+| ---------------------- | ----------------- | --------------------------------------------------------------- |
+| `SHANTI_REPOS_DIR`     | `--repos-dir`     | Colon-separated directories containing repositories              |
+| `SHANTI_WORKTREES_DIR` | `--worktrees-dir` | Directory where spaces are created                               |
+| `SHANTI_RUN_FETCH`     | `--run-fetch`     | Fetch every repository at startup                                |
+| `SHANTI_CONFIG`        | `--config`        | Directory holding `config.toml` (the flag names the file itself) |
+| `SHANTI_JJ_BIN`        | —                 | Path to the `jj` binary when it is not on `PATH`                 |
+| `SHANTI_DATA`          | —                 | Directory for shanti's log file                                  |
+| `SHANTI_LOGLEVEL`      | —                 | Log level, e.g. `debug` (`RUST_LOG` takes precedence)            |
+| `GITHUB_TOKEN`         | —                 | Read-only token for the GitHub PR flow                           |
+
+The file keys `backend` and `editor` are parsed and reported but nothing acts on
+them yet: the backend is decided from the repository on disk.
 
 ## Conventions
 
 - Use `color-eyre` for error propagation: `eyre::Result`, `.wrap_err("...")`.
-- Use `tracing` macros (`debug!`, `error!`) for logging — no `println!` in library code.
-- SSH agent auth is used for git fetch (`Cred::ssh_key_from_agent`). HTTPS auth is not yet implemented (see TODO in `repository.rs`).
-- New TUI components should implement `draw(&mut self, frame: &mut Frame, area: Rect)` and `handle_key(&mut self, key: KeyEvent) -> EventState`.
-- Tests use `tempfile::tempdir()` for filesystem isolation.
+- Use `tracing` macros (`debug!`, `error!`) for logging — no `println!` in library
+  code. `main.rs` is the only place that writes to stdout (the selected path,
+  which `cd $(shanti)` consumes) or stderr.
+- Comment the _why_ — intent, trade-offs, gotchas — not the _what_. The modules
+  in `src/vcs/` are the house style: a module-level doc comment stating the rule
+  the module exists to enforce.
+- A failed fetch costs a stale view of the remotes and nothing else: never drop a
+  repository from the list or abort a flow because of it (`vcs::refresh`).
+- git fetch authenticates through the **SSH agent** only
+  (`Cred::ssh_key_from_agent` in `vcs/git/backend.rs`); HTTPS credentials are not
+  implemented. jj fetches through `jj git fetch`, so it uses whatever jj is
+  configured with.
+- New popups implement the `Modal` trait (`area`, `draw`, `handle`, optionally
+  `mode` and `help`) rather than adding state to `App`.
+- Tests use `tempfile::tempdir()` for filesystem isolation, and a local _bare_
+  repository stands in for `origin` so the suite runs offline.
 
+## Non-Interactive Shell Commands
+
+**ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.
+
+Shell commands like `cp`, `mv`, and `rm` may be aliased to include `-i` (interactive) mode on some systems, causing the agent to hang indefinitely waiting for y/n input.
+
+**Use these forms instead:**
+
+```bash
+# Force overwrite without prompting
+cp -f source dest           # NOT: cp source dest
+mv -f source dest           # NOT: mv source dest
+rm -f file                  # NOT: rm file
+
+# For recursive operations
+rm -rf directory            # NOT: rm -r directory
+cp -rf source dest          # NOT: cp -r source dest
+```
+
+**Other commands that may prompt:**
+
+- `scp` - use `-o BatchMode=yes` for non-interactive
+- `ssh` - use `-o BatchMode=yes` to fail instead of prompting
+- `apt-get` - use `-y` flag
+- `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
+
+> **`CLAUDE.md` and `AGENTS.md` are independent files with the same content.**
+> Any change to one must be mirrored in the other, except the generated Beads
+> blocks below.
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6cd5cc61 -->
 
 ## Beads Issue Tracker
