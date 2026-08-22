@@ -7,10 +7,12 @@
 //! no second command per workspace, and no opening each directory as if it were
 //! its own repository (it is not: workspaces share one repo store).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use color_eyre::eyre::{self, eyre};
+use color_eyre::eyre::{self, eyre, WrapErr};
+use tracing::debug;
 
+use super::cmd::JjCli;
 use super::template::{Record, Template};
 use crate::vcs::JjLocal;
 
@@ -57,6 +59,88 @@ impl Workspace {
                 divergent: boolean(record, "divergent")?,
             },
         })
+    }
+}
+
+/// Remove the workspace `name`, rooted at `root`: its work, then its
+/// registration, then its directory.
+///
+/// The order is load-bearing, and it is the same constraint the git side obeys
+/// in `git::worktree::remove_worktree` rather than a jj quirk: the directory
+/// goes last, because everything that reads a space's state needs the working
+/// copy to still be there. Removing it first leaves the workspace registered in
+/// the shared repo store, and jj then complains about a working copy that has
+/// vanished on every later operation.
+///
+/// The steps line up with git's as follows:
+///
+/// | step | git | jj |
+/// | --- | --- | --- |
+/// | keep the work | (nothing: git never had it) | snapshot the working copy |
+/// | deregister | prune the worktree | `jj workspace forget` |
+/// | branch | delete the checked-out branch | (nothing: see below) |
+/// | directory | `remove_dir_all` | `remove_dir_all` |
+///
+/// There is no jj counterpart to git's branch deletion. Bookmarks are
+/// repo-level and outlive the workspace that happened to sit on one, and a
+/// workspace's name is not a bookmark's name anyway; deleting a bookmark is a
+/// separate user intent and not this function's business.
+pub(super) fn remove_workspace(cli: &JjCli, name: &str, root: &Path) -> eyre::Result<()> {
+    snapshot(cli, name, root);
+
+    debug!(workspace = name, "forgetting a jj workspace");
+    // `run`, not `read`: forgetting changes the repository.
+    //
+    // Idempotent by jj's own design — forgetting a workspace it does not know
+    // is a warning and a zero exit, not a failure — so deleting a space twice
+    // converges on "removed", exactly as it does on the git side.
+    cli.run(&["workspace", "forget", name])
+        .wrap_err_with(|| format!("could not forget the jj workspace {name:?}"))?;
+
+    if root.exists() {
+        std::fs::remove_dir_all(root).wrap_err_with(|| {
+            format!(
+                "could not remove the directory {} of the jj workspace {name:?}",
+                root.display()
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+/// Let jj record whatever the workspace holds, before the directory holding it
+/// is removed.
+///
+/// jj auto-commits, but only when a jj command actually runs in that workspace:
+/// edits made since the last one exist on disk and nowhere else. Snapshotting
+/// first turns them into the workspace's working-copy commit, which survives
+/// the forget below as an ordinary change in the repo — still reachable from
+/// `jj log`, and recoverable long after the directory is gone. Skip this step
+/// and deleting a space could silently destroy work no other copy of exists.
+///
+/// A working-copy commit that is genuinely empty and undescribed is abandoned
+/// by the forget instead, which is the outcome we want: nothing was lost.
+///
+/// Best-effort on purpose. This is a safety net, not a precondition: a
+/// workspace whose directory was already removed by hand has nothing left to
+/// snapshot, and failing here would strand its registration forever. Whether to
+/// *refuse* deleting a space that still holds work belongs to shanti-7q6.1 and
+/// is asked before we ever get here.
+fn snapshot(cli: &JjCli, name: &str, root: &Path) {
+    // A second adapter, bound to the workspace rather than to the repository:
+    // jj picks which workspace to snapshot from the path it is pointed at, so
+    // the repository-wide `cli` would snapshot the default workspace instead of
+    // this one. Built from the already-located binary, so it costs no re-probe.
+    let workspace_cli = JjCli::with_program(cli.program(), root, cli.version());
+    // Any command that snapshots would do; `status` is the cheapest that does
+    // nothing else.
+    if let Err(error) = workspace_cli.run(&["status"]) {
+        debug!(
+            workspace = name,
+            %error,
+            "could not snapshot the workspace before forgetting it; continuing"
+        );
     }
 }
 

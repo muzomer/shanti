@@ -25,7 +25,7 @@ use crate::vcs::{Backend, RemoteState, Repo, Space, SpaceStatus, Vcs};
 
 use super::base::{self, Base, ANY_REVISION, REAL_TRUNK, REMOTE_BOOKMARKS};
 use super::cmd::JjCli;
-use super::workspace::{Workspace, WORKSPACES};
+use super::workspace::{self, Workspace, WORKSPACES};
 
 /// A single jujutsu repository, and everything shanti can do with it.
 ///
@@ -243,13 +243,31 @@ impl Vcs for JjBackend {
             .ok_or_else(|| eyre!("jj created the workspace {name:?} but does not list it as one"))
     }
 
-    /// Not implemented yet: deleting jj workspaces — which must `jj workspace
-    /// forget` before removing the directory — is shanti-nhe.4.
+    /// Forget the jj workspace behind `space`, then remove its directory.
+    ///
+    /// The ordering, and what happens to the change the workspace held, are
+    /// [`workspace::remove_workspace`]'s to explain; it is the mirror of the git
+    /// backend's `remove_worktree`, deliberately down to the shape.
+    ///
+    /// The refusal here is jj-specific: the repository's own working copy is not
+    /// a space shanti created. jj will not let it be forgotten, and removing its
+    /// directory would take the source repository with it.
     fn delete_space(&self, space: &Space) -> eyre::Result<()> {
-        Err(eyre!(
-            "deleting the jj workspace {:?} is not implemented yet (shanti-nhe.4)",
-            space.name
-        ))
+        if self.is_default_space(space) {
+            return Err(eyre!(
+                "{:?} is the working copy of the repository {} itself, not a space shanti created; \
+                 refusing to delete it",
+                space.name,
+                self.repo.name
+            ));
+        }
+
+        workspace::remove_workspace(&self.cli, &space.name, &space.path).wrap_err_with(|| {
+            format!(
+                "could not delete the jj workspace {:?} of {}",
+                space.name, self.repo.name
+            )
+        })
     }
 
     /// Not implemented yet: mapping fetch onto `jj git fetch` is shanti-nhe.6.
@@ -449,10 +467,6 @@ mod tests {
             return;
         };
         let backend = fixture.backend();
-        let space = backend.spaces().unwrap().remove(0);
-
-        let delete = backend.delete_space(&space).unwrap_err().to_string();
-        assert!(delete.contains("shanti-nhe.4"), "{delete}");
 
         let fetch = backend.fetch().unwrap_err().to_string();
         assert!(fetch.contains("shanti-nhe.6"), "{fetch}");
@@ -608,6 +622,119 @@ mod tests {
         let error = format!("{report:#}");
         assert!(error.contains("feature"), "{error}");
         assert!(error.contains("already exists"), "{error}");
+    }
+
+    /// The acceptance criterion: no stale entry in `jj workspace list`, and no
+    /// directory left behind.
+    #[test]
+    fn a_deleted_space_leaves_no_registration_and_no_directory() {
+        let Some(fixture) = JjFixture::new("delete") else {
+            return;
+        };
+        let backend = fixture.backend();
+        let dest = fixture.workspace_root("feature");
+        let space = backend.create_space("feature", &dest).unwrap();
+
+        backend.delete_space(&space).unwrap();
+
+        let names: Vec<String> = backend
+            .spaces()
+            .unwrap()
+            .into_iter()
+            .map(|space| space.name)
+            .collect();
+        assert_eq!(names, ["default"], "the workspace is still registered");
+        assert!(!dest.exists(), "{} is still on disk", dest.display());
+    }
+
+    /// The safety question jj raises and git does not: the workspace may hold
+    /// the only copy of some work. Deleting the space must not destroy it — the
+    /// change is snapshotted first and stays in the repo afterwards.
+    #[test]
+    fn deleting_a_space_keeps_the_work_it_held() {
+        let Some(fixture) = JjFixture::new("delete-keeps-work") else {
+            return;
+        };
+        let backend = fixture.backend();
+        let dest = fixture.workspace_root("feature");
+        let space = backend.create_space("feature", &dest).unwrap();
+        // Written but never snapshotted: exactly the state a user leaves a
+        // space in after editing files without running jj there.
+        std::fs::write(dest.join("a.txt"), "work worth keeping\n").unwrap();
+
+        backend.delete_space(&space).unwrap();
+
+        // Every commit the fixture makes on its own is empty, so a non-empty
+        // one in the repo can only be the change the deleted space held.
+        let log = backend
+            .cli()
+            .read(&["log", "--no-graph", "-r", "all()", "-T", "empty ++ \"\n\""])
+            .unwrap();
+        assert!(
+            log.lines().any(|line| line == "false"),
+            "the work the space held is gone: {log}"
+        );
+    }
+
+    /// The mirror image of the git side's already-removed directory: the
+    /// registration must still be cleaned up, or jj complains about a vanished
+    /// working copy on every later operation.
+    #[test]
+    fn a_space_whose_directory_was_removed_by_hand_is_still_forgotten() {
+        let Some(fixture) = JjFixture::new("delete-vanished") else {
+            return;
+        };
+        let backend = fixture.backend();
+        let dest = fixture.workspace_root("feature");
+        let space = backend.create_space("feature", &dest).unwrap();
+        std::fs::remove_dir_all(&dest).unwrap();
+
+        backend.delete_space(&space).unwrap();
+
+        let names: Vec<String> = backend
+            .spaces()
+            .unwrap()
+            .into_iter()
+            .map(|space| space.name)
+            .collect();
+        assert_eq!(names, ["default"], "the workspace is still registered");
+    }
+
+    /// Deleting twice converges on "removed" rather than failing, matching the
+    /// git backend.
+    #[test]
+    fn deleting_the_same_space_twice_converges_on_removed() {
+        let Some(fixture) = JjFixture::new("delete-twice") else {
+            return;
+        };
+        let backend = fixture.backend();
+        let dest = fixture.workspace_root("feature");
+        let space = backend.create_space("feature", &dest).unwrap();
+
+        backend.delete_space(&space).unwrap();
+        backend
+            .delete_space(&space)
+            .expect("deleting an already-deleted space should succeed");
+
+        assert!(!dest.exists());
+    }
+
+    /// shanti did not create the repository's own working copy, and removing it
+    /// would take the source repository with it.
+    #[test]
+    fn deleting_the_repositorys_own_workspace_is_refused() {
+        let Some(fixture) = JjFixture::new("delete-default") else {
+            return;
+        };
+        let backend = fixture.backend();
+        let default = backend.spaces().unwrap().remove(0);
+
+        let error = format!("{:#}", backend.delete_space(&default).unwrap_err());
+        assert!(error.contains("refusing to delete"), "{error}");
+        assert!(
+            backend.repo().path.exists(),
+            "the repository itself was removed"
+        );
     }
 
     #[test]
