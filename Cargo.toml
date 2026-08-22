@@ -3,11 +3,11 @@ name = "shanti"
 version = "0.5.0"
 edition = "2021"
 authors = ["Muzaffar Omer <muzaffar.omer@gmail.com>"]
-description = "Tool to create and manage git worktrees"
+description = "Tool to create and manage git worktrees and jujutsu workspaces"
 readme = "README.md"
 repository = "https://github.com/muzomer/shanti"
 license-file = "LICENSE"
-keywords = ["git", "worktree", "workspace"]
+keywords = ["git", "jujutsu", "worktree", "workspace", "tui"]
 categories = ["command-line-utilities"]
 
 [dependencies]
