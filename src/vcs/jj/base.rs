@@ -100,6 +100,15 @@ impl Base {
 /// `origin` wins when several remotes carry the same name; otherwise the first
 /// row jj listed does, so the answer stays stable between two runs (jj sorts
 /// its listing) instead of depending on iteration order.
+///
+/// A ref that is no longer `present` does not count. jj keeps listing a tracked
+/// remote bookmark after it has been deleted upstream — that is how
+/// [`super::status`] tells "deleted upstream" from "never pushed" — but such a
+/// ref points at nothing, so `remote_bookmarks(...)` resolves to the empty
+/// revset and `jj workspace add --revision` fails outright. Skipping it here is
+/// what makes recreating a space for a *merged* pull request fall through to
+/// `trunk()` instead of erroring, which is the case shanti-nhe.6 put in front
+/// of it (shanti-nhe.8).
 pub fn remote_carrying(records: &[Record], bookmark: &str) -> eyre::Result<Option<String>> {
     let mut found: Option<String> = None;
     for record in records {
@@ -108,6 +117,9 @@ pub fn remote_carrying(records: &[Record], bookmark: &str) -> eyre::Result<Optio
         }
         let remote = record.get("remote")?;
         if !is_real_remote(remote) {
+            continue;
+        }
+        if !record.boolean("present")? {
             continue;
         }
         if remote == PREFERRED_REMOTE {
@@ -177,6 +189,18 @@ mod tests {
             remote_carrying(&records, "feature").unwrap().as_deref(),
             Some("fork")
         );
+    }
+
+    /// The merged-pull-request case: the tracked ref is still listed, but it
+    /// points at nothing, so it cannot be a base.
+    #[test]
+    fn a_bookmark_deleted_upstream_is_not_a_base() {
+        let output = format!(
+            "feature{FIELD_SEPARATOR}origin{FIELD_SEPARATOR}true{FIELD_SEPARATOR}false\
+             {FIELD_SEPARATOR}0{FIELD_SEPARATOR}3\n"
+        );
+        let records = crate::vcs::jj::status::BOOKMARKS.parse(&output).unwrap();
+        assert_eq!(remote_carrying(&records, "feature").unwrap(), None);
     }
 
     #[test]

@@ -274,6 +274,13 @@ fn clone_into(
 /// Final step of the PR flow: select the existing worktree, create one outright
 /// (auto mode), or hand over to the branch-name prompt.
 fn open_worktree_for_pr(ctx: &mut AppContext, pr_info: github::PrInfo, auto: bool) -> ModalFlow {
+    // The PR branch may have been pushed since the last fetch; without this it is
+    // invisible to the backend and the space is silently based on trunk instead.
+    // A failed refresh only costs a stale view of the remotes, so it is not fatal.
+    if let Some(repo) = ctx.repositories.selected_repository() {
+        vcs::refresh(repo);
+    }
+
     let branch = pr_info.branch_name.clone();
 
     if ctx.worktrees.select_worktree_by_branch(&branch) {

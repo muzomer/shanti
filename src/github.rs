@@ -114,6 +114,32 @@ fn fetch_via_ureq(pr: &PrUrl, token: &str) -> eyre::Result<PrInfo> {
 }
 
 /// Clones a GitHub repository into `<repos_dir>/<repo>` using SSH.
+///
+/// # Why plain `git clone` and not `jj git clone --colocate`
+///
+/// The PR flow can reach a repository that is not on disk yet, and the clone has
+/// to pick a backend for it before anyone has said which one they want. shanti
+/// clones with **git**, deliberately, and leaves jj to the user:
+///
+/// * **It works on every machine.** `jj git clone` needs a jj that is installed
+///   and new enough ([`MINIMUM_JJ_VERSION`](crate::vcs::jj::MINIMUM_JJ_VERSION)).
+///   Cloning with jj would make opening a pull request fail for the majority of
+///   users, who have no jj at all, for no benefit to them.
+/// * **It imposes nothing.** A clone is the moment a repository's shape is
+///   decided, and deciding it *for* someone who never chose jj is not shanti's
+///   call to make. git is the shape GitHub itself hands out.
+/// * **Adopting jj afterwards is one command and costs nothing.** Since
+///   shanti-nhe.9 a colocated repository is driven fully through jj, so a user
+///   who wants it runs `jj git init --colocate` in the clone and shanti picks it
+///   up on the next scan — no re-clone, no lost work, no configuration here.
+///
+/// The reverse choice has no such escape hatch: a jj clone on a machine whose
+/// owner does not use jj is a repository they cannot get rid of without
+/// deleting `.jj` by hand.
+///
+/// Nothing downstream hard-codes the outcome. [`crate::vcs::open_at`] decides
+/// the backend from what is on disk, so if this ever becomes a user preference,
+/// this function is the only place that changes.
 pub fn clone_repository(owner: &str, repo: &str, repos_dir: &str) -> eyre::Result<()> {
     let url = format!("git@github.com:{}/{}.git", owner, repo);
     let dest = format!("{}/{}", repos_dir, repo);

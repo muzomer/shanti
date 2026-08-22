@@ -160,6 +160,56 @@ impl JjBackend {
             .wrap_err_with(|| format!("could not list the bookmarks of {}", self.repo.name))
     }
 
+    /// Whether the repository has any git remote at all.
+    ///
+    /// `jj git remote list` renders one plain `name url` line per remote and
+    /// takes no template, so the question is answered by whether it printed
+    /// anything. Asked before fetching so that "this repository has no remotes"
+    /// stays a fact rather than becoming an error — see [`Vcs::fetch`].
+    fn has_remotes(&self) -> eyre::Result<bool> {
+        let listed = self
+            .cli
+            .read(&["git", "remote", "list"])
+            .wrap_err_with(|| format!("could not list the remotes of {}", self.repo.name))?;
+        Ok(!listed.trim().is_empty())
+    }
+
+    /// Make a local bookmark `bookmark` that tracks `bookmark@remote`.
+    ///
+    /// This is the jj half of what the git backend does when it creates a space
+    /// from `origin/<name>`: git makes a local branch with an upstream, jj
+    /// tracks the remote bookmark. Both exist for the same reason — the user is
+    /// going to push this work back.
+    ///
+    /// [`Vcs::create_space`] deliberately creates no bookmark of its own (see
+    /// shanti-nhe.3): in jj a bookmark is only needed at push time, and a
+    /// workspace started from `trunk()` has nothing to name yet. A workspace
+    /// started from a *remote* bookmark is the exception, because the name it
+    /// would push to already exists upstream — that is the whole point of
+    /// opening it. Without this, `jj git push` from the new space would have no
+    /// bookmark to move, and the space would render as untracked even though it
+    /// sits on a pushed change.
+    ///
+    /// Written as `bookmark@remote` rather than `--remote=`: the flag form is
+    /// newer than [`MINIMUM_JJ_VERSION`](super::MINIMUM_JJ_VERSION), and the
+    /// `@` form still works (with a deprecation warning on stderr, which shanti
+    /// discards on success) across the whole supported range.
+    ///
+    /// Idempotent: re-tracking an already-tracked bookmark is a warning and a
+    /// zero exit, not a failure.
+    fn track_bookmark(&self, bookmark: &str, remote: &str) -> eyre::Result<()> {
+        debug!(bookmark, remote, "tracking a remote bookmark");
+        self.cli
+            .run(&["bookmark", "track", &format!("{bookmark}@{remote}")])
+            .map(|_| ())
+            .wrap_err_with(|| {
+                format!(
+                    "could not track the bookmark {bookmark}@{remote} of {}",
+                    self.repo.name
+                )
+            })
+    }
+
     /// Whether the repository has a mainline `trunk()` can point at.
     fn has_trunk(&self) -> eyre::Result<bool> {
         let records = self
@@ -259,8 +309,17 @@ impl Vcs for JjBackend {
     /// assembled here: jj owns the workspace's root path and the state of its
     /// new working-copy commit, and reading them back is also what proves the
     /// workspace really is registered with the repository.
+    ///
+    /// A space started from a remote bookmark gets that bookmark tracked
+    /// locally first — see [`JjBackend::track_bookmark`] for why, and why the
+    /// other two bases get no bookmark. Tracking is done *before* the workspace
+    /// exists so that a failure leaves nothing half-created: a space the user
+    /// cannot push from is a worse outcome than a space that was never made.
     fn create_space(&self, name: &str, dest: &Path) -> eyre::Result<Space> {
         let base = self.base_for(name)?;
+        if let Base::RemoteBookmark { bookmark, remote } = &base {
+            self.track_bookmark(bookmark, remote)?;
+        }
         self.add_workspace(name, dest, &base)?;
 
         let bookmarks = self.bookmarks()?;
@@ -298,11 +357,34 @@ impl Vcs for JjBackend {
         })
     }
 
-    /// Not implemented yet: mapping fetch onto `jj git fetch` is shanti-nhe.6.
+    /// `jj git fetch` against every remote.
+    ///
+    /// `--all-remotes`, not jj's default of the single remote configured under
+    /// `git.fetch`: shanti reports a bookmark's state across every remote that
+    /// carries it (see [`base::remote_carrying`] and [`super::status`]), so
+    /// refreshing one would leave the rest of that view quietly stale. The `git`
+    /// pseudo-remote of a colocated repository is not a fetchable remote, so it
+    /// cannot be pulled from by accident.
+    ///
+    /// A repository with no remotes has nothing to fetch and is *not* an error —
+    /// jj says "No git remotes to fetch from" and exits non-zero, but nothing
+    /// about that repository's view of the world is stale. The git backend
+    /// answers the same way (its loop over remotes simply does not run), and the
+    /// contract this method is judged by is "is what the UI shows out of date",
+    /// not "did a process succeed".
     fn fetch(&self) -> eyre::Result<()> {
-        Err(eyre!(
-            "fetching a jujutsu repository is not implemented yet (shanti-nhe.6)"
-        ))
+        if !self.has_remotes()? {
+            debug!(repo = %self.repo.name, "no jj remotes to fetch from");
+            return Ok(());
+        }
+
+        // `run`, not `read`: a fetch writes new refs into the shared repo store,
+        // so jj is allowed to snapshot the working copy first — exactly as it
+        // would for the same command typed by hand.
+        self.cli
+            .run(&["git", "fetch", "--all-remotes"])
+            .map(|_| ())
+            .wrap_err_with(|| format!("could not fetch the remotes of {}", self.repo.name))
     }
 
     /// The hint the create prompt shows while the user types a name.
@@ -650,17 +732,17 @@ mod tests {
         assert_eq!(vcs.spaces().unwrap().len(), 1);
     }
 
-    /// The deferred halves must fail loudly and name their issue, so a caller
-    /// wired up early gets an explanation instead of silent success.
+    /// A repository with no remotes has nothing to fetch, and that is a fact
+    /// rather than a failure: jj exits non-zero saying so, and `fetch` must not
+    /// pass that on as "your view of the remotes is stale".
     #[test]
-    fn the_deferred_operations_say_which_issue_owns_them() {
-        let Some(fixture) = JjFixture::new("deferred") else {
+    fn fetching_a_repository_with_no_remotes_is_not_an_error() {
+        let Some(fixture) = JjFixture::new("no-remotes") else {
             return;
         };
         let backend = fixture.backend();
 
-        let fetch = backend.fetch().unwrap_err().to_string();
-        assert!(fetch.contains("shanti-nhe.6"), "{fetch}");
+        assert!(backend.fetch().is_ok());
     }
 
     /// The end-to-end check the issue asks for: what shanti creates must come

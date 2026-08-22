@@ -117,6 +117,24 @@ pub trait Vcs: Send {
     fn resolve_base(&self, name: &str) -> String;
 }
 
+/// Refresh `vcs`'s view of its remotes, tolerating failure.
+///
+/// The one place that states shanti's fetch policy: **a fetch that fails costs
+/// a stale view of the remotes and nothing else.** Never a repository dropped
+/// from the list, never a flow aborted — the user is offline, or a remote is
+/// down, and every local answer is still correct.
+///
+/// Two callers want exactly this: `--run-fetch` at startup, and the GitHub PR
+/// flow, which has to refresh before it can resolve a branch that was pushed
+/// after the last fetch. Both go through [`Vcs::fetch`], so a jj repository is
+/// refreshed with `jj git fetch` and a git one with git — no code path outside a
+/// backend decides how a repository talks to its remotes.
+pub fn refresh(vcs: &dyn Vcs) {
+    if let Err(error) = vcs.fetch() {
+        debug!(repo = %vcs.repo().name, %error, "could not fetch");
+    }
+}
+
 /// Where a space named `space_name` of repository `repo_name` lives on disk.
 ///
 /// The one place that knows shanti's layout. [`Vcs::create_space`] deliberately
@@ -206,12 +224,12 @@ fn open_one(path: &Path, backend: Backend, run_fetch: bool) -> eyre::Result<Boxe
         Backend::Jj => {
             let backend = JjBackend::discover(path)?;
             if run_fetch {
-                // A backend that cannot fetch — jj's, until shanti-nhe.6 — is
-                // still worth listing: the cost is a stale view of the remotes,
-                // exactly what a failed git fetch costs too.
-                if let Err(error) = backend.fetch() {
-                    debug!(repo = %backend.repo().name, %error, "could not fetch");
-                }
+                // `--run-fetch` reaches jj through the same [`Vcs::fetch`] the
+                // git side uses, so a jj repository is refreshed with `jj git
+                // fetch` rather than skipped. A repository that cannot reach its
+                // remotes is still worth listing: the cost is a stale view of
+                // the remotes, exactly what a failed git fetch costs too.
+                refresh(&backend);
             }
             Ok(Box::new(backend))
         }

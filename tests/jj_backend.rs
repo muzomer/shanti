@@ -25,7 +25,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use shanti::vcs::jj::{JjBackend, JjCli};
+use shanti::vcs::jj::{Base, JjBackend, JjCli};
 use shanti::vcs::{
     backend_at, discover, Backend, JjLocal, LocalState, RemoteState, Space, SpaceStatus, Vcs,
 };
@@ -177,10 +177,58 @@ impl JjFixture {
         self.jj(&["git", "push", "--allow-new", "--bookmark", name]);
     }
 
+    /// Put `commit` on the `origin` created by [`JjFixture::push_bookmark`] as
+    /// the branch `name`, without this repository hearing about it.
+    ///
+    /// Done with raw `git` against the bare remote because that is what someone
+    /// else opening a pull request actually is: a ref that appears upstream
+    /// while the local repository still knows nothing about it. Only a fetch
+    /// closes that gap, which is exactly what the tests using this assert.
+    fn push_on_remote(&self, name: &str, commit: &str) {
+        self.git_in_remote(&["update-ref", &format!("refs/heads/{name}"), commit]);
+    }
+
+    /// Delete `name` from that same `origin` — a merged pull request, from this
+    /// repository's point of view.
+    fn delete_on_remote(&self, name: &str) {
+        self.git_in_remote(&["update-ref", "-d", &format!("refs/heads/{name}")]);
+    }
+
+    fn git_in_remote(&self, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("--git-dir")
+            .arg(self.base.join("origin.git"))
+            .args(args)
+            .status()
+            .expect("could not run git");
+        assert!(status.success(), "git {args:?} failed in the bare remote");
+    }
+
     /// The commit id `revset` resolves to, for the tests that need to say "the
     /// new workspace started *here*".
     fn commit_at(&self, revset: &str) -> String {
         self.render(revset, "commit_id")
+    }
+
+    /// The same, resolved from inside `dir`: `@` and `@-` mean whatever the
+    /// *workspace* in that directory has checked out, so a test asking where a
+    /// space landed has to ask from the space.
+    fn commit_at_in(&self, dir: &Path, revset: &str) -> String {
+        self.jj_in(
+            dir,
+            &[
+                "log",
+                "--no-graph",
+                "--limit",
+                "1",
+                "-r",
+                revset,
+                "-T",
+                "commit_id",
+            ],
+        )
+        .trim()
+        .to_owned()
     }
 
     /// The *change* id `revset` resolves to.
@@ -789,22 +837,127 @@ fn ahead_space(fixture: &JjFixture) -> Space {
 }
 
 // --------------------------------------------------------------------------
-// Not implemented yet
+// Fetch, and the GitHub PR flow on top of it
 // --------------------------------------------------------------------------
 
-/// `fetch` is shanti-nhe.6 and deliberately unimplemented. It must fail loudly
-/// and name the issue rather than quietly reporting success, which would make
-/// the UI claim the status it shows is fresh.
+/// A repository with no remotes has nothing to fetch. jj says so with a
+/// non-zero exit, but nothing about that repository's view of the world is
+/// stale, so `fetch` must not pass it on as a failure — the git backend, whose
+/// loop over remotes simply does not run, answers the same way.
 #[test]
-fn fetching_is_not_implemented_and_says_so() {
-    let Some(fixture) = JjFixture::new("no-fetch") else {
+fn fetching_a_repository_with_no_remotes_succeeds() {
+    let Some(fixture) = JjFixture::new("no-remotes") else {
         return;
     };
 
-    let error = fixture
+    fixture
         .backend()
         .fetch()
-        .expect_err("fetch must not silently succeed")
-        .to_string();
-    assert!(error.contains("shanti-nhe.6"), "unhelpful error: {error}");
+        .expect("nothing to fetch is not a failure");
+}
+
+/// The reason the PR flow has to fetch at all: a pull request opened after the
+/// user's last fetch is invisible until one happens, and shanti would silently
+/// base the new space on `trunk()` instead of on the pull request.
+#[test]
+fn fetch_learns_about_a_bookmark_pushed_after_the_last_one() {
+    let Some(fixture) = JjFixture::new("fetch-new") else {
+        return;
+    };
+    fixture.push_bookmark("main");
+    fixture.push_on_remote("pr-branch", &fixture.commit_at("main@origin"));
+
+    let backend = fixture.backend();
+    assert_eq!(
+        backend.base_for("pr-branch").expect("base resolves"),
+        Base::Trunk,
+        "the new bookmark cannot be known before a fetch"
+    );
+
+    backend
+        .fetch()
+        .expect("fetching the local bare remote works");
+
+    assert_eq!(
+        backend.base_for("pr-branch").expect("base resolves"),
+        Base::RemoteBookmark {
+            bookmark: "pr-branch".to_owned(),
+            remote: "origin".to_owned(),
+        }
+    );
+}
+
+/// The whole PR flow against a jj repository, in the order it happens: fetch,
+/// then open the pull request's bookmark as a space.
+///
+/// The three assertions are the three things the flow owes the user. The space
+/// must sit on the pull request's commit (not on `trunk()`); a local bookmark
+/// must exist, because otherwise `jj git push` from that space has nothing to
+/// move; and the status column must say "in sync" rather than the "untracked"
+/// a bookmark-less workspace would report.
+#[test]
+fn a_space_opened_for_a_pull_request_lands_on_its_bookmark_and_can_be_pushed() {
+    let Some(fixture) = JjFixture::new("pr-flow") else {
+        return;
+    };
+    fixture.push_bookmark("main");
+    let head = fixture.commit_at("main@origin");
+    fixture.push_on_remote("pr-branch", &head);
+
+    let backend = fixture.backend();
+    backend
+        .fetch()
+        .expect("fetching the local bare remote works");
+    let space = backend
+        .create_space("pr-branch", &fixture.dest("pr-branch"))
+        .expect("the pull request's bookmark can be opened");
+
+    assert_eq!(
+        fixture.commit_at_in(&space.path, "@-"),
+        head,
+        "the space must start on the pull request's commit"
+    );
+    assert!(
+        fixture.jj(&["bookmark", "list"]).contains("pr-branch"),
+        "no local bookmark means nothing for `jj git push` to move"
+    );
+    assert_eq!(
+        space_named(
+            &backend.spaces().expect("listing spaces works"),
+            "pr-branch"
+        )
+        .status
+        .remote,
+        RemoteState::in_sync()
+    );
+}
+
+/// The merged pull request: its bookmark is gone upstream, so it cannot be a
+/// base. jj keeps listing the ref (that is how "deleted upstream" is told from
+/// "never pushed"), but it points at nothing, and asking `jj workspace add` to
+/// start there fails outright. Falling through to `trunk()` is the answer that
+/// still gives the user somewhere to work (shanti-nhe.8).
+#[test]
+fn a_bookmark_deleted_upstream_is_not_used_as_a_base() {
+    let Some(fixture) = JjFixture::new("merged-pr") else {
+        return;
+    };
+    fixture.push_bookmark("main");
+    fixture.push_on_remote("pr-branch", &fixture.commit_at("main@origin"));
+
+    let backend = fixture.backend();
+    backend.fetch().expect("fetching works");
+    fixture.jj(&["bookmark", "track", "pr-branch@origin"]);
+
+    // The pull request is merged and its branch deleted, as GitHub does.
+    fixture.delete_on_remote("pr-branch");
+    backend.fetch().expect("fetching works");
+
+    assert_eq!(
+        backend.base_for("pr-branch").expect("base resolves"),
+        Base::Trunk
+    );
+    backend
+        .create_space("pr-branch", &fixture.dest("pr-branch"))
+        .expect("a space still opens, based on trunk");
 }
