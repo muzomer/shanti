@@ -74,6 +74,12 @@ struct Fixture {
     worktrees_dir: TempDir,
     /// Second repos dir, only populated by [`Fixture::with_two_repos_dirs`].
     _extra_repos_dir: Option<TempDir>,
+    /// Bare repository standing in for a remote, only populated by
+    /// [`Fixture::push`].
+    _remote_dir: Option<TempDir>,
+    /// Kept so the app can be rebuilt after the fixture changes on disk;
+    /// statuses are probed when spaces are listed, not per frame.
+    args: Args,
 }
 
 impl Fixture {
@@ -115,7 +121,7 @@ impl Fixture {
         // The default lookup fails loudly: a PR test that forgot to stub sees an
         // error message rather than silently reaching out to github.com.
         let app = App::with_args(
-            args,
+            args.clone(),
             Arc::new(|_| Err(color_eyre::eyre::eyre!("no PR lookup was stubbed"))),
         );
 
@@ -124,7 +130,64 @@ impl Fixture {
             repos_dir,
             worktrees_dir,
             _extra_repos_dir: extra,
+            _remote_dir: None,
+            args,
         }
+    }
+
+    /// Rebuilds the app from the same configuration, re-probing every status.
+    ///
+    /// The delete guard reads the snapshot taken when spaces were listed, so a
+    /// test that changes a repository has to ask for a fresh reading — exactly
+    /// as restarting shanti would.
+    fn reload(&mut self) {
+        self.app = App::with_args(
+            self.args.clone(),
+            Arc::new(|_| Err(color_eyre::eyre::eyre!("no PR lookup was stubbed"))),
+        );
+    }
+
+    /// Gives `branch` an upstream that already holds its commits.
+    ///
+    /// This is the only state the delete guard considers safe — clean and
+    /// pushed — and the fixture's worktree is deliberately *not* in it by
+    /// default, because a freshly created space never is.
+    fn push(&mut self, repo: &str, branch: &str) {
+        let remote = tempdir().expect("could not create remote dir");
+        git(remote.path(), &["init", "--bare", "-q"]);
+        git(
+            &self.repo_path(repo),
+            &[
+                "remote",
+                "add",
+                "origin",
+                remote.path().to_str().expect("utf-8 path"),
+            ],
+        );
+        git(
+            &self.worktree_path(repo, branch),
+            &["push", "-q", "-u", "origin", branch],
+        );
+        self._remote_dir = Some(remote);
+        self.reload();
+    }
+
+    /// Leaves an uncommitted change in a worktree.
+    fn dirty(&mut self, repo: &str, branch: &str) {
+        std::fs::write(
+            self.worktree_path(repo, branch).join("README.md"),
+            "edited\n",
+        )
+        .expect("could not edit the worktree");
+        self.reload();
+    }
+
+    /// Deletes the selected space through the guarded path: open the dialog and
+    /// type the space's name.
+    fn delete_deliberately(&mut self, name: &str) {
+        self.press_char('d');
+        self.type_str(name);
+        self.press(key(KeyCode::Enter));
     }
 
     fn worktree_path(&self, repo: &str, branch: &str) -> std::path::PathBuf {
@@ -716,9 +779,12 @@ fn cancelling_the_confirm_modal_leaves_the_worktree_untouched() {
     assert!(f.screen().contains("Worktrees (1/1)"));
 }
 
+/// A space that is clean and pushed still deletes in one confirmation: the
+/// guard must not tax the ordinary case.
 #[test]
 fn confirming_the_delete_removes_the_worktree_and_returns_to_the_list() {
     let mut f = Fixture::new();
+    f.push("alpha", "feature-one");
     let path = f.worktree_path("alpha", "feature-one");
     assert!(path.exists());
 
@@ -734,22 +800,138 @@ fn confirming_the_delete_removes_the_worktree_and_returns_to_the_list() {
     );
 }
 
+/// The bug this guard exists for: the fixture worktree was never pushed, so its
+/// branch lives nowhere else. Enter — the key every other dialog is dismissed
+/// with — must not be able to destroy it.
 #[test]
-fn force_delete_skips_the_confirm_modal() {
+fn enter_cannot_delete_a_worktree_that_was_never_pushed() {
+    let mut f = Fixture::new();
+    let path = f.worktree_path("alpha", "feature-one");
+
+    f.press_char('d');
+    assert_eq!(f.modal(), Modal::Confirm);
+    assert_eq!(f.press(key(KeyCode::Enter)), CONSUMED);
+
+    assert_eq!(
+        f.modal(),
+        Modal::Confirm,
+        "the dialog must stay up until the override is given"
+    );
+    assert!(path.exists(), "Enter alone must not delete unpushed work");
+    assert!(f.screen().contains("Worktrees (1/1)"));
+}
+
+/// The override for permanent loss: type the space's own name, which also makes
+/// the user look at which row they are standing on.
+#[test]
+fn typing_the_name_deletes_a_worktree_that_was_never_pushed() {
+    let mut f = Fixture::new();
+    let path = f.worktree_path("alpha", "feature-one");
+
+    f.delete_deliberately("feature-one");
+
+    assert_eq!(f.modal(), Modal::None);
+    assert!(!path.exists(), "the worktree directory should be gone");
+    assert!(f.screen().contains("Worktrees (0/0)"));
+}
+
+/// A near-miss is not a confirmation.
+#[test]
+fn a_wrong_name_does_not_delete_the_worktree() {
+    let mut f = Fixture::new();
+    let path = f.worktree_path("alpha", "feature-one");
+
+    f.press_char('d');
+    f.type_str("feature-on");
+    f.press(key(KeyCode::Enter));
+
+    assert_eq!(f.modal(), Modal::Confirm);
+    assert!(path.exists(), "a mistyped name must not delete anything");
+}
+
+/// The dialog has to say what is about to be lost, in git's vocabulary, and that
+/// there is no way back.
+#[test]
+fn the_dialog_names_what_would_be_lost() {
+    let mut f = Fixture::new();
+    f.press_char('d');
+    let screen = f.screen();
+
+    assert!(
+        screen.contains("a branch that was never pushed"),
+        "the dialog must say what would be destroyed:\n{}",
+        screen
+    );
+    assert!(
+        screen.contains("cannot be undone"),
+        "a git worktree's loss is permanent and must say so:\n{}",
+        screen
+    );
+}
+
+/// Pushing the branch is not enough while the working tree still differs from
+/// it: the file the user edited exists in no object store anywhere.
+#[test]
+fn uncommitted_changes_are_guarded_even_when_the_branch_is_pushed() {
+    let mut f = Fixture::new();
+    f.push("alpha", "feature-one");
+    f.dirty("alpha", "feature-one");
+    let path = f.worktree_path("alpha", "feature-one");
+
+    f.press_char('d');
+    let screen = f.screen();
+    assert!(
+        screen.contains("uncommitted changes in the working tree"),
+        "the dialog must name the uncommitted work:\n{}",
+        screen
+    );
+
+    f.press(key(KeyCode::Enter));
+    assert!(
+        path.exists(),
+        "Enter alone must not delete uncommitted work"
+    );
+}
+
+/// 'D' skips the question, not the guard.
+#[test]
+fn force_delete_skips_the_dialog_only_when_nothing_would_be_lost() {
+    let mut f = Fixture::new();
+    f.push("alpha", "feature-one");
+    let path = f.worktree_path("alpha", "feature-one");
+
+    assert_eq!(f.press_char('D'), CONSUMED);
+    assert_eq!(
+        f.modal(),
+        Modal::None,
+        "a clean, pushed worktree needs no dialog"
+    );
+    assert!(!path.exists(), "the worktree directory should be gone");
+}
+
+#[test]
+fn force_delete_still_raises_the_dialog_when_work_would_be_lost() {
     let mut f = Fixture::new();
     let path = f.worktree_path("alpha", "feature-one");
 
     assert_eq!(f.press_char('D'), CONSUMED);
-    assert_eq!(f.modal(), Modal::None, "force delete must not open a modal");
-    assert!(!path.exists(), "the worktree directory should be gone");
+    assert_eq!(
+        f.modal(),
+        Modal::Confirm,
+        "force delete must not skip the guard"
+    );
+    assert!(
+        path.exists(),
+        "nothing may be destroyed before the override"
+    );
 }
 
 #[test]
 fn delete_with_confirmation_on_an_empty_list_does_not_open_the_modal() {
     let mut f = Fixture::new();
 
-    // Remove the only worktree first.
-    f.press_char('D');
+    // Remove the only worktree first, deliberately.
+    f.delete_deliberately("feature-one");
     assert!(f.screen().contains("Worktrees (0/0)"));
 
     assert_eq!(f.press_char('d'), CONSUMED);
@@ -763,8 +945,20 @@ fn delete_with_confirmation_on_an_empty_list_does_not_open_the_modal() {
 #[test]
 fn confirm_modal_quit_exits() {
     let mut f = Fixture::new();
+    f.push("alpha", "feature-one");
     f.press_char('d');
     assert_eq!(f.press_char('q'), EXIT);
+}
+
+/// A guarded dialog is a typing surface, so 'q' types rather than quits — the
+/// program must still be leavable, and nothing may be deleted on the way out.
+#[test]
+fn the_guarded_dialog_still_quits_on_ctrl_c() {
+    let mut f = Fixture::new();
+    f.press_char('d');
+    assert_eq!(f.press_char('q'), CONSUMED);
+    assert_eq!(f.press(ctrl('c')), EXIT);
+    assert!(f.worktree_path("alpha", "feature-one").exists());
 }
 
 // ---------------------------------------------------------------------------

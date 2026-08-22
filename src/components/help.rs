@@ -125,7 +125,7 @@ pub fn worktrees_bindings() -> Vec<HelpEntry> {
         HelpEntry::Binding("p", "New worktree from PR URL"),
         HelpEntry::Binding("P", "New worktree from PR URL (auto-clone)"),
         HelpEntry::Binding("d", "Delete with confirmation"),
-        HelpEntry::Binding("D", "Force delete"),
+        HelpEntry::Binding("D", "Delete (skips the question, not the guard)"),
         HelpEntry::Binding("Enter", "Print path & exit"),
         HelpEntry::Binding("?", "Show this help"),
         HelpEntry::Binding("q / Ctrl+C", "Quit"),

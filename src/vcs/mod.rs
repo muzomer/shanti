@@ -10,6 +10,8 @@
 //!   it to its own concept (git worktree, jj workspace);
 //! * a [`SpaceStatus`] is an owned snapshot of what a space looks like right
 //!   now;
+//! * a [`DeletionRisk`] reads that snapshot and says what deleting the space
+//!   would cost — the one question asked before anything is destroyed;
 //! * the [`Vcs`] trait is the single seam every backend implements.
 //!
 //! Two rules keep this model usable from a TUI:
@@ -24,6 +26,7 @@
 //!    in return position on the trait.
 
 mod backend;
+mod delete;
 pub mod discover;
 pub mod git;
 pub mod jj;
@@ -38,6 +41,7 @@ use rayon::prelude::*;
 use tracing::{debug, error};
 
 pub use backend::Backend;
+pub use delete::{AtRisk, Consequence, DeletionRisk};
 pub use discover::{backend_at, backends_at, discover, Discovered};
 pub use repo::{Repo, RepoId};
 pub use space::Space;

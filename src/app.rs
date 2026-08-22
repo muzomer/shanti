@@ -17,7 +17,7 @@ use crate::{
     },
     github,
     keymap::{self, InputMode},
-    vcs::{self, Backend, Discovered},
+    vcs::{self, Consequence, DeletionRisk, Discovered, Space},
 };
 
 /// The worktree list plus a stack of modals on top of it.
@@ -246,17 +246,19 @@ impl App {
                 )));
                 EventState::Consumed
             }
+            // 'D' skips the *question*, never the guard: a space holding work
+            // that exists nowhere else still raises the dialog that says so.
             Action::Delete | Action::ForceDelete => {
-                self.delete_selected_worktree();
+                match self.selected_space_risk() {
+                    Some((_, risk)) if risk.is_safe() => self.delete_selected_worktree(),
+                    Some((space, risk)) => self.modals.push(Box::new(confirm_delete(&space, risk))),
+                    None => {}
+                }
                 EventState::Consumed
             }
             Action::DeleteWithConfirmation => {
-                if let Some(path) = self.worktrees_component.selected_worktree_path() {
-                    let backend = self
-                        .worktrees_component
-                        .selected_space_backend()
-                        .unwrap_or(Backend::Git);
-                    self.modals.push(Box::new(confirm_delete(backend, path)));
+                if let Some((space, risk)) = self.selected_space_risk() {
+                    self.modals.push(Box::new(confirm_delete(&space, risk)));
                 }
                 EventState::Consumed
             }
@@ -289,6 +291,14 @@ impl App {
         }
     }
 
+    /// The selected space and what deleting it would cost, or `None` when the
+    /// list is empty.
+    fn selected_space_risk(&mut self) -> Option<(Space, DeletionRisk)> {
+        let space = self.worktrees_component.selected_space()?;
+        let risk = DeletionRisk::of(&space);
+        Some((space, risk))
+    }
+
     fn delete_selected_worktree(&mut self) {
         let Self {
             worktrees_component,
@@ -316,16 +326,33 @@ fn listing_failure_notice(failed: &[String]) -> Option<String> {
     ))
 }
 
-/// The one confirmation the worktree list itself raises.
+/// The one confirmation the worktree list itself raises, sized to what is about
+/// to be lost.
 ///
-/// Worded in the vocabulary of whichever backend owns the space, so a jj user is
-/// not asked about a "worktree" they have never had.
-fn confirm_delete(backend: Backend, path: String) -> ConfirmComponent {
-    let noun = backend.space_noun();
-    ConfirmComponent::new(
+/// Three shapes, and the space's own status picks between them:
+///
+/// * **nothing at risk** — one question, Enter confirms, as before;
+/// * **recoverable loss** — the losses are listed and a distinct key is
+///   required, because jj snapshots the working copy before forgetting a
+///   workspace and `jj undo` brings it back;
+/// * **permanent loss** — the losses are listed and the space's *name* has to be
+///   typed, because a removed git worktree takes its uncommitted changes with
+///   it and nothing anywhere else has a copy.
+///
+/// Everything is worded in the vocabulary of whichever backend owns the space,
+/// so a jj user is not warned about "uncommitted changes" they cannot have.
+fn confirm_delete(space: &Space, risk: DeletionRisk) -> ConfirmComponent {
+    let noun = space.backend.space_noun();
+    let label = if risk.is_safe() {
+        format!("Delete this {}?", noun)
+    } else {
+        format!("This {} holds work that exists nowhere else.", noun)
+    };
+
+    let confirm = ConfirmComponent::new(
         format!("Delete {}", noun),
-        format!("Delete this {}?", noun),
-        path,
+        label,
+        space.path.display().to_string(),
         Box::new(|ctx| {
             match ctx.worktrees.delete_selected_space(ctx.repositories) {
                 Ok(()) => ctx.worktrees.last_error = None,
@@ -333,5 +360,15 @@ fn confirm_delete(backend: Backend, path: String) -> ConfirmComponent {
             }
             ModalFlow::Close
         }),
-    )
+    );
+
+    match risk.consequence() {
+        Consequence::Nothing => confirm,
+        Consequence::RecoverableLoss => confirm
+            .at_risk(risk.losses(), risk.aftermath().map(str::to_string))
+            .require_override(),
+        Consequence::PermanentLoss => confirm
+            .at_risk(risk.losses(), risk.aftermath().map(str::to_string))
+            .require_phrase(space.name.clone()),
+    }
 }

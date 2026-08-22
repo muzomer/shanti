@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use git2::{BranchType, Repository};
 use shanti::vcs::git::GitBackend;
-use shanti::vcs::{RemoteState, Space, Vcs};
+use shanti::vcs::{Consequence, DeletionRisk, RemoteState, Space, Vcs};
 use tempfile::{tempdir, TempDir};
 
 // --------------------------------------------------------------------------
@@ -376,4 +376,60 @@ fn delete_space_whose_directory_was_already_removed_removes_the_branch() {
     let (fixture, _space) = delete_created_space(true);
 
     assert_branch_missing(&fixture.git(), "feature");
+}
+
+// --------------------------------------------------------------------------
+// The delete guard
+// --------------------------------------------------------------------------
+
+/// A space tracking an up-to-date remote branch, with nothing edited, is the one
+/// case shanti deletes on a single confirmation.
+#[test]
+fn a_clean_tracking_space_is_free_to_delete() {
+    let fixture = Fixture::with_origin(&["feature"]);
+    let space = fixture.create("feature");
+
+    assert_eq!(space.status.remote, RemoteState::in_sync());
+    assert!(DeletionRisk::of(&space).is_safe());
+}
+
+/// The bug this guard exists for: an edit that lives only in the worktree is
+/// destroyed by deletion, and no object store anywhere has a copy.
+#[test]
+fn a_dirty_space_is_a_permanent_loss() {
+    let fixture = Fixture::with_origin(&["feature"]);
+    let space = fixture.create("feature");
+
+    // Staged rather than merely written: the fixture's history is an empty
+    // tree, so an untracked file alone is not what "dirty" means here.
+    let worktree = Repository::open(&space.path).expect("could not open the space");
+    fs::write(space.path.join("a.txt"), "work in progress\n").expect("could not write");
+    let mut index = worktree.index().expect("could not open the index");
+    index
+        .add_path(Path::new("a.txt"))
+        .expect("could not stage the file");
+    index.write().expect("could not write the index");
+
+    let spaces = fixture.backend.spaces().expect("could not list spaces");
+    let listed = spaces
+        .iter()
+        .find(|space| space.name == "feature")
+        .expect("the space should be listed");
+
+    let risk = DeletionRisk::of(listed);
+    assert!(!risk.is_safe(), "a dirty worktree must not delete freely");
+    assert_eq!(risk.consequence(), Consequence::PermanentLoss);
+    assert_eq!(risk.losses(), ["uncommitted changes in the working tree"]);
+}
+
+/// A branch with no upstream is unpushed work even with a spotless working
+/// tree: deleting the space deletes the branch with it.
+#[test]
+fn a_never_pushed_space_is_not_free_to_delete() {
+    let fixture = Fixture::without_origin();
+    let space = fixture.create("feature");
+
+    let risk = DeletionRisk::of(&space);
+    assert!(!risk.is_safe());
+    assert_eq!(risk.losses(), ["a branch that was never pushed"]);
 }

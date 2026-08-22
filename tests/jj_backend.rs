@@ -27,7 +27,8 @@ use std::process::Command;
 
 use shanti::vcs::jj::{Base, JjBackend, JjCli};
 use shanti::vcs::{
-    backend_at, discover, Backend, JjLocal, LocalState, RemoteState, Space, SpaceStatus, Vcs,
+    backend_at, discover, Backend, Consequence, DeletionRisk, JjLocal, LocalState, RemoteState,
+    Space, SpaceStatus, Vcs,
 };
 use tempfile::{tempdir, TempDir};
 
@@ -960,4 +961,72 @@ fn a_bookmark_deleted_upstream_is_not_used_as_a_base() {
     backend
         .create_space("pr-branch", &fixture.dest("pr-branch"))
         .expect("a space still opens, based on trunk");
+}
+
+// --------------------------------------------------------------------------
+// The delete guard
+// --------------------------------------------------------------------------
+
+/// A space on a bookmark no remote carries holds work that lives nowhere else,
+/// so it is not free to delete — but the loss is recoverable, because the
+/// adapter snapshots the working copy before forgetting the workspace.
+///
+/// The wording matters as much as the verdict: jj auto-commits, so nothing here
+/// may be described as "uncommitted", and what is unpushed is a *bookmark*.
+#[test]
+fn a_never_pushed_jj_space_is_guarded_but_recoverable() {
+    let Some(fixture) = JjFixture::new("guard") else {
+        return;
+    };
+    let space = fixture.create("feature");
+
+    let risk = DeletionRisk::of(&space);
+    assert!(!risk.is_safe(), "an unpushed bookmark is work at risk");
+    assert_eq!(risk.consequence(), Consequence::RecoverableLoss);
+    assert_eq!(risk.losses(), ["a bookmark that was never pushed"]);
+    assert_eq!(risk.aftermath(), Some("jj can bring it back: jj undo"));
+}
+
+/// A conflict is jj's own kind of work at risk, and it is reported alongside the
+/// bookmark rather than instead of it.
+#[test]
+fn a_conflicted_jj_space_says_so_in_jjs_own_words() {
+    let Some(fixture) = JjFixture::new("guard-conflict") else {
+        return;
+    };
+    let space = fixture.create("feature");
+    conflict_in(&fixture, &space);
+
+    let spaces = fixture.backend().spaces().expect("listing spaces works");
+    let risk = DeletionRisk::of(space_named(&spaces, "feature"));
+
+    assert_eq!(
+        risk.losses(),
+        [
+            "a change with unresolved conflicts",
+            "a bookmark that was never pushed"
+        ]
+    );
+    assert_eq!(risk.consequence(), Consequence::RecoverableLoss);
+}
+
+/// The counterpart: a space whose bookmark is on the remote, with nothing
+/// conflicted or divergent, deletes on one confirmation like any git worktree
+/// in the same state.
+#[test]
+fn a_pushed_jj_space_is_free_to_delete() {
+    let Some(fixture) = JjFixture::new("guard-pushed") else {
+        return;
+    };
+    fixture.push_bookmark("feature");
+    fixture.create("feature");
+
+    let spaces = fixture.backend().spaces().expect("listing spaces works");
+    let listed = space_named(&spaces, "feature");
+    assert_eq!(listed.status.remote, RemoteState::in_sync());
+    assert!(
+        DeletionRisk::of(listed).is_safe(),
+        "a clean, pushed workspace needs no override: {:?}",
+        listed.status
+    );
 }

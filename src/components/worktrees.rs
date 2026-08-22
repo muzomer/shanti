@@ -308,16 +308,17 @@ impl WorktreesComponent {
         })
     }
 
-    /// The backend-neutral status of the selected space, for callers that need
-    /// to word a message in the vocabulary of whatever drives it.
-    pub fn selected_space_backend(&mut self) -> Option<crate::vcs::Backend> {
+    /// A copy of the selected space, for callers that have to decide something
+    /// from its state — which backend owns it, what deleting it would cost.
+    ///
+    /// Cloned rather than borrowed because the list has to be filtered to know
+    /// what "selected" means, and a [`Space`] is an owned snapshot anyway: the
+    /// caller is meant to reason about it, not to act on it.
+    pub fn selected_space(&mut self) -> Option<Space> {
         self.selected_index.and_then(|index| {
             self.filtered_items()
                 .get(index)
-                // The owner recorded on the space, not the one implied by its
-                // status: the status is a probe result and may be `Unknown`,
-                // while the owner is what the deletion will actually go through.
-                .map(|entry| entry.space.backend)
+                .map(|entry| entry.space.clone())
         })
     }
 }
