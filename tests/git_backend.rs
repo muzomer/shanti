@@ -300,8 +300,8 @@ fn a_created_space_is_listed() {
 /// ask the backend to delete it.
 ///
 /// The two deletion scenarios differ only in that flag, and each is asserted
-/// from two angles (see the `#[ignore]`d branch tests below), so the setup is
-/// shared rather than copied four times.
+/// from two angles — directory plus registration, and the branch — so the
+/// setup is shared rather than copied four times.
 fn delete_created_space(remove_directory_first: bool) -> (Fixture, Space) {
     let fixture = Fixture::with_origin(&["feature"]);
     let space = fixture.create("feature");
@@ -349,7 +349,6 @@ fn delete_space_removes_directory_and_registration() {
 /// delete the branch, then remove the directory) this should pass unchanged;
 /// the assertion is deliberately not weakened to match today's behaviour.
 #[test]
-#[ignore = "branch deletion is best-effort until shanti-12z.4 fixes the delete ordering"]
 fn delete_space_removes_the_branch() {
     let (fixture, _space) = delete_created_space(false);
 
@@ -373,7 +372,6 @@ fn delete_space_whose_directory_was_already_removed() {
 /// [`delete_space_removes_the_branch`]. This is the case that produced the
 /// apologetic "best-effort" comment in the delete path.
 #[test]
-#[ignore = "branch deletion is best-effort until shanti-12z.4 fixes the delete ordering"]
 fn delete_space_whose_directory_was_already_removed_removes_the_branch() {
     let (fixture, _space) = delete_created_space(true);
 

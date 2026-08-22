@@ -361,7 +361,9 @@ impl Vcs for GitBackend {
             .inner
             .find_worktree(&space.name)
             .wrap_err_with(|| format!("Could not find worktree '{}'", space.name))?;
-        remove_worktree(&worktree, &space.name)
+        // Unlike the legacy path, this one already holds the repository, so the
+        // branch can still be cleaned up when the space's directory is gone.
+        remove_worktree(Some(&self.inner), &worktree, &space.name)
     }
 
     fn fetch(&self) -> eyre::Result<()> {
