@@ -35,7 +35,15 @@ pub enum Outcome {
 /// Every event redraws: input changes the state, a tick lets anything
 /// time-dependent advance, and a finished job brings in new data. Waiting on one
 /// channel instead of on the keyboard is what allows the last two to exist at all.
-pub fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut app::App) -> Result<Outcome> {
+///
+/// Ratatui 0.30 gave every backend its own error type instead of always failing
+/// with `io::Error`, so the bound below is what lets those failures keep flowing
+/// into `eyre`.
+pub fn run_app<B>(terminal: &mut Terminal<B>, app: &mut app::App) -> Result<Outcome>
+where
+    B: Backend,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
     // Dropping this at any exit — including the `?` below — stops the producer
     // threads and waits for them, so none outlives the session.
     let events = EventSource::new();

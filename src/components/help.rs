@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Alignment, Margin, Rect},
     style::{
         palette::tailwind::{BLUE, GREEN},
-        Style, Stylize,
+        Style,
     },
     text::{Line, Span},
     widgets::{Block, BorderType, Clear, Paragraph},

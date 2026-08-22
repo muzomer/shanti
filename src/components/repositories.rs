@@ -9,7 +9,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{
         palette::tailwind::{GREEN, RED, SLATE},
-        Style, Stylize,
+        Style,
     },
     text::{Line, Span},
     widgets::{
