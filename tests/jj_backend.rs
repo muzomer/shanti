@@ -13,7 +13,9 @@
 //!    `None` and the test returns early, after printing why. This mirrors
 //!    `src/vcs/jj/testing.rs`; that fixture is `#[cfg(test)]` and therefore
 //!    invisible from an integration test, so the one below is built from the
-//!    public API only.
+//!    public API only. Setting `SHANTI_REQUIRE_JJ` turns that skip into a
+//!    failure, which is how CI keeps an all-skipped run from looking like a
+//!    pass.
 //! 2. **Reads never snapshot.** shanti's jj reads pass `--ignore-working-copy`,
 //!    so an edit jj has not recorded yet is invisible to them by design. That is
 //!    exactly what makes [`work_left_unsnapshotted_in_a_space_survives_its_deletion`]
@@ -70,6 +72,17 @@ impl JjFixture {
 
     fn init(name: &str, init_args: &[&str]) -> Option<Self> {
         if !JjCli::is_available() {
+            // A missing jj is a skip for a contributor, but a hard failure
+            // wherever the jj backend is meant to be under test (CI). Without
+            // this, an all-skipped run is indistinguishable from a real pass:
+            // both print "ok. N passed". `SHANTI_REQUIRE_JJ` is opt-in, so a
+            // developer with no jj installed still gets a clean green run with
+            // no configuration.
+            assert!(
+                std::env::var_os("SHANTI_REQUIRE_JJ").is_none(),
+                "SHANTI_REQUIRE_JJ is set but no jj binary was found; \
+                 install jj or unset SHANTI_REQUIRE_JJ"
+            );
             eprintln!("skipping: no jj binary on this machine");
             return None;
         }
