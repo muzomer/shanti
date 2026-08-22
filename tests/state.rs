@@ -13,32 +13,27 @@
 //! its *block title* — a stable structural marker, deliberately not the help body
 //! text, which is expected to keep changing.
 //!
-//! ## Why every test is serialised
+//! ## Why nothing here is serialised
 //!
-//! `App::new()` calls `cli::Args::new()`, which runs `clap`'s `parse()` over the
-//! process argv and environment. Configuring an `App` therefore means mutating
-//! process-global environment variables, so each test takes a global lock and holds
-//! it for its whole body while it owns its own temp directories.
-//!
-//! One consequence: a test may only hold **one** live `Fixture` at a time. Building a
-//! second one while the first is still in scope self-deadlocks on `ENV_LOCK`.
+//! `App::with_args` takes the resolved configuration directly, so a `Fixture` points
+//! an `App` at its own temp directories without touching argv, the environment, or
+//! the configuration file. Nothing is process-global, so the tests run in parallel
+//! and a test may hold as many live fixtures as it likes.
 
 use std::path::Path;
 use std::process::Command;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::TestBackend, Terminal};
 use shanti::app::App;
+use shanti::cli::Args;
 use shanti::github::PrInfo;
 use tempfile::{tempdir, TempDir};
 
 const CONSUMED: &str = "Consumed";
 const NOT_CONSUMED: &str = "NotConsumed";
 const EXIT: &str = "Exit";
-
-/// Serialises the whole test file: `App::new()` reads process-global env vars.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Large enough that no popup is clipped, so title markers always render in full.
 const SCREEN_W: u16 = 140;
@@ -79,8 +74,6 @@ struct Fixture {
     worktrees_dir: TempDir,
     /// Second repos dir, only populated by [`Fixture::with_two_repos_dirs`].
     _extra_repos_dir: Option<TempDir>,
-    // Declared last so it is released after `app` and the temp dirs are dropped.
-    _lock: MutexGuard<'static, ()>,
 }
 
 impl Fixture {
@@ -89,15 +82,13 @@ impl Fixture {
         Self::build(false)
     }
 
-    /// Same, but `SHANTI_REPOS_DIR` lists two directories — the shape that makes
-    /// the clone flow ask which directory to clone into.
+    /// Same, but the configuration lists two repos directories — the shape that
+    /// makes the clone flow ask which directory to clone into.
     fn with_two_repos_dirs() -> Self {
         Self::build(true)
     }
 
     fn build(two_dirs: bool) -> Self {
-        let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
         let repos_dir = tempdir().expect("could not create repos dir");
         let worktrees_dir = tempdir().expect("could not create worktrees dir");
 
@@ -116,21 +107,23 @@ impl Fixture {
             None
         };
 
-        let repos_value = match &extra {
-            Some(second) => format!("{}:{}", repos_dir.path().display(), second.path().display()),
-            None => repos_dir.path().display().to_string(),
-        };
+        let mut repos_dirs = vec![repos_dir.path().display().to_string()];
+        repos_dirs.extend(extra.iter().map(|d| d.path().display().to_string()));
 
-        // Safe here because ENV_LOCK serialises every test that reads these.
-        std::env::set_var("SHANTI_REPOS_DIR", repos_value);
-        std::env::set_var("SHANTI_WORKTREES_DIR", worktrees_dir.path());
+        let args = Args::for_dirs(worktrees_dir.path().display().to_string(), repos_dirs);
+
+        // The default lookup fails loudly: a PR test that forgot to stub sees an
+        // error message rather than silently reaching out to github.com.
+        let app = App::with_args(
+            args,
+            Arc::new(|_| Err(color_eyre::eyre::eyre!("no PR lookup was stubbed"))),
+        );
 
         Self {
-            app: App::new(),
+            app,
             repos_dir,
             worktrees_dir,
             _extra_repos_dir: extra,
-            _lock: lock,
         }
     }
 

@@ -1,4 +1,4 @@
-use shanti::{app, logs, run_app, Outcome};
+use shanti::{app, cli, github, logs, run_app, Outcome};
 use std::{io, process::ExitCode};
 
 use color_eyre::eyre::{Result, WrapErr};
@@ -37,7 +37,16 @@ fn main() -> ExitCode {
 /// buffer that is about to be discarded, so the user would never see it.
 fn session() -> Result<Outcome> {
     logs::initialize_logging().wrap_err("failed to initialize logging")?;
-    let mut app = app::App::new();
+
+    let args = cli::Args::try_new().wrap_err("failed to resolve the configuration")?;
+    // `--show-config` is an inspection command, not a session: answer it here,
+    // before the alternate screen goes up, and leave the shell where it is.
+    if args.show_config {
+        print!("{}", args.report());
+        return Ok(Outcome::Quit);
+    }
+
+    let mut app = app::App::with_args(args, github::live_fetcher());
     let mut terminal = setup_terminal().wrap_err("failed to set up the terminal")?;
 
     let outcome = run_app(&mut terminal, &mut app);

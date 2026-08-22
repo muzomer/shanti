@@ -1,5 +1,5 @@
 pub mod app;
-mod cli;
+pub mod cli;
 mod components;
 pub mod config;
 mod dirs;

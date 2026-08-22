@@ -176,35 +176,41 @@ impl Args {
     /// Parses the command line, merges it with the configuration file, and
     /// resolves every directory to an absolute path.
     ///
-    /// Prefer this over [`Args::new`]: a bad path is a user mistake, not a bug,
-    /// so it belongs in the error channel that `main` already routes to stderr.
+    /// A bad path is a user mistake, not a bug, so it is returned rather than
+    /// reported here: `main` already routes the error channel to stderr, and it
+    /// is the only place allowed to end the process.
     pub fn try_new() -> Result<Self> {
         Self::from_matches(&Cli::command().get_matches())
     }
 
-    /// Same as [`Args::try_new`], but reports the error itself and exits.
+    /// Builds the effective configuration from directories the caller already
+    /// resolved, consulting neither the command line, the environment, nor the
+    /// configuration file.
     ///
-    /// Only exists because `App::new` cannot yet propagate an error. It runs
-    /// before the alternate screen is entered, so writing to stdout/stderr here
-    /// is safe. Remove it once `App::new` returns a `Result` and can call
-    /// [`Args::try_new`] directly — `--show-config` has to move with it.
-    pub fn new() -> Self {
-        match Self::try_new() {
-            Ok(args) => {
-                if args.show_config {
-                    // Printing and exiting here, instead of starting the TUI, is
-                    // the whole point of the flag.
-                    print!("{}", args.report());
-                    std::process::exit(0);
-                }
-                args
-            }
-            Err(error) => {
-                // `{:#}` keeps the whole chain on a single line, so the user sees
-                // both what we were doing and why the OS refused.
-                eprintln!("shanti: {error:#}");
-                std::process::exit(1);
-            }
+    /// This is the seam that lets an `App` be built without touching anything
+    /// process-global: tests hand in their own temp directories instead of
+    /// exporting `SHANTI_*` variables and serialising on a lock. Every origin is
+    /// reported as [`Origin::Default`] because no configuration layer was
+    /// consulted — the caller *is* the source.
+    ///
+    /// The paths are taken as given: the caller owns them, so there is nothing
+    /// here to expand or validate.
+    pub fn for_dirs(worktrees_dir: impl Into<String>, repos_dirs: Vec<String>) -> Self {
+        Self {
+            worktrees_dir: worktrees_dir.into(),
+            repos_dirs,
+            run_fetch: false,
+            backend: Backend::default(),
+            editor: None,
+            origins: Origins {
+                worktrees_dir: Origin::Default,
+                repos_dirs: Origin::Default,
+                run_fetch: Origin::Default,
+                backend: Origin::Default,
+                editor: Origin::Default,
+            },
+            config_path: PathBuf::new(),
+            show_config: false,
         }
     }
 

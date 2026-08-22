@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use color_eyre::eyre::Result;
 use crossterm::event::KeyEvent;
 use ratatui::{
     layout::{Constraint, Layout},
@@ -40,8 +41,23 @@ pub struct App {
 }
 
 impl App {
-    pub fn new() -> App {
-        let args = cli::Args::new();
+    /// Resolves the configuration from the command line and builds an `App`.
+    ///
+    /// Fallible because the configuration comes from outside: a directory the
+    /// user named may not exist. The error is returned so `main` can report it
+    /// on stderr, which is the only place in the program allowed to end it.
+    pub fn new() -> Result<App> {
+        let args = cli::Args::try_new()?;
+        Ok(Self::with_args(args, github::live_fetcher()))
+    }
+
+    /// Builds an `App` from configuration the caller already resolved.
+    ///
+    /// This is the seam that keeps construction free of process-global state:
+    /// nothing here reads argv, the environment, or the configuration file, so a
+    /// test can point an `App` at its own temp directories — and at its own PR
+    /// lookup — without disturbing any other test running beside it.
+    pub fn with_args(args: cli::Args, pr_fetcher: github::PrFetcher) -> App {
         let found = Self::discover_repositories(&args);
         let repositories = RepositoriesComponent::new(vcs::open_backends(&found, args.run_fetch));
 
@@ -56,7 +72,7 @@ impl App {
             repositories_component: repositories,
             modals: Vec::new(),
             args,
-            pr_fetcher: github::live_fetcher(),
+            pr_fetcher,
             mode: InputMode::Normal,
             selected_path: None,
         }
@@ -318,10 +334,4 @@ fn confirm_delete(backend: Backend, path: String) -> ConfirmComponent {
             ModalFlow::Close
         }),
     )
-}
-
-impl Default for App {
-    fn default() -> Self {
-        Self::new()
-    }
 }
