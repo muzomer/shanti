@@ -108,6 +108,26 @@ impl App {
         self.dispatch_to_top_modal(action)
     }
 
+    /// Applies a bracketed paste to whichever text field currently has focus.
+    ///
+    /// The terminal hands the whole paste over as one event, but every component
+    /// below speaks in single-character actions, so it is fanned out here instead
+    /// of teaching each of them a second insertion path. Control characters are
+    /// dropped: a URL copied with its trailing newline must not also press Enter.
+    pub fn handle_paste(&mut self, text: &str) {
+        if self.effective_mode() != InputMode::Insert {
+            return;
+        }
+        for c in text.chars().filter(|c| !c.is_control()) {
+            let action = Action::InsertChar(c);
+            if self.modals.is_empty() {
+                self.handle_worktrees_action(action);
+            } else {
+                self.dispatch_to_top_modal(action);
+            }
+        }
+    }
+
     /// Help is a plain modal pushed over whatever is on top. The help popup
     /// itself consumes `ShowHelp` by closing, which is what makes '?' a toggle;
     /// every other modal ignores it and gets its own bindings shown instead.

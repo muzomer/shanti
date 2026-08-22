@@ -5,6 +5,7 @@ use color_eyre::eyre::{Result, WrapErr};
 use ratatui::{
     backend::CrosstermBackend,
     crossterm::{
+        event::{DisableBracketedPaste, EnableBracketedPaste},
         execute,
         terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     },
@@ -53,9 +54,12 @@ fn session() -> Result<Outcome> {
 fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stderr>>> {
     enable_raw_mode()?;
     let mut stderr = io::stderr();
+    // Bracketed paste makes the terminal deliver a paste as one event instead of
+    // as one key press per character — the PR URL prompt depends on it.
+    //
     // Raw mode is already on, so undo it if the rest of the setup fails —
     // otherwise the user is dropped back into an unusable shell.
-    if let Err(error) = execute!(stderr, EnterAlternateScreen) {
+    if let Err(error) = execute!(stderr, EnterAlternateScreen, EnableBracketedPaste) {
         let _ = disable_raw_mode();
         return Err(error);
     }
@@ -65,6 +69,12 @@ fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stderr>>> {
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> io::Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    // Bracketed paste is a mode of the user's terminal, not of ours: leaving it
+    // on would make every later paste in that shell arrive wrapped in escapes.
+    execute!(
+        terminal.backend_mut(),
+        DisableBracketedPaste,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()
 }
