@@ -25,11 +25,12 @@
 
 use std::path::Path;
 use std::process::Command;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::TestBackend, Terminal};
 use shanti::app::App;
+use shanti::github::PrInfo;
 use tempfile::{tempdir, TempDir};
 
 const CONSUMED: &str = "Consumed";
@@ -139,6 +140,29 @@ impl Fixture {
 
     fn repo_path(&self, repo: &str) -> std::path::PathBuf {
         self.repos_dir.path().join(repo)
+    }
+
+    // -- stubbing the PR lookup ---------------------------------------------
+
+    /// Answers every PR lookup with the same branch.
+    ///
+    /// Everything past the fetch — the clone prompt, the repos-dir picker, the
+    /// branch prompt — is unreachable while the lookup goes to GitHub, so the
+    /// tests below hand `App` a canned answer instead.
+    fn stub_pr_branch(&mut self, branch: &str, is_merged: bool) {
+        let branch = branch.to_string();
+        self.app.set_pr_fetcher(Arc::new(move |_| {
+            Ok(PrInfo {
+                branch_name: branch.clone(),
+                is_merged,
+            })
+        }));
+    }
+
+    /// Makes every PR lookup fail, as a missing token or a 404 would.
+    fn stub_pr_failure(&mut self, message: &'static str) {
+        self.app
+            .set_pr_fetcher(Arc::new(move |_| Err(color_eyre::eyre::eyre!(message))));
     }
 
     // -- driving -----------------------------------------------------------
@@ -804,14 +828,199 @@ fn pr_prompt_ctrl_c_exits() {
 }
 
 // ---------------------------------------------------------------------------
+// PR flow behind a stubbed lookup
+//
+// These drive the steps that only exist once a PR has been fetched. None of them
+// reaches `git clone`: cloning is the step *after* a destination is chosen, and
+// every test stops at or before that point, so nothing here touches the network.
+// ---------------------------------------------------------------------------
+
+/// Types a PR URL into the prompt and submits it.
+fn submit_pr(f: &mut Fixture, url: &str) -> String {
+    f.type_str(url);
+    f.press(key(KeyCode::Enter))
+}
+
+#[test]
+fn a_failing_pr_lookup_keeps_the_prompt_open_with_the_error() {
+    let mut f = Fixture::new();
+    f.stub_pr_failure("GitHub auth failed");
+
+    f.press_char('p');
+    assert_eq!(
+        submit_pr(&mut f, "https://github.com/acme/alpha/pull/7"),
+        CONSUMED
+    );
+
+    assert_eq!(f.modal(), Modal::PrWorktree, "the prompt must stay open");
+    assert!(
+        f.screen().contains("GitHub auth failed"),
+        "the failure should be shown in the prompt:\n{}",
+        f.screen()
+    );
+}
+
+#[test]
+fn a_pr_on_a_known_repo_opens_the_branch_prompt_prefilled() {
+    let mut f = Fixture::new();
+    f.stub_pr_branch("feature-from-pr", false);
+
+    f.press_char('p');
+    assert_eq!(
+        submit_pr(&mut f, "https://github.com/acme/alpha/pull/7"),
+        CONSUMED
+    );
+
+    assert_eq!(f.modal(), Modal::CreateWorktree);
+    assert!(
+        f.screen().contains("feature-from-pr"),
+        "the PR branch should be prefilled:\n{}",
+        f.screen()
+    );
+
+    f.press(key(KeyCode::Esc));
+    f.assert_at_worktree_list();
+}
+
+#[test]
+fn a_pr_whose_branch_is_already_checked_out_just_selects_that_worktree() {
+    let mut f = Fixture::new();
+    // `feature-one` is the worktree the fixture creates.
+    f.stub_pr_branch("feature-one", false);
+    let expected = std::fs::canonicalize(f.worktree_path("alpha", "feature-one"))
+        .expect("worktree should exist");
+
+    f.press_char('p');
+    submit_pr(&mut f, "https://github.com/acme/alpha/pull/7");
+
+    f.assert_at_worktree_list();
+    assert_eq!(f.press(key(KeyCode::Enter)), EXIT);
+    let selected = f.app.selected_path.clone().expect("a path was selected");
+    assert_eq!(
+        std::fs::canonicalize(selected.trim_end_matches('/')).unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn a_merged_pr_on_an_existing_worktree_reports_why_nothing_was_created() {
+    let mut f = Fixture::new();
+    f.stub_pr_branch("feature-one", true);
+
+    f.press_char('p');
+    submit_pr(&mut f, "https://github.com/acme/alpha/pull/7");
+
+    assert_eq!(f.modal(), Modal::None);
+    assert!(
+        f.screen().contains("merged"),
+        "a merged PR should say so rather than fail silently:\n{}",
+        f.screen()
+    );
+}
+
+#[test]
+fn a_pr_on_an_unknown_repo_offers_to_clone_it() {
+    let mut f = Fixture::new();
+    f.stub_pr_branch("feature-from-pr", false);
+
+    f.press_char('p');
+    assert_eq!(
+        submit_pr(&mut f, "https://github.com/acme/widget/pull/7"),
+        CONSUMED
+    );
+
+    assert_eq!(f.modal(), Modal::Confirm);
+    let screen = f.screen();
+    assert!(
+        screen.contains("Clone Repository") && screen.contains("git@github.com:acme/widget.git"),
+        "the clone prompt should name the remote it would clone:\n{}",
+        screen
+    );
+
+    // Declining must leave the filesystem alone.
+    f.press(key(KeyCode::Esc));
+    f.assert_at_worktree_list();
+    assert!(
+        !f.repo_path("widget").exists(),
+        "cancelling the clone prompt must not clone anything"
+    );
+}
+
+#[test]
+fn confirming_a_clone_with_several_repos_dirs_asks_which_one() {
+    let mut f = Fixture::with_two_repos_dirs();
+    f.stub_pr_branch("feature-from-pr", false);
+
+    f.press_char('p');
+    submit_pr(&mut f, "https://github.com/acme/widget/pull/7");
+    assert_eq!(f.modal(), Modal::Confirm);
+
+    assert_eq!(f.press(key(KeyCode::Enter)), CONSUMED);
+    assert_eq!(
+        f.modal(),
+        Modal::SelectReposDir,
+        "with more than one repos dir the flow must ask where to clone"
+    );
+    assert!(
+        f.screen()
+            .contains(&f.repos_dir.path().display().to_string()),
+        "the configured repos dirs should be listed:\n{}",
+        f.screen()
+    );
+
+    f.press(key(KeyCode::Esc));
+    f.assert_at_worktree_list();
+    assert!(
+        !f.repo_path("widget").exists(),
+        "cancelling the picker must not clone anything"
+    );
+}
+
+#[test]
+fn auto_clone_skips_the_confirmation_and_goes_straight_to_the_picker() {
+    let mut f = Fixture::with_two_repos_dirs();
+    f.stub_pr_branch("feature-from-pr", false);
+
+    // 'P' is the auto-clone variant: it must not ask for confirmation first.
+    f.press_char('P');
+    assert_eq!(
+        submit_pr(&mut f, "https://github.com/acme/widget/pull/7"),
+        CONSUMED
+    );
+
+    assert_eq!(f.modal(), Modal::SelectReposDir);
+
+    f.press(key(KeyCode::Esc));
+    f.assert_at_worktree_list();
+    assert!(!f.repo_path("widget").exists());
+}
+
+#[test]
+fn help_over_the_clone_directory_picker_returns_to_the_picker() {
+    let mut f = Fixture::with_two_repos_dirs();
+    f.stub_pr_branch("feature-from-pr", false);
+
+    f.press_char('P');
+    submit_pr(&mut f, "https://github.com/acme/widget/pull/7");
+    assert_eq!(f.modal(), Modal::SelectReposDir);
+
+    assert_eq!(f.press_char('?'), CONSUMED);
+    assert_eq!(f.modal(), Modal::Help);
+    f.press(key(KeyCode::Esc));
+    assert_eq!(f.modal(), Modal::SelectReposDir);
+
+    f.press(key(KeyCode::Esc));
+    f.assert_at_worktree_list();
+}
+
+// ---------------------------------------------------------------------------
 // Multiple repos dirs
 // ---------------------------------------------------------------------------
 
 #[test]
 fn multiple_repos_dirs_still_start_on_the_worktree_list() {
-    // The `SelectReposDir` modal is only reachable behind a live GitHub fetch, so
-    // this covers the configuration that enables it, not the modal itself.
-    // See the report for the missing seam.
+    // The configuration that enables the repos-dir picker; the picker itself is
+    // driven in the PR-flow tests above, through the stubbed lookup.
     let mut f = Fixture::with_two_repos_dirs();
     f.assert_at_worktree_list();
     assert!(f.screen().contains("Worktrees (1/1)"));

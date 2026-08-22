@@ -4,7 +4,7 @@ mod components;
 pub mod config;
 mod dirs;
 pub mod events;
-mod github;
+pub mod github;
 pub mod keymap;
 pub mod logs;
 pub mod vcs;

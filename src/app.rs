@@ -11,6 +11,7 @@ use crate::{
         ModalFlow, PrWorktreeComponent, RepositoriesComponent, RepositoriesModal,
         WorktreesComponent,
     },
+    github,
     keymap::{self, InputMode},
     vcs::git,
 };
@@ -27,6 +28,9 @@ pub struct App {
     repositories_component: RepositoriesComponent,
     modals: Vec<Box<dyn Modal>>,
     args: cli::Args,
+    /// How the PR flow looks a pull request up. Held here, not reached for
+    /// inside the modal, so the whole flow can be pointed at another source.
+    pr_fetcher: github::PrFetcher,
     /// Input mode of the worktree list, the one layer that is not a modal.
     mode: InputMode,
     pub selected_path: Option<String>,
@@ -47,9 +51,15 @@ impl App {
             repositories_component: RepositoriesComponent::new(repositories),
             modals: Vec::new(),
             args,
+            pr_fetcher: github::live_fetcher(),
             mode: InputMode::Normal,
             selected_path: None,
         }
+    }
+
+    /// Points the PR flow at a different lookup than the live GitHub one.
+    pub fn set_pr_fetcher(&mut self, fetch: github::PrFetcher) {
+        self.pr_fetcher = fetch;
     }
 
     /// The mode the next key is resolved in: the top modal's, or the list's.
@@ -187,11 +197,17 @@ impl App {
                 EventState::Consumed
             }
             Action::OpenPrWorktree => {
-                self.modals.push(Box::new(PrWorktreeComponent::new(false)));
+                self.modals.push(Box::new(PrWorktreeComponent::new(
+                    false,
+                    self.pr_fetcher.clone(),
+                )));
                 EventState::Consumed
             }
             Action::OpenPrWorktreeAutoClone => {
-                self.modals.push(Box::new(PrWorktreeComponent::new(true)));
+                self.modals.push(Box::new(PrWorktreeComponent::new(
+                    true,
+                    self.pr_fetcher.clone(),
+                )));
                 EventState::Consumed
             }
             Action::Delete | Action::ForceDelete => {

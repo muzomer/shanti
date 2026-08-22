@@ -1,6 +1,7 @@
 use color_eyre::eyre::{self, WrapErr};
 use std::io;
 use std::process::Command;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct PrUrl {
@@ -36,6 +37,20 @@ pub fn parse_pr_url(url: &str) -> eyre::Result<PrUrl> {
         repo: parts[1].to_string(),
         number,
     })
+}
+
+/// How the PR flow obtains PR data.
+///
+/// The flow is injected with this rather than calling [`fetch_pr_info`] directly
+/// because everything after the fetch — the "clone this repo?" prompt and the
+/// repos-dir picker — is unreachable until a fetch succeeds. Handing the lookup
+/// in keeps those steps drivable without a network round trip, and leaves room
+/// for a cached or background fetcher later.
+pub type PrFetcher = Arc<dyn Fn(&PrUrl) -> eyre::Result<PrInfo> + Send + Sync>;
+
+/// The fetcher used by the real application: a live GitHub lookup.
+pub fn live_fetcher() -> PrFetcher {
+    Arc::new(fetch_pr_info)
 }
 
 /// Fetches PR info. Authentication priority:

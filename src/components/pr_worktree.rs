@@ -14,24 +14,32 @@ use super::{
     Action, AppContext, ConfirmCallback, ConfirmComponent, EventState, HelpEntry, Modal, ModalFlow,
     SelectCallback,
 };
-use crate::{github, keymap::InputMode, vcs::git::GitBackend};
+use crate::{
+    github::{self, PrFetcher},
+    keymap::InputMode,
+    vcs::git::GitBackend,
+};
 
 pub struct PrWorktreeComponent {
     character_index: usize,
     pub input: String,
     pub error: Option<String>,
     pub auto_clone: bool,
+    /// Where PR data comes from. Injected so the steps that only exist after a
+    /// successful fetch can be exercised without talking to GitHub.
+    fetch: PrFetcher,
 }
 
 impl PrWorktreeComponent {
     /// `auto_clone` skips both the "clone this repo?" prompt and the branch-name
     /// prompt, going straight from a PR URL to a created worktree.
-    pub fn new(auto_clone: bool) -> Self {
+    pub fn new(auto_clone: bool, fetch: PrFetcher) -> Self {
         Self {
             character_index: 0,
             input: String::new(),
             error: None,
             auto_clone,
+            fetch,
         }
     }
 
@@ -180,7 +188,7 @@ impl PrWorktreeComponent {
             }
         };
 
-        let pr_info = match github::fetch_pr_info(&pr_url) {
+        let pr_info = match (self.fetch)(&pr_url) {
             Ok(info) => info,
             Err(e) => {
                 self.set_error(format!("{:#}", e));
