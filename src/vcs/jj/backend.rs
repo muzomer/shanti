@@ -19,9 +19,11 @@
 use std::path::{Path, PathBuf};
 
 use color_eyre::eyre::{self, eyre, WrapErr};
+use tracing::debug;
 
 use crate::vcs::{Backend, RemoteState, Repo, Space, SpaceStatus, Vcs};
 
+use super::base::{self, Base, ANY_REVISION, REAL_TRUNK, REMOTE_BOOKMARKS};
 use super::cmd::JjCli;
 use super::workspace::{Workspace, WORKSPACES};
 
@@ -115,6 +117,86 @@ impl JjBackend {
         space.path == self.repo.path
     }
 
+    /// The revision a workspace named `name` would be created on top of.
+    ///
+    /// See [`Base`] for why the three candidates are these three. Fallible
+    /// because both probes talk to jj; [`Vcs::resolve_base`] degrades, while
+    /// [`Vcs::create_space`] propagates — creating a workspace at the wrong
+    /// revision is worse than refusing to create one.
+    pub fn base_for(&self, name: &str) -> eyre::Result<Base> {
+        if let Some(remote) = self.remote_carrying(name)? {
+            return Ok(Base::RemoteBookmark {
+                bookmark: name.to_owned(),
+                remote,
+            });
+        }
+        if self.has_trunk()? {
+            return Ok(Base::Trunk);
+        }
+        Ok(Base::WorkingCopy)
+    }
+
+    /// The remote that carries a bookmark named `name`, if any.
+    ///
+    /// Lists every bookmark and matches in Rust rather than passing `name` to
+    /// jj: `jj bookmark list <name>` fails outright when the name is unknown,
+    /// which is the common case here and not an error at all.
+    fn remote_carrying(&self, name: &str) -> eyre::Result<Option<String>> {
+        let records = self
+            .cli
+            // Like `workspace list`, `bookmark list` draws no graph and rejects
+            // `--no-graph`.
+            .plain_records(&["bookmark", "list", "--all-remotes"], &REMOTE_BOOKMARKS)
+            .wrap_err_with(|| format!("could not list the bookmarks of {}", self.repo.name))?;
+        base::remote_carrying(&records, name)
+    }
+
+    /// Whether the repository has a mainline `trunk()` can point at.
+    fn has_trunk(&self) -> eyre::Result<bool> {
+        let records = self
+            .cli
+            .records(&["log", "--limit", "1", "-r", REAL_TRUNK], &ANY_REVISION)
+            .wrap_err_with(|| format!("could not resolve trunk() in {}", self.repo.name))?;
+        Ok(!records.is_empty())
+    }
+
+    /// Create the workspace `name` at `dest`, on top of `base`.
+    ///
+    /// `dest` is the caller's choice: the layout policy lives with the UI, not
+    /// with a backend (see [`Vcs::create_space`]).
+    fn add_workspace(&self, name: &str, dest: &Path, base: &Base) -> eyre::Result<()> {
+        let destination = dest.to_str().ok_or_else(|| {
+            eyre!(
+                "cannot create a jj workspace at {}: the path is not valid UTF-8",
+                dest.display()
+            )
+        })?;
+        // jj creates the workspace directory itself but not the parent shanti's
+        // layout puts it under.
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .wrap_err_with(|| format!("could not create the directory {}", parent.display()))?;
+        }
+
+        let revset = base.revset();
+        let mut args = vec!["workspace", "add", "--name", name];
+        if let Some(revset) = revset.as_deref() {
+            args.extend(["--revision", revset]);
+        }
+        args.push(destination);
+
+        debug!(workspace = name, ?base, "adding a jj workspace");
+        // `run`, not `read`: adding a workspace changes the repository, so jj
+        // must be allowed to snapshot the working copy first.
+        self.cli.run(&args).wrap_err_with(|| {
+            format!(
+                "could not create the jj workspace {name:?} in {}",
+                self.repo.name
+            )
+        })?;
+        Ok(())
+    }
+
     /// Translate a jj workspace into the backend-neutral snapshot.
     fn space_of(&self, workspace: &Workspace) -> Space {
         // The local half is real: it came back with the listing. The remote
@@ -144,11 +226,21 @@ impl Vcs for JjBackend {
             .collect())
     }
 
-    /// Not implemented yet: creating jj workspaces is shanti-nhe.3.
-    fn create_space(&self, name: &str, _dest: &Path) -> eyre::Result<Space> {
-        Err(eyre!(
-            "creating the jj workspace {name:?} is not implemented yet (shanti-nhe.3)"
-        ))
+    /// Add a jj workspace named `name` at `dest`, on top of [`JjBackend::base_for`].
+    ///
+    /// The returned [`Space`] is read back from `jj workspace list` rather than
+    /// assembled here: jj owns the workspace's root path and the state of its
+    /// new working-copy commit, and reading them back is also what proves the
+    /// workspace really is registered with the repository.
+    fn create_space(&self, name: &str, dest: &Path) -> eyre::Result<Space> {
+        let base = self.base_for(name)?;
+        self.add_workspace(name, dest, &base)?;
+
+        self.workspaces()?
+            .iter()
+            .find(|workspace| workspace.name == name)
+            .map(|workspace| self.space_of(workspace))
+            .ok_or_else(|| eyre!("jj created the workspace {name:?} but does not list it as one"))
     }
 
     /// Not implemented yet: deleting jj workspaces — which must `jj workspace
@@ -167,11 +259,20 @@ impl Vcs for JjBackend {
         ))
     }
 
-    /// Not implemented yet: resolving the base a new workspace would start from
-    /// is shanti-nhe.3. The signature cannot report failure, so it says so in
-    /// the hint rather than guessing a bookmark that may not exist.
-    fn resolve_base(&self, _name: &str) -> String {
-        "Base not resolved yet for jujutsu repositories".to_string()
+    /// The hint the create prompt shows while the user types a name.
+    ///
+    /// Runs on every keystroke and cannot report failure, so a jj that will not
+    /// answer degrades to trunk — the answer for the overwhelming majority of
+    /// repositories — instead of blocking the prompt or showing an error there.
+    /// [`Vcs::create_space`] resolves the base again for real, and *does* fail
+    /// loudly, so a wrong hint can never become a wrongly-based workspace.
+    fn resolve_base(&self, name: &str) -> String {
+        self.base_for(name)
+            .unwrap_or_else(|error| {
+                debug!(%error, "could not resolve the jj base; assuming trunk()");
+                Base::Trunk
+            })
+            .hint()
     }
 }
 
@@ -350,17 +451,163 @@ mod tests {
         let backend = fixture.backend();
         let space = backend.spaces().unwrap().remove(0);
 
-        let create = backend
-            .create_space("feature", Path::new("/tmp/x"))
-            .unwrap_err()
-            .to_string();
-        assert!(create.contains("shanti-nhe.3"), "{create}");
-
         let delete = backend.delete_space(&space).unwrap_err().to_string();
         assert!(delete.contains("shanti-nhe.4"), "{delete}");
 
         let fetch = backend.fetch().unwrap_err().to_string();
         assert!(fetch.contains("shanti-nhe.6"), "{fetch}");
+    }
+
+    /// The end-to-end check the issue asks for: what shanti creates must come
+    /// back out of `jj workspace list`, at the path shanti chose.
+    #[test]
+    fn a_created_space_is_listed_afterwards() {
+        let Some(fixture) = JjFixture::new("create") else {
+            return;
+        };
+        let backend = fixture.backend();
+        let dest = fixture.workspace_root("feature");
+
+        let created = backend.create_space("feature", &dest).unwrap();
+        assert_eq!(created.name, "feature");
+        assert_eq!(created.path, dest);
+        assert!(
+            created.exists(),
+            "{:?} does not exist on disk",
+            created.path
+        );
+        assert_eq!(created.repo, backend.repo().id);
+        assert_eq!(created.status.backend(), Backend::Jj);
+
+        let names: Vec<String> = backend
+            .spaces()
+            .unwrap()
+            .into_iter()
+            .map(|space| space.name)
+            .collect();
+        assert!(names.contains(&"feature".to_owned()), "{names:?}");
+        // Created, not adopted: the repository's own working copy is untouched.
+        assert!(!backend.is_default_space(&created));
+    }
+
+    /// The layout is the caller's business, so a destination several levels
+    /// deep must be created rather than rejected.
+    #[test]
+    fn the_destination_directorys_parents_are_created() {
+        let Some(fixture) = JjFixture::new("nested-dest") else {
+            return;
+        };
+        let backend = fixture.backend();
+        let dest = fixture
+            .workspace_root("nested")
+            .join("repo")
+            .join("feature");
+
+        let created = backend.create_space("feature", &dest).unwrap();
+        assert_eq!(created.path, dest);
+    }
+
+    /// With no remote bookmark and no mainline, a fresh `jj git init` has only
+    /// its working copy to start beside — `trunk()` there is the root commit,
+    /// which is not a useful place to begin.
+    #[test]
+    fn a_repository_with_no_mainline_starts_beside_the_working_copy() {
+        let Some(fixture) = JjFixture::new("no-mainline") else {
+            return;
+        };
+        let backend = fixture.backend();
+
+        assert_eq!(backend.base_for("feature").unwrap(), Base::WorkingCopy);
+        assert_eq!(
+            backend.resolve_base("feature"),
+            "Will start beside the current working copy"
+        );
+
+        // The new change must still descend from the fixture's real commit, not
+        // from the root commit.
+        let dest = fixture.workspace_root("feature");
+        backend.create_space("feature", &dest).unwrap();
+        assert_eq!(
+            fixture.commit_at("feature@-"),
+            fixture.commit_at("default@-"),
+        );
+    }
+
+    /// The acceptance criterion: a matching bookmark on the remote wins, and the
+    /// new workspace really is a child of it.
+    #[test]
+    fn a_matching_remote_bookmark_is_the_base() {
+        let Some(fixture) = JjFixture::new("remote-base") else {
+            return;
+        };
+        fixture.push_bookmark("feature");
+        let backend = fixture.backend();
+
+        assert_eq!(
+            backend.base_for("feature").unwrap(),
+            Base::RemoteBookmark {
+                bookmark: "feature".to_owned(),
+                remote: "origin".to_owned(),
+            }
+        );
+        assert_eq!(
+            backend.resolve_base("feature"),
+            "Will start from feature@origin"
+        );
+
+        let dest = fixture.workspace_root("feature");
+        backend.create_space("feature", &dest).unwrap();
+        assert_eq!(
+            fixture.commit_at("feature@-"),
+            fixture.commit_at("feature@origin"),
+            "the workspace's change must sit on top of the remote bookmark"
+        );
+    }
+
+    /// A name that has no bookmark anywhere falls through to trunk, which now
+    /// exists because the push above gave the repository a mainline.
+    #[test]
+    fn an_unknown_name_falls_through_to_trunk() {
+        let Some(fixture) = JjFixture::new("trunk-base") else {
+            return;
+        };
+        // The default trunk() alias looks for main/master/trunk on a remote.
+        fixture.push_bookmark("main");
+        let backend = fixture.backend();
+
+        assert_eq!(backend.base_for("something-new").unwrap(), Base::Trunk);
+        assert_eq!(
+            backend.resolve_base("something-new"),
+            "Will start from trunk()"
+        );
+
+        let dest = fixture.workspace_root("something-new");
+        backend.create_space("something-new", &dest).unwrap();
+        assert_eq!(
+            fixture.commit_at("something-new@-"),
+            fixture.commit_at("trunk()"),
+        );
+    }
+
+    /// jj refuses a duplicate workspace name, and that refusal must reach the
+    /// user with jj's own words rather than as a silent success.
+    #[test]
+    fn creating_a_workspace_whose_name_is_taken_fails_with_jjs_complaint() {
+        let Some(fixture) = JjFixture::new("duplicate") else {
+            return;
+        };
+        let backend = fixture.backend();
+        let dest = fixture.workspace_root("feature");
+        backend.create_space("feature", &dest).unwrap();
+
+        let report = backend
+            .create_space("feature", &fixture.workspace_root("feature-again"))
+            .unwrap_err();
+        // `{:#}` renders the whole chain: shanti's context *and* the stderr jj
+        // failed with, which is the half that explains what to do about it.
+        let error = format!("{report:#}");
+        assert!(error.contains("feature"), "{error}");
+        assert!(error.contains("already exists"), "{error}");
     }
 
     #[test]

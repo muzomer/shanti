@@ -17,6 +17,7 @@
 //! is the only jj type the rest of shanti needs to know about.
 
 mod backend;
+mod base;
 mod cmd;
 mod template;
 #[cfg(test)]
@@ -25,6 +26,7 @@ mod version;
 mod workspace;
 
 pub use backend::JjBackend;
+pub use base::Base;
 pub use cmd::{JjCli, WorkingCopy, JJ_BINARY_ENV};
 pub use template::{Record, Template, FIELD_SEPARATOR, RECORD_SEPARATOR};
 pub use version::{JjVersion, MINIMUM_JJ_VERSION};

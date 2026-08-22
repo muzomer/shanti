@@ -95,6 +95,50 @@ impl JjFixture {
         self.jj(&["workspace", "add", "--name", name, dest.to_str().unwrap()]);
     }
 
+    /// Give the repository a remote called `origin` carrying a bookmark named
+    /// `name`, without touching the network.
+    ///
+    /// The remote is a bare git repository next to the fixture: jj pushes to it
+    /// over the filesystem, which is the only way to get a genuine
+    /// `name@origin` — the case base resolution has to recognise — into a
+    /// throwaway repository. Call it at most once per fixture; a second call
+    /// would try to add `origin` twice.
+    pub fn push_bookmark(&self, name: &str) {
+        let remote = self.base.join("origin.git");
+        let status = Command::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&remote)
+            .status()
+            .expect("could not run git");
+        assert!(status.success(), "git init --bare failed");
+
+        self.jj(&["git", "remote", "add", "origin", remote.to_str().unwrap()]);
+        // `@-` is the described commit the fixture made; jj refuses to push a
+        // commit with no description, which the working copy has none of.
+        self.jj(&["bookmark", "create", "-r", "@-", name]);
+        self.jj(&["git", "push", "--allow-new", "--bookmark", name]);
+    }
+
+    /// The commit id `revset` resolves to, for tests that need to say "the new
+    /// workspace started *here*".
+    pub fn commit_at(&self, revset: &str) -> String {
+        let output = Command::new(self.cli.program())
+            .args(["--no-pager", "--color=never", "log", "--no-graph"])
+            .args(["--limit", "1", "-r", revset, "-T", "commit_id"])
+            .current_dir(&self.root)
+            .env("JJ_CONFIG", "/dev/null")
+            .env("JJ_USER", "shanti tests")
+            .env("JJ_EMAIL", "tests@shanti.invalid")
+            .output()
+            .expect("could not run jj");
+        assert!(
+            output.status.success(),
+            "jj log -r {revset:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
     /// Where [`JjFixture::add_workspace`] puts a workspace. Deliberately outside
     /// the repository root, as shanti's own layout is.
     pub fn workspace_root(&self, name: &str) -> PathBuf {
