@@ -22,6 +22,10 @@
 //! backend = "jujutsu"
 //! editor = "nvim"
 //! ```
+//!
+//! This module only *reads* the file. It is the weakest of the three
+//! configuration layers, so the file's values are handed to [`crate::cli`],
+//! which decides whether they win and then normalises whatever did.
 
 use std::path::{Path, PathBuf};
 
@@ -56,9 +60,13 @@ pub enum Backend {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
-    /// Directories scanned for git repositories. `~` is expanded.
+    /// Directories scanned for git repositories.
+    ///
+    /// Kept exactly as written: `~` expansion and canonicalisation happen in
+    /// `cli::resolve`, once, for whichever layer wins the precedence contest.
     pub repos_dirs: Vec<PathBuf>,
-    /// Directory under which worktrees/workspaces are created. `~` is expanded.
+    /// Directory under which worktrees/workspaces are created. Also normalised
+    /// by `cli::resolve` rather than here.
     pub worktrees_dir: Option<PathBuf>,
     /// Whether to fetch every repository at startup.
     pub run_fetch: bool,
@@ -111,26 +119,8 @@ impl Config {
             .wrap_err_with(|| format!("Invalid configuration file {}", path.display()))?;
 
         debug!("Loaded configuration from {}: {:?}", path.display(), config);
-        config.expanded()
+        Ok(config)
     }
-
-    /// Expand `~` in the path settings so the rest of the program only ever
-    /// sees absolute paths.
-    fn expanded(mut self) -> eyre::Result<Self> {
-        self.repos_dirs = self
-            .repos_dirs
-            .iter()
-            .map(|dir| expand(dir))
-            .collect::<eyre::Result<Vec<_>>>()?;
-        self.worktrees_dir = self.worktrees_dir.as_deref().map(expand).transpose()?;
-        Ok(self)
-    }
-}
-
-fn expand(path: &Path) -> eyre::Result<PathBuf> {
-    expand_tilde::expand_tilde(path)
-        .map(|expanded| expanded.into_owned())
-        .wrap_err_with(|| format!("Could not expand the ~ in the path {}", path.display()))
 }
 
 #[cfg(test)]
@@ -197,8 +187,11 @@ mod tests {
         assert_eq!(Config::load_from(&path).unwrap().backend, Backend::Jujutsu);
     }
 
+    /// Paths are handed over verbatim: expanding them here as well would put a
+    /// second copy of the normalisation rules in the codebase, and the loader
+    /// has no way to know whether this layer is the one that wins.
     #[test]
-    fn config_expands_tilde_in_paths() {
+    fn config_keeps_paths_verbatim_for_the_cli_to_normalise() {
         let (_dir, path) = write_config(
             r#"
             repos_dirs = ["~/src"]
@@ -206,9 +199,8 @@ mod tests {
             "#,
         );
         let config = Config::load_from(&path).unwrap();
-        assert!(!config.repos_dirs[0].starts_with("~"));
-        assert!(config.repos_dirs[0].is_absolute());
-        assert!(config.worktrees_dir.unwrap().is_absolute());
+        assert_eq!(config.repos_dirs, vec![PathBuf::from("~/src")]);
+        assert_eq!(config.worktrees_dir, Some(PathBuf::from("~/worktrees")));
     }
 
     #[test]

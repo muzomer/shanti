@@ -1,11 +1,44 @@
+//! Command line parsing and the single place where configuration precedence is
+//! decided.
+//!
+//! Shanti takes its settings from three places. They are layered, lowest to
+//! highest:
+//!
+//! 1. built-in defaults,
+//! 2. the configuration file (see [`crate::config`]),
+//! 3. environment variables,
+//! 4. command line flags.
+//!
+//! Clap already reads the environment for us, which is convenient but hides the
+//! distinction we need: by the time we look at the parsed struct, a value that
+//! came from `SHANTI_REPOS_DIR`, a value the user typed, and a value clap
+//! invented from a default all look identical. `ArgMatches::value_source` is
+//! what tells them apart, so the merge below reads the *source* of every
+//! setting rather than only its value. Without that, a config file entry would
+//! lose to clap's default and appear to be ignored.
+//!
+//! Path normalisation (tilde expansion, canonicalisation, the "is it really a
+//! directory" checks) happens once, in [`resolve`], *after* the winner of each
+//! setting is known. That way a `~` in the config file is expanded exactly like
+//! a `~` on the command line, and the logic exists in one copy.
+
+use std::fmt;
 use std::path::{Path, PathBuf};
 
-use clap::Parser;
+use clap::{parser::ValueSource, ArgMatches, CommandFactory, FromArgMatches, Parser};
 use color_eyre::eyre::{eyre, Result, WrapErr};
+use tracing::debug;
 
+use crate::config::{Backend, Config};
+
+/// The raw command line, before any merging or path resolution.
+///
+/// Every setting is optional here: "absent" is what lets a lower layer win.
+/// `run_fetch` is a plain `bool` because clap's `SetTrue` action always yields
+/// one; its *source* is what says whether the user asked for it.
 #[derive(Debug, Parser)]
 #[command(version, about, long_about = None)]
-pub struct Args {
+struct Cli {
     /// Directory where the new git worktrees will be stored
     #[arg(
         short = 'd',
@@ -14,7 +47,8 @@ pub struct Args {
         env = "SHANTI_WORKTREES_DIR"
     )]
     // TODO: list worktrees from the repositories directly instead of getting the worktrees_dir from user
-    pub worktrees_dir: String,
+    worktrees_dir: Option<String>,
+
     /// Directory of the git repositories (colon-separated for multiple)
     #[arg(
         short = 'r',
@@ -24,36 +58,143 @@ pub struct Args {
         num_args = 1..,
         value_delimiter = ':'
     )]
-    pub repos_dirs: Vec<String>,
+    repos_dirs: Vec<String>,
 
     /// Whether to run git fetch for each repo. Default: false
-    #[arg(
-        short = 'f',
-        long = "run-fetch",
-        value_name = "BOOLEAN",
-        default_value_t = false
-    )]
+    #[arg(short = 'f', long = "run-fetch", env = "SHANTI_RUN_FETCH")]
+    run_fetch: bool,
+
+    /// Configuration file to read instead of the default location
+    #[arg(long = "config", value_name = "FILE")]
+    config: Option<PathBuf>,
+
+    /// Print the effective configuration, with the origin of each value, and exit
+    #[arg(long = "show-config")]
+    show_config: bool,
+}
+
+/// Where a setting's final value came from.
+///
+/// Ordered lowest to highest so the variants themselves document the
+/// precedence, and so a test can assert the order rather than prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Origin {
+    /// Nothing set it; this is shanti's built-in value.
+    Default,
+    /// Read from the configuration file.
+    ConfigFile,
+    /// Read from an environment variable by clap.
+    Environment,
+    /// Typed on the command line.
+    CommandLine,
+}
+
+impl fmt::Display for Origin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Origin::Default => "built-in default",
+            Origin::ConfigFile => "config file",
+            Origin::Environment => "environment",
+            Origin::CommandLine => "command line",
+        };
+        f.write_str(name)
+    }
+}
+
+/// The origin of every resolved setting, kept so `--show-config` can answer
+/// "why is it using that directory?" without anyone reading the code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Origins {
+    pub worktrees_dir: Origin,
+    pub repos_dirs: Origin,
+    pub run_fetch: Origin,
+    pub backend: Origin,
+    pub editor: Origin,
+}
+
+/// Which layer clap took each of its own values from.
+///
+/// Only clap can answer this, so it is captured next to the parse and then
+/// passed into the merge as plain data, which keeps [`resolve`] testable
+/// without building an `ArgMatches`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Sources {
+    worktrees_dir: Option<Origin>,
+    repos_dirs: Option<Origin>,
+    run_fetch: Option<Origin>,
+}
+
+impl Sources {
+    fn from_matches(matches: &ArgMatches) -> Self {
+        Self {
+            worktrees_dir: clap_origin(matches, "worktrees_dir"),
+            repos_dirs: clap_origin(matches, "repos_dirs"),
+            run_fetch: clap_origin(matches, "run_fetch"),
+        }
+    }
+}
+
+/// Translates clap's value source into an [`Origin`], collapsing "clap made
+/// this up" to `None` so the config file can still win.
+fn clap_origin(matches: &ArgMatches, id: &str) -> Option<Origin> {
+    match matches.value_source(id) {
+        Some(ValueSource::CommandLine) => Some(Origin::CommandLine),
+        Some(ValueSource::EnvVariable) => Some(Origin::Environment),
+        // `DefaultValue` means the user said nothing, so it must not outrank
+        // the configuration file. Anything clap adds later is treated the same.
+        _ => None,
+    }
+}
+
+/// The effective configuration, with every directory already resolved to an
+/// absolute, existing path.
+#[derive(Debug, Clone)]
+pub struct Args {
+    /// Directory where new worktrees/workspaces are created.
+    pub worktrees_dir: String,
+    /// Directories scanned for repositories.
+    pub repos_dirs: Vec<String>,
+    /// Whether to fetch every repository at startup.
     pub run_fetch: bool,
+    /// Backend preferred when creating a workspace in a new repository.
+    pub backend: Backend,
+    /// Command used to open a worktree in an editor.
+    pub editor: Option<String>,
+    /// Where each of the above came from.
+    pub origins: Origins,
+    /// Configuration file consulted, whether or not it existed.
+    pub config_path: PathBuf,
+    /// The user asked for the configuration to be printed instead of the UI.
+    pub show_config: bool,
 }
 
 impl Args {
-    /// Parses the command line and resolves every directory to an absolute path.
+    /// Parses the command line, merges it with the configuration file, and
+    /// resolves every directory to an absolute path.
     ///
     /// Prefer this over [`Args::new`]: a bad path is a user mistake, not a bug,
     /// so it belongs in the error channel that `main` already routes to stderr.
     pub fn try_new() -> Result<Self> {
-        Self::parse().resolve()
+        Self::from_matches(&Cli::command().get_matches())
     }
 
     /// Same as [`Args::try_new`], but reports the error itself and exits.
     ///
     /// Only exists because `App::new` cannot yet propagate an error. It runs
-    /// before the alternate screen is entered, so writing to stderr here is
-    /// safe. Remove it once `App::new` returns a `Result` and can call
-    /// [`Args::try_new`] directly.
+    /// before the alternate screen is entered, so writing to stdout/stderr here
+    /// is safe. Remove it once `App::new` returns a `Result` and can call
+    /// [`Args::try_new`] directly — `--show-config` has to move with it.
     pub fn new() -> Self {
         match Self::try_new() {
-            Ok(args) => args,
+            Ok(args) => {
+                if args.show_config {
+                    // Printing and exiting here, instead of starting the TUI, is
+                    // the whole point of the flag.
+                    print!("{}", args.report());
+                    std::process::exit(0);
+                }
+                args
+            }
             Err(error) => {
                 // `{:#}` keeps the whole chain on a single line, so the user sees
                 // both what we were doing and why the OS refused.
@@ -63,67 +204,221 @@ impl Args {
         }
     }
 
-    /// Turns the raw string arguments into absolute, existing directories.
-    fn resolve(mut self) -> Result<Self> {
-        // Splitting on ':' can yield nothing at all (an empty environment
-        // variable, for instance), and an empty list would silently show a UI
-        // with no repositories instead of explaining what is missing.
-        if self.repos_dirs.is_empty() {
-            return Err(eyre!(
-                "--repos-dir: no repository directory given (set it or SHANTI_REPOS_DIR)"
-            ));
+    /// Loads the configuration file named by the parsed command line and merges
+    /// everything into the effective configuration.
+    fn from_matches(matches: &ArgMatches) -> Result<Self> {
+        let cli = Cli::from_arg_matches(matches)?;
+
+        let config_path = match &cli.config {
+            Some(path) => expand(path, "--config")?,
+            None => Config::path()?,
+        };
+        let config = Config::load_from(&config_path)?;
+
+        resolve(cli, Sources::from_matches(matches), config, config_path)
+    }
+
+    /// Renders the effective configuration and the origin of each value.
+    ///
+    /// Returned as a `String` rather than printed so it can be asserted on in
+    /// tests.
+    pub fn report(&self) -> String {
+        let state = if self.config_path.is_file() {
+            "loaded"
+        } else {
+            "not found, using defaults"
+        };
+        let mut out = format!("config file: {} ({state})\n\n", self.config_path.display());
+
+        let origins = &self.origins;
+        out.push_str(&setting(
+            "worktrees_dir",
+            &self.worktrees_dir,
+            origins.worktrees_dir,
+        ));
+
+        // A multi-valued setting still has a single origin: the layer that won.
+        let first = self.repos_dirs.first().map(String::as_str).unwrap_or("");
+        out.push_str(&setting("repos_dirs", first, origins.repos_dirs));
+        for dir in self.repos_dirs.iter().skip(1) {
+            out.push_str(&format!("{:<14}   {dir}\n", ""));
         }
 
-        self.repos_dirs = self
-            .repos_dirs
-            .iter()
-            .map(|dir| resolve_existing_dir(dir, "--repos-dir"))
-            .collect::<Result<Vec<_>>>()?;
-
-        // The worktrees directory is an output location, so create it rather
-        // than making the user run `mkdir` before their first worktree.
-        let worktrees_dir = expand(&self.worktrees_dir, "--worktrees-dir")?;
-        std::fs::create_dir_all(&worktrees_dir).wrap_err_with(|| {
-            format!(
-                "--worktrees-dir: could not create '{}'",
-                worktrees_dir.display()
-            )
-        })?;
-        self.worktrees_dir = resolve_existing_dir(&self.worktrees_dir, "--worktrees-dir")?;
-
-        Ok(self)
+        out.push_str(&setting(
+            "run_fetch",
+            &self.run_fetch.to_string(),
+            origins.run_fetch,
+        ));
+        out.push_str(&setting(
+            "backend",
+            &format!("{:?}", self.backend).to_lowercase(),
+            origins.backend,
+        ));
+        out.push_str(&setting(
+            "editor",
+            self.editor.as_deref().unwrap_or("<unset>"),
+            origins.editor,
+        ));
+        out
     }
 }
 
-/// Expands a leading `~`, failing with the flag name so the user knows which
-/// argument to fix.
-fn expand(dir: &str, flag: &str) -> Result<PathBuf> {
-    expand_tilde::expand_tilde_owned(dir)
-        .wrap_err_with(|| format!("{flag}: could not expand '~' in '{dir}'"))
+fn setting(name: &str, value: &str, origin: Origin) -> String {
+    format!("{name:<14} = {value}  ({origin})\n")
+}
+
+/// Merges the three layers and normalises every path that survives.
+///
+/// Split out of [`Args::from_matches`] so the precedence rules can be tested
+/// without a real configuration file on disk.
+fn resolve(cli: Cli, sources: Sources, config: Config, config_path: PathBuf) -> Result<Args> {
+    // An empty environment variable reaches clap as an empty value rather than
+    // as an absence, and an empty path can never be resolved. Dropping the
+    // blanks here lets `SHANTI_REPOS_DIR=` fall through to the next layer
+    // instead of failing on a path that was never really given.
+    let cli_worktrees_dir = cli.worktrees_dir.filter(|dir| !dir.trim().is_empty());
+    let cli_repos_dirs: Vec<String> = cli
+        .repos_dirs
+        .into_iter()
+        .filter(|dir| !dir.trim().is_empty())
+        .collect();
+
+    // --- worktrees_dir -----------------------------------------------------
+    let (worktrees_dir, worktrees_origin) = match (sources.worktrees_dir, cli_worktrees_dir) {
+        (Some(origin), Some(dir)) => (Some(PathBuf::from(dir)), origin),
+        _ => match config.worktrees_dir {
+            Some(dir) => (Some(dir), Origin::ConfigFile),
+            None => (None, Origin::Default),
+        },
+    };
+    let worktrees_dir = worktrees_dir.ok_or_else(|| {
+        eyre!(
+            "no worktrees directory given: pass --worktrees-dir, set SHANTI_WORKTREES_DIR, \
+             or add worktrees_dir to {}",
+            config_path.display()
+        )
+    })?;
+
+    // --- repos_dirs --------------------------------------------------------
+    let (repos_dirs, repos_origin) = match sources.repos_dirs {
+        // Splitting on ':' can still yield nothing (an empty environment
+        // variable, for instance). An empty layer carries no information, so it
+        // falls through to the next one instead of shadowing it.
+        Some(origin) if !cli_repos_dirs.is_empty() => (
+            cli_repos_dirs.into_iter().map(PathBuf::from).collect(),
+            origin,
+        ),
+        _ if !config.repos_dirs.is_empty() => (config.repos_dirs, Origin::ConfigFile),
+        _ => (Vec::new(), Origin::Default),
+    };
+    if repos_dirs.is_empty() {
+        return Err(eyre!(
+            "no repository directory given: pass --repos-dir, set SHANTI_REPOS_DIR, \
+             or add repos_dirs to {}",
+            config_path.display()
+        ));
+    }
+
+    // --- run_fetch ---------------------------------------------------------
+    let (run_fetch, fetch_origin) = match sources.run_fetch {
+        Some(origin) => (cli.run_fetch, origin),
+        // `run_fetch = false` in the file is indistinguishable from the default
+        // and is reported as such; the resulting value is the same either way.
+        None if config.run_fetch => (true, Origin::ConfigFile),
+        None => (false, Origin::Default),
+    };
+
+    // --- settings the command line does not expose yet ---------------------
+    let backend_origin = if config.backend == Backend::default() {
+        Origin::Default
+    } else {
+        Origin::ConfigFile
+    };
+    let editor_origin = if config.editor.is_some() {
+        Origin::ConfigFile
+    } else {
+        Origin::Default
+    };
+
+    let origins = Origins {
+        worktrees_dir: worktrees_origin,
+        repos_dirs: repos_origin,
+        run_fetch: fetch_origin,
+        backend: backend_origin,
+        editor: editor_origin,
+    };
+    debug!(?origins, "Resolved the configuration sources");
+
+    // Normalisation happens once, here, so it applies to whichever layer won.
+    let repos_dirs = repos_dirs
+        .iter()
+        .map(|dir| resolve_existing_dir(dir, &label("--repos-dir", repos_origin)))
+        .collect::<Result<Vec<_>>>()?;
+
+    // The worktrees directory is an output location, so create it rather than
+    // making the user run `mkdir` before their first worktree.
+    let worktrees_label = label("--worktrees-dir", worktrees_origin);
+    let expanded = expand(&worktrees_dir, &worktrees_label)?;
+    std::fs::create_dir_all(&expanded).wrap_err_with(|| {
+        format!(
+            "{worktrees_label}: could not create '{}'",
+            expanded.display()
+        )
+    })?;
+    let worktrees_dir = resolve_existing_dir(&worktrees_dir, &worktrees_label)?;
+
+    Ok(Args {
+        worktrees_dir,
+        repos_dirs,
+        run_fetch,
+        backend: config.backend,
+        editor: config.editor,
+        origins,
+        config_path,
+        show_config: cli.show_config,
+    })
+}
+
+/// Names the setting the way the user wrote it, so an error points at the file
+/// they have to edit rather than at a flag they never typed.
+fn label(flag: &str, origin: Origin) -> String {
+    match origin {
+        Origin::ConfigFile => format!("{flag} (from the config file)"),
+        Origin::Environment => format!("{flag} (from the environment)"),
+        _ => flag.to_string(),
+    }
+}
+
+/// Expands a leading `~`, failing with the setting name so the user knows which
+/// value to fix.
+fn expand(dir: &Path, label: &str) -> Result<PathBuf> {
+    expand_tilde::expand_tilde(dir)
+        .map(|expanded| expanded.into_owned())
+        .wrap_err_with(|| format!("{label}: could not expand '~' in '{}'", dir.display()))
 }
 
 /// Resolves `dir` to an absolute path, requiring it to exist.
-fn resolve_existing_dir(dir: &str, flag: &str) -> Result<String> {
-    let expanded = expand(dir, flag)?;
+fn resolve_existing_dir(dir: &Path, label: &str) -> Result<String> {
+    let expanded = expand(dir, label)?;
     let canonical = std::fs::canonicalize(&expanded)
-        .wrap_err_with(|| format!("{flag}: could not open directory '{}'", expanded.display()))?;
+        .wrap_err_with(|| format!("{label}: could not open directory '{}'", expanded.display()))?;
 
     if !canonical.is_dir() {
         return Err(eyre!(
-            "{flag}: '{}' is not a directory",
+            "{label}: '{}' is not a directory",
             canonical.display()
         ));
     }
 
-    into_utf8(canonical, flag)
+    into_utf8(canonical, label)
 }
 
 /// The rest of the program stores directories as `String`, so a path the OS
 /// accepts but Rust cannot represent as UTF-8 has to be rejected here.
-fn into_utf8(path: PathBuf, flag: &str) -> Result<String> {
+fn into_utf8(path: PathBuf, label: &str) -> Result<String> {
     path.into_os_string().into_string().map_err(|raw| {
         eyre!(
-            "{flag}: path is not valid UTF-8: '{}'",
+            "{label}: path is not valid UTF-8: '{}'",
             Path::new(&raw).display()
         )
     })
@@ -131,88 +426,398 @@ fn into_utf8(path: PathBuf, flag: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, MutexGuard};
+
     use super::*;
 
-    fn args(repos_dirs: Vec<String>, worktrees_dir: String) -> Args {
-        Args {
-            worktrees_dir,
-            repos_dirs,
-            run_fetch: false,
+    /// Clap reads the real process environment, so the tests that exercise the
+    /// environment layer have to run one at a time.
+    static ENV: Mutex<()> = Mutex::new(());
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        // A panicking test must not disable the remaining ones.
+        ENV.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Parses `argv` (plus whatever is in the environment) the way `try_new`
+    /// does, then merges it with an explicit configuration.
+    ///
+    /// Every test goes through the lock, not only the ones that set variables:
+    /// a `SHANTI_*` leaked by a neighbouring test would otherwise change the
+    /// answer here.
+    fn resolve_with(argv: &[&str], config: Config) -> Result<Args> {
+        let _guard = env_lock();
+        clear_env();
+        parse_and_resolve(argv, config)
+    }
+
+    /// The developer running the tests may well have `SHANTI_*` exported in
+    /// their own shell, which would silently outrank the layer under test.
+    fn clear_env() {
+        for name in [
+            "SHANTI_REPOS_DIR",
+            "SHANTI_WORKTREES_DIR",
+            "SHANTI_RUN_FETCH",
+        ] {
+            std::env::remove_var(name);
         }
     }
 
-    #[test]
-    fn missing_repos_dir_reports_the_path_and_the_flag() {
-        let temp = tempfile::tempdir().unwrap();
-        let missing = temp.path().join("nope");
+    /// Same, with the given environment variables set for the duration of the
+    /// parse. Clap reads the real process environment, so this is the only way
+    /// to exercise the environment layer.
+    fn resolve_with_env(vars: &[(&str, &str)], argv: &[&str], config: Config) -> Result<Args> {
+        let _guard = env_lock();
+        clear_env();
+        for (name, value) in vars {
+            std::env::set_var(name, value);
+        }
+        let resolved = parse_and_resolve(argv, config);
+        clear_env();
+        resolved
+    }
 
-        let error = args(
-            vec![missing.to_str().unwrap().to_string()],
-            temp.path().to_str().unwrap().to_string(),
+    fn parse_and_resolve(argv: &[&str], config: Config) -> Result<Args> {
+        let matches = Cli::command().get_matches_from(argv);
+        let cli = Cli::from_arg_matches(&matches).unwrap();
+        let sources = Sources::from_matches(&matches);
+        resolve(
+            cli,
+            sources,
+            config,
+            PathBuf::from("/nonexistent/config.toml"),
         )
-        .resolve()
-        .unwrap_err();
+    }
+
+    fn config_with(repos: &[&Path], worktrees: &Path) -> Config {
+        Config {
+            repos_dirs: repos.iter().map(|dir| dir.to_path_buf()).collect(),
+            worktrees_dir: Some(worktrees.to_path_buf()),
+            ..Config::default()
+        }
+    }
+
+    fn temp() -> tempfile::TempDir {
+        tempfile::tempdir().expect("could not create a temporary directory")
+    }
+
+    fn canonical(path: &Path) -> String {
+        std::fs::canonicalize(path)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    // --- precedence, one pair per test -------------------------------------
+
+    #[test]
+    fn config_file_beats_the_built_in_default() {
+        let dir = temp();
+        let args = resolve_with(&["shanti"], config_with(&[dir.path()], dir.path())).unwrap();
+
+        assert_eq!(args.origins.repos_dirs, Origin::ConfigFile);
+        assert_eq!(args.origins.worktrees_dir, Origin::ConfigFile);
+        assert_eq!(args.repos_dirs, vec![canonical(dir.path())]);
+    }
+
+    #[test]
+    fn a_flag_beats_the_config_file() {
+        let from_config = temp();
+        let from_flag = temp();
+
+        let args = resolve_with(
+            &[
+                "shanti",
+                "--repos-dir",
+                from_flag.path().to_str().unwrap(),
+                "--worktrees-dir",
+                from_flag.path().to_str().unwrap(),
+            ],
+            config_with(&[from_config.path()], from_config.path()),
+        )
+        .unwrap();
+
+        assert_eq!(args.origins.repos_dirs, Origin::CommandLine);
+        assert_eq!(args.repos_dirs, vec![canonical(from_flag.path())]);
+        assert_eq!(args.worktrees_dir, canonical(from_flag.path()));
+    }
+
+    #[test]
+    fn the_environment_beats_the_config_file() {
+        let from_config = temp();
+        let from_env = temp();
+        let env = from_env.path().to_str().unwrap();
+
+        let args = resolve_with_env(
+            &[("SHANTI_REPOS_DIR", env), ("SHANTI_WORKTREES_DIR", env)],
+            &["shanti"],
+            config_with(&[from_config.path()], from_config.path()),
+        )
+        .unwrap();
+
+        assert_eq!(args.origins.repos_dirs, Origin::Environment);
+        assert_eq!(args.repos_dirs, vec![canonical(from_env.path())]);
+    }
+
+    #[test]
+    fn a_flag_beats_the_environment() {
+        let from_env = temp();
+        let from_flag = temp();
+        let env = from_env.path().to_str().unwrap();
+
+        let args = resolve_with_env(
+            &[("SHANTI_REPOS_DIR", env), ("SHANTI_WORKTREES_DIR", env)],
+            &["shanti", "--repos-dir", from_flag.path().to_str().unwrap()],
+            Config::default(),
+        )
+        .unwrap();
+
+        assert_eq!(args.origins.repos_dirs, Origin::CommandLine);
+        assert_eq!(args.repos_dirs, vec![canonical(from_flag.path())]);
+        // The setting the flag did not cover still comes from the environment.
+        assert_eq!(args.origins.worktrees_dir, Origin::Environment);
+    }
+
+    /// The regression this issue exists to prevent: clap always produces a
+    /// value for a flag, so a naive merge would let its default silently beat
+    /// the configuration file.
+    #[test]
+    fn a_clap_default_does_not_beat_the_config_file() {
+        let dir = temp();
+        let config = Config {
+            run_fetch: true,
+            ..config_with(&[dir.path()], dir.path())
+        };
+
+        let args = resolve_with(&["shanti"], config).unwrap();
+
+        assert!(args.run_fetch);
+        assert_eq!(args.origins.run_fetch, Origin::ConfigFile);
+    }
+
+    #[test]
+    fn the_run_fetch_flag_beats_the_config_file() {
+        let dir = temp();
+        let args = resolve_with(
+            &["shanti", "--run-fetch"],
+            config_with(&[dir.path()], dir.path()),
+        )
+        .unwrap();
+
+        assert!(args.run_fetch);
+        assert_eq!(args.origins.run_fetch, Origin::CommandLine);
+    }
+
+    #[test]
+    fn an_empty_environment_variable_falls_through_to_the_config_file() {
+        let dir = temp();
+
+        let args = resolve_with_env(
+            &[("SHANTI_REPOS_DIR", ""), ("SHANTI_WORKTREES_DIR", "")],
+            &["shanti"],
+            config_with(&[dir.path()], dir.path()),
+        )
+        .unwrap();
+
+        assert_eq!(args.origins.repos_dirs, Origin::ConfigFile);
+        assert_eq!(args.origins.worktrees_dir, Origin::ConfigFile);
+    }
+
+    // --- normalisation applies to every layer ------------------------------
+
+    #[test]
+    fn a_tilde_in_the_config_file_is_expanded() {
+        let dir = temp();
+        let config = Config {
+            repos_dirs: vec![PathBuf::from("~")],
+            ..config_with(&[], dir.path())
+        };
+
+        let args = resolve_with(&["shanti"], config).unwrap();
+
+        let home = expand_tilde::expand_tilde(Path::new("~"))
+            .unwrap()
+            .into_owned();
+        assert_eq!(args.repos_dirs, vec![canonical(&home)]);
+    }
+
+    #[test]
+    fn a_config_file_path_is_canonicalised() {
+        let dir = temp();
+        let nested = dir.path().join("repos");
+        std::fs::create_dir(&nested).unwrap();
+        // A path the OS accepts but which is not the shortest spelling.
+        let indirect = nested.join("..").join("repos");
+
+        let args = resolve_with(&["shanti"], config_with(&[&indirect], dir.path())).unwrap();
+
+        assert_eq!(args.repos_dirs, vec![canonical(&nested)]);
+    }
+
+    #[test]
+    fn a_worktrees_dir_from_the_config_file_is_created() {
+        let dir = temp();
+        let worktrees = dir.path().join("worktrees").join("nested");
+
+        let args = resolve_with(&["shanti"], config_with(&[dir.path()], &worktrees)).unwrap();
+
+        assert!(worktrees.is_dir());
+        assert!(args.worktrees_dir.ends_with("nested"));
+        assert!(Path::new(&args.worktrees_dir).is_absolute());
+    }
+
+    // --- errors ------------------------------------------------------------
+
+    #[test]
+    fn a_missing_repos_dir_reports_the_path_and_the_source() {
+        let dir = temp();
+        let missing = dir.path().join("nope");
+
+        let error = resolve_with(&["shanti"], config_with(&[&missing], dir.path())).unwrap_err();
 
         let message = format!("{error:#}");
         assert!(message.contains("--repos-dir"), "{message}");
+        assert!(message.contains("config file"), "{message}");
         assert!(message.contains("nope"), "{message}");
     }
 
     #[test]
-    fn empty_repos_dirs_is_rejected() {
-        let temp = tempfile::tempdir().unwrap();
+    fn a_missing_repos_dir_flag_is_reported_as_a_flag() {
+        let dir = temp();
+        let missing = dir.path().join("nope");
 
-        let error = args(vec![], temp.path().to_str().unwrap().to_string())
-            .resolve()
-            .unwrap_err();
+        let error = resolve_with(
+            &[
+                "shanti",
+                "--repos-dir",
+                missing.to_str().unwrap(),
+                "--worktrees-dir",
+                dir.path().to_str().unwrap(),
+            ],
+            Config::default(),
+        )
+        .unwrap_err();
 
-        assert!(format!("{error:#}").contains("--repos-dir"));
+        let message = format!("{error:#}");
+        assert!(message.contains("--repos-dir"), "{message}");
+        assert!(!message.contains("config file"), "{message}");
     }
 
     #[test]
-    fn missing_worktrees_dir_is_created() {
-        let temp = tempfile::tempdir().unwrap();
-        let worktrees = temp.path().join("worktrees").join("nested");
+    fn no_repos_dir_in_any_layer_is_rejected() {
+        let dir = temp();
+        let config = Config {
+            worktrees_dir: Some(dir.path().to_path_buf()),
+            ..Config::default()
+        };
 
-        let resolved = args(
-            vec![temp.path().to_str().unwrap().to_string()],
-            worktrees.to_str().unwrap().to_string(),
-        )
-        .resolve()
-        .unwrap();
+        let message = format!("{:#}", resolve_with(&["shanti"], config).unwrap_err());
+        assert!(message.contains("--repos-dir"), "{message}");
+        assert!(message.contains("SHANTI_REPOS_DIR"), "{message}");
+        assert!(message.contains("repos_dirs"), "{message}");
+    }
 
-        assert!(worktrees.is_dir());
-        assert!(resolved.worktrees_dir.ends_with("nested"));
+    #[test]
+    fn no_worktrees_dir_in_any_layer_is_rejected() {
+        let dir = temp();
+        let config = Config {
+            repos_dirs: vec![dir.path().to_path_buf()],
+            ..Config::default()
+        };
+
+        let message = format!("{:#}", resolve_with(&["shanti"], config).unwrap_err());
+        assert!(message.contains("--worktrees-dir"), "{message}");
+        assert!(message.contains("worktrees_dir"), "{message}");
     }
 
     #[test]
     fn a_file_where_a_repos_dir_is_expected_is_rejected() {
-        let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("not-a-dir");
+        let dir = temp();
+        let file = dir.path().join("not-a-dir");
         std::fs::write(&file, b"").unwrap();
 
-        let error = args(
-            vec![file.to_str().unwrap().to_string()],
-            temp.path().to_str().unwrap().to_string(),
-        )
-        .resolve()
-        .unwrap_err();
+        let error = resolve_with(&["shanti"], config_with(&[&file], dir.path())).unwrap_err();
 
         assert!(format!("{error:#}").contains("is not a directory"));
     }
 
-    #[test]
-    fn resolved_paths_are_absolute() {
-        let temp = tempfile::tempdir().unwrap();
+    // --- reporting ---------------------------------------------------------
 
-        let resolved = args(
-            vec![temp.path().to_str().unwrap().to_string()],
-            temp.path().to_str().unwrap().to_string(),
+    #[test]
+    fn show_config_lists_every_setting_with_its_origin() {
+        let from_config = temp();
+        let from_flag = temp();
+        let config = Config {
+            backend: Backend::Jujutsu,
+            editor: Some("nvim".to_string()),
+            ..config_with(&[from_config.path()], from_config.path())
+        };
+
+        let args = resolve_with(
+            &[
+                "shanti",
+                "--show-config",
+                "--worktrees-dir",
+                from_flag.path().to_str().unwrap(),
+            ],
+            config,
         )
-        .resolve()
         .unwrap();
 
-        assert!(Path::new(&resolved.repos_dirs[0]).is_absolute());
-        assert!(Path::new(&resolved.worktrees_dir).is_absolute());
+        assert!(args.show_config);
+        let report = args.report();
+        assert!(report.contains("not found"), "{report}");
+        assert!(
+            report.contains(&format!(
+                "worktrees_dir  = {}  (command line)",
+                canonical(from_flag.path())
+            )),
+            "{report}"
+        );
+        assert!(
+            report.contains(&format!(
+                "repos_dirs     = {}  (config file)",
+                canonical(from_config.path())
+            )),
+            "{report}"
+        );
+        assert!(
+            report.contains("run_fetch      = false  (built-in default)"),
+            "{report}"
+        );
+        assert!(
+            report.contains("backend        = jujutsu  (config file)"),
+            "{report}"
+        );
+        assert!(
+            report.contains("editor         = nvim  (config file)"),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn the_report_lists_every_repository_directory() {
+        let first = temp();
+        let second = temp();
+
+        let args = resolve_with(
+            &["shanti"],
+            config_with(&[first.path(), second.path()], first.path()),
+        )
+        .unwrap();
+
+        let report = args.report();
+        assert!(report.contains(&canonical(first.path())), "{report}");
+        assert!(report.contains(&canonical(second.path())), "{report}");
+    }
+
+    /// The precedence order is the contract; spelling it out keeps a future
+    /// reordering of the enum from silently changing behaviour.
+    #[test]
+    fn origins_are_ordered_lowest_to_highest() {
+        assert!(Origin::Default < Origin::ConfigFile);
+        assert!(Origin::ConfigFile < Origin::Environment);
+        assert!(Origin::Environment < Origin::CommandLine);
     }
 }
