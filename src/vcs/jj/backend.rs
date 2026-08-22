@@ -21,10 +21,12 @@ use std::path::{Path, PathBuf};
 use color_eyre::eyre::{self, eyre, WrapErr};
 use tracing::debug;
 
-use crate::vcs::{Backend, RemoteState, Repo, Space, SpaceStatus, Vcs};
+use crate::vcs::{Backend, Repo, Space, SpaceStatus, Vcs};
 
-use super::base::{self, Base, ANY_REVISION, REAL_TRUNK, REMOTE_BOOKMARKS};
+use super::base::{self, Base, ANY_REVISION, REAL_TRUNK};
 use super::cmd::JjCli;
+use super::status::{self, BOOKMARKS};
+use super::template::Record;
 use super::workspace::{self, Workspace, WORKSPACES};
 
 /// A single jujutsu repository, and everything shanti can do with it.
@@ -142,13 +144,20 @@ impl JjBackend {
     /// jj: `jj bookmark list <name>` fails outright when the name is unknown,
     /// which is the common case here and not an error at all.
     fn remote_carrying(&self, name: &str) -> eyre::Result<Option<String>> {
-        let records = self
-            .cli
+        base::remote_carrying(&self.bookmarks()?, name)
+    }
+
+    /// Every bookmark of the repository, one row per ref.
+    ///
+    /// One query for the whole repository, and the reason the remote half of
+    /// [`Vcs::spaces`] does not cost a process per space: tracking state
+    /// belongs to a bookmark in the shared repo store, not to a workspace.
+    fn bookmarks(&self) -> eyre::Result<Vec<Record>> {
+        self.cli
             // Like `workspace list`, `bookmark list` draws no graph and rejects
             // `--no-graph`.
-            .plain_records(&["bookmark", "list", "--all-remotes"], &REMOTE_BOOKMARKS)
-            .wrap_err_with(|| format!("could not list the bookmarks of {}", self.repo.name))?;
-        base::remote_carrying(&records, name)
+            .plain_records(&["bookmark", "list", "--all-remotes"], &BOOKMARKS)
+            .wrap_err_with(|| format!("could not list the bookmarks of {}", self.repo.name))
     }
 
     /// Whether the repository has a mainline `trunk()` can point at.
@@ -198,17 +207,29 @@ impl JjBackend {
     }
 
     /// Translate a jj workspace into the backend-neutral snapshot.
-    fn space_of(&self, workspace: &Workspace) -> Space {
-        // The local half is real: it came back with the listing. The remote
-        // half needs the workspace's nearest bookmark and its tracking counts,
-        // which is shanti-nhe.5; `Unknown` renders as "not checked" rather than
-        // claiming a state this backend has not looked at.
-        let status = SpaceStatus::jj(RemoteState::Unknown, workspace.local);
+    ///
+    /// `bookmarks` is the repository's whole bookmark listing, passed in rather
+    /// than fetched here so that listing every space costs one bookmark query,
+    /// not one per space.
+    ///
+    /// A remote half that cannot be decided degrades to
+    /// [`RemoteState::Unknown`] — "not checked" — instead of failing the whole
+    /// listing: a bookmark shanti cannot read is no reason to hide the space it
+    /// belongs to.
+    fn space_of(&self, workspace: &Workspace, bookmarks: &[Record]) -> Space {
+        let remote = status::remote_of(bookmarks, &workspace.bookmarks).unwrap_or_else(|error| {
+            debug!(
+                workspace = %workspace.name,
+                %error,
+                "could not read the bookmark state of a jj workspace"
+            );
+            crate::vcs::RemoteState::Unknown
+        });
         Space::new(
             self.repo.id.clone(),
             workspace.name.clone(),
             workspace.root.clone(),
-            status,
+            SpaceStatus::jj(remote, workspace.local),
         )
     }
 }
@@ -218,11 +239,16 @@ impl Vcs for JjBackend {
         &self.repo
     }
 
+    /// Two jj invocations for the whole repository, however many spaces it has:
+    /// one `workspace list` for the local half, one `bookmark list` for the
+    /// remote half. This runs on every refresh, so the cost has to be per
+    /// repository rather than per space.
     fn spaces(&self) -> eyre::Result<Vec<Space>> {
-        Ok(self
-            .workspaces()?
+        let workspaces = self.workspaces()?;
+        let bookmarks = self.bookmarks()?;
+        Ok(workspaces
             .iter()
-            .map(|workspace| self.space_of(workspace))
+            .map(|workspace| self.space_of(workspace, &bookmarks))
             .collect())
     }
 
@@ -236,10 +262,11 @@ impl Vcs for JjBackend {
         let base = self.base_for(name)?;
         self.add_workspace(name, dest, &base)?;
 
+        let bookmarks = self.bookmarks()?;
         self.workspaces()?
             .iter()
             .find(|workspace| workspace.name == name)
-            .map(|workspace| self.space_of(workspace))
+            .map(|workspace| self.space_of(workspace, &bookmarks))
             .ok_or_else(|| eyre!("jj created the workspace {name:?} but does not list it as one"))
     }
 
@@ -306,7 +333,7 @@ fn directory_name(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vcs::{JjLocal, LocalState};
+    use crate::vcs::{JjLocal, LocalState, RemoteState};
     use pretty_assertions::assert_eq;
 
     use crate::vcs::jj::testing::{self, JjFixture};
@@ -395,10 +422,10 @@ mod tests {
         assert!(ids.iter().all(|id| *id == repo.id), "{ids:?}");
     }
 
-    /// The local half is free with the listing, so it must be truthful; the
-    /// remote half is deliberately left unprobed for shanti-nhe.5.
+    /// A workspace shanti has just created carries no bookmark, so nothing
+    /// upstream has heard of it — "not pushed", never "in sync".
     #[test]
-    fn a_fresh_workspace_reports_an_empty_change_and_an_unprobed_remote() {
+    fn a_fresh_workspace_reports_an_empty_change_and_nothing_upstream() {
         let Some(fixture) = JjFixture::new("fresh-status") else {
             return;
         };
@@ -408,7 +435,7 @@ mod tests {
         let spaces = backend.spaces().unwrap();
         let feature = spaces.iter().find(|s| s.name == "feature").unwrap();
 
-        assert_eq!(feature.status.remote, RemoteState::Unknown);
+        assert_eq!(feature.status.remote, RemoteState::Untracked);
         assert_eq!(
             feature.status.local,
             LocalState::Jj(JjLocal {
@@ -443,6 +470,169 @@ mod tests {
         // jj auto-commits, so an ordinary edit is *not* work at risk — unlike a
         // dirty git worktree.
         assert!(!spaces[0].status.has_unsaved_work());
+    }
+
+    /// The remote half, end to end: an empty working copy on top of a pushed
+    /// bookmark is level with its remote.
+    #[test]
+    fn a_space_sitting_on_a_pushed_bookmark_is_in_sync() {
+        let Some(fixture) = JjFixture::new("in-sync") else {
+            return;
+        };
+        fixture.push_bookmark("main");
+
+        let backend = fixture.backend();
+        let spaces = backend.spaces().unwrap();
+
+        assert_eq!(spaces[0].status.remote, RemoteState::in_sync());
+        assert!(!spaces[0].status.remote.has_unpushed_work());
+    }
+
+    /// The acceptance criterion's "ahead of its remote": the bookmark moved on
+    /// and nobody pushed it. jj states that count from the remote's end, so a
+    /// swapped reading would show this as *behind*.
+    #[test]
+    fn a_space_whose_bookmark_moved_on_without_a_push_is_ahead() {
+        let Some(fixture) = JjFixture::new("ahead") else {
+            return;
+        };
+        fixture.push_bookmark("main");
+        fixture.commit_change("a.txt", "new work\n");
+        fixture.jj(&["bookmark", "set", "main", "-r", "@"]);
+        // Start a fresh empty change, as any further work in the space would.
+        fixture.jj(&["new"]);
+
+        let backend = fixture.backend();
+        let spaces = backend.spaces().unwrap();
+
+        assert_eq!(
+            spaces[0].status.remote,
+            RemoteState::Tracked {
+                ahead: 1,
+                behind: 0
+            }
+        );
+        assert!(spaces[0].status.remote.has_unpushed_work());
+    }
+
+    /// A bookmark deleted upstream — a merged pull request, typically — must
+    /// read as gone rather than as an ordinary tracked bookmark.
+    #[test]
+    fn a_space_whose_bookmark_was_deleted_upstream_is_gone() {
+        let Some(fixture) = JjFixture::new("gone") else {
+            return;
+        };
+        fixture.push_bookmark("main");
+        // Move the local bookmark on, so jj keeps it when the remote one
+        // disappears instead of propagating the deletion.
+        fixture.commit_change("a.txt", "new work\n");
+        fixture.jj(&["bookmark", "set", "main", "-r", "@"]);
+        fixture.jj(&["new"]);
+
+        fixture.delete_on_remote("main");
+        fixture.jj(&["git", "fetch"]);
+
+        let backend = fixture.backend();
+        let spaces = backend.spaces().unwrap();
+        assert_eq!(spaces[0].status.remote, RemoteState::Gone);
+    }
+
+    /// Work committed on top of a pushed bookmark is unpushed work, even though
+    /// the bookmark itself has not moved: the space's head no longer carries
+    /// one, and shanti must not answer with the bookmark further back.
+    #[test]
+    fn work_beyond_the_bookmark_is_not_reported_as_in_sync() {
+        let Some(fixture) = JjFixture::new("beyond-bookmark") else {
+            return;
+        };
+        fixture.push_bookmark("main");
+        fixture.commit_change("a.txt", "new work\n");
+
+        let backend = fixture.backend();
+        let spaces = backend.spaces().unwrap();
+
+        assert_eq!(spaces[0].status.remote, RemoteState::Untracked);
+        assert!(spaces[0].status.remote.has_unpushed_work());
+    }
+
+    /// The acceptance criterion: conflicted, empty and ahead must be three
+    /// different things on screen, not three blanks.
+    #[test]
+    fn conflicted_empty_and_ahead_spaces_render_distinctly() {
+        let Some(fixture) = JjFixture::new("distinct") else {
+            return;
+        };
+        fixture.push_bookmark("main");
+
+        // An empty space, level with the remote.
+        let empty = fixture.backend().spaces().unwrap().remove(0);
+
+        // The same space, one unpushed commit beyond the bookmark.
+        fixture.commit_change("a.txt", "one\n");
+        fixture.jj(&["describe", "-m", "one"]);
+        fixture.jj(&["bookmark", "set", "main", "-r", "@"]);
+        fixture.jj(&["new"]);
+        let ahead = fixture.backend().spaces().unwrap().remove(0);
+
+        // And again with a merge of two siblings that both add `a.txt`.
+        fixture.jj(&["new", "main-"]);
+        fixture.commit_change("a.txt", "two\n");
+        fixture.jj(&["describe", "-m", "two"]);
+        fixture.jj(&["new", "main", "@"]);
+        let conflicted = fixture.backend().spaces().unwrap().remove(0);
+
+        assert_eq!(empty.status.glyphs()[1].symbol, "∅");
+        assert_eq!(
+            ahead.status.remote,
+            RemoteState::Tracked {
+                ahead: 1,
+                behind: 0
+            }
+        );
+        assert_eq!(conflicted.status.glyphs()[1].symbol, "!");
+
+        let rendered: Vec<[&str; 2]> = [&empty, &ahead, &conflicted]
+            .iter()
+            .map(|space| {
+                let [remote, local] = space.status.glyphs();
+                [remote.symbol, local.symbol]
+            })
+            .collect();
+        for (i, a) in rendered.iter().enumerate() {
+            for b in &rendered[i + 1..] {
+                assert_ne!(a, b, "two states render the same: {rendered:?}");
+            }
+        }
+    }
+
+    /// The remote half must survive several spaces at once: they share one
+    /// bookmark listing, so a mistake in the join would show up as one space
+    /// wearing another's tracking state.
+    #[test]
+    fn spaces_sharing_one_bookmark_listing_keep_their_own_remote_state() {
+        let Some(fixture) = JjFixture::new("shared-listing") else {
+            return;
+        };
+        fixture.push_bookmark("main");
+        // Started beside the working copy, so its head is the bookmarked commit.
+        fixture.add_workspace("on-main");
+        // The default workspace moves past the bookmark instead.
+        fixture.commit_change("a.txt", "new work\n");
+
+        let backend = fixture.backend();
+        let mut spaces = backend.spaces().unwrap();
+        spaces.sort_by(|a, b| a.name.cmp(&b.name));
+        let state = |name: &str| {
+            spaces
+                .iter()
+                .find(|space| space.name == name)
+                .unwrap()
+                .status
+                .remote
+        };
+
+        assert_eq!(state("on-main"), RemoteState::in_sync());
+        assert_eq!(state("default"), RemoteState::Untracked);
     }
 
     /// Exercises the trait through a trait object: that is how the repository

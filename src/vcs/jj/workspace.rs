@@ -9,10 +9,11 @@
 
 use std::path::{Path, PathBuf};
 
-use color_eyre::eyre::{self, eyre, WrapErr};
+use color_eyre::eyre::{self, WrapErr};
 use tracing::debug;
 
 use super::cmd::JjCli;
+use super::status;
 use super::template::{Record, Template};
 use crate::vcs::JjLocal;
 
@@ -24,12 +25,18 @@ use crate::vcs::JjLocal;
 /// The three `target.*` flags are the jj-native local signals of
 /// [`JjLocal`]; they are read here because they cost nothing extra once this
 /// template is already rendering the working-copy commit.
+///
+/// `bookmarks` is the same bargain applied to the remote half: the names it
+/// yields are joined against one repository-wide `jj bookmark list` instead of
+/// costing a query per workspace. Which commit's bookmarks those are is
+/// [`super::status`]'s rule, so the expression lives there.
 pub const WORKSPACES: Template = Template::new(&[
     ("name", "name"),
     ("root", "root"),
     ("empty", "target.empty()"),
     ("conflicted", "target.conflict()"),
     ("divergent", "target.divergent()"),
+    ("bookmarks", status::WORKSPACE_BOOKMARKS),
 ]);
 
 /// One row of `jj workspace list`.
@@ -45,6 +52,9 @@ pub struct Workspace {
     pub root: PathBuf,
     /// State of the workspace's working-copy commit.
     pub local: JjLocal,
+    /// Local bookmarks sitting on the workspace's head, in jj's order. Empty
+    /// for the ordinary jj workspace, which carries no bookmark at all.
+    pub bookmarks: Vec<String>,
 }
 
 impl Workspace {
@@ -54,10 +64,11 @@ impl Workspace {
             name: record.get("name")?.to_owned(),
             root: PathBuf::from(record.get("root")?),
             local: JjLocal {
-                empty: boolean(record, "empty")?,
-                conflicted: boolean(record, "conflicted")?,
-                divergent: boolean(record, "divergent")?,
+                empty: record.boolean("empty")?,
+                conflicted: record.boolean("conflicted")?,
+                divergent: record.boolean("divergent")?,
             },
+            bookmarks: record.list("bookmarks")?,
         })
     }
 }
@@ -144,22 +155,6 @@ fn snapshot(cli: &JjCli, name: &str, root: &Path) {
     }
 }
 
-/// Read a jj `Boolean` field.
-///
-/// Rejects anything that is not exactly `true`/`false` rather than treating an
-/// unexpected value as `false`: a silent `false` here would report a conflicted
-/// workspace as clean, which is the class of lie this whole module exists to
-/// avoid.
-fn boolean(record: &Record, field: &str) -> eyre::Result<bool> {
-    match record.get(field)? {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        other => Err(eyre!(
-            "jj rendered {field:?} as {other:?}, which is not a boolean"
-        )),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,8 +174,8 @@ mod tests {
 
     #[test]
     fn a_row_becomes_a_workspace() {
-        let line =
-            ["feature", "/w/feature", "false", "true", "false"].join(&FIELD_SEPARATOR.to_string());
+        let line = ["feature", "/w/feature", "false", "true", "false", "feature"]
+            .join(&FIELD_SEPARATOR.to_string());
         let records = record(&line).unwrap();
         let workspace = Workspace::from_record(&records[0]).unwrap();
 
@@ -194,12 +189,26 @@ mod tests {
                 divergent: false,
             }
         );
+        assert_eq!(workspace.bookmarks, ["feature"]);
+    }
+
+    /// The common case: a workspace nobody has bookmarked. It must read as no
+    /// bookmarks, not as one bookmark with an empty name.
+    #[test]
+    fn a_workspace_on_no_bookmark_lists_none() {
+        let line = ["feature", "/w/feature", "true", "false", "false", ""]
+            .join(&FIELD_SEPARATOR.to_string());
+        let records = record(&line).unwrap();
+        assert!(Workspace::from_record(&records[0])
+            .unwrap()
+            .bookmarks
+            .is_empty());
     }
 
     #[test]
     fn a_non_boolean_flag_is_an_error_rather_than_a_false() {
-        let line =
-            ["feature", "/w/feature", "yes", "false", "false"].join(&FIELD_SEPARATOR.to_string());
+        let line = ["feature", "/w/feature", "yes", "false", "false", ""]
+            .join(&FIELD_SEPARATOR.to_string());
         let records = record(&line).unwrap();
         let error = Workspace::from_record(&records[0]).unwrap_err().to_string();
 

@@ -119,6 +119,25 @@ impl JjFixture {
         self.jj(&["git", "push", "--allow-new", "--bookmark", name]);
     }
 
+    /// Delete `name` from the `origin` created by [`JjFixture::push_bookmark`],
+    /// without touching this repository's own refs.
+    ///
+    /// Done with raw `git` against the bare remote because that is what a
+    /// deletion upstream actually is — somebody else's `jj git push --deleted`,
+    /// or a merged pull request. The caller still has to `jj git fetch` for the
+    /// repository to learn about it.
+    pub fn delete_on_remote(&self, name: &str) {
+        let remote = self.base.join("origin.git");
+        let status = Command::new("git")
+            .arg("--git-dir")
+            .arg(&remote)
+            .args(["update-ref", "-d"])
+            .arg(format!("refs/heads/{name}"))
+            .status()
+            .expect("could not run git");
+        assert!(status.success(), "git update-ref -d failed");
+    }
+
     /// The commit id `revset` resolves to, for tests that need to say "the new
     /// workspace started *here*".
     pub fn commit_at(&self, revset: &str) -> String {

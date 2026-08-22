@@ -31,11 +31,16 @@ fn remote_status_of_branch(repo: &git2::Repository, branch: &git2::Branch) -> Re
     }
 }
 
+/// Whether the git worktree at `worktree_path` has tracked changes.
+///
+/// Answers the git question and only the git question. It used to return
+/// `false` for anything holding a `.jj` directory, because the old status model
+/// had no way to say "this space is driven by jj" — so it said "clean", which
+/// was a lie rather than an absence. jj spaces now carry their own state (see
+/// [`crate::vcs::LocalState`]) and never reach this function: discovery hands
+/// every colocated repository to the jj backend.
 fn is_worktree_dirty(worktree_path: &str) -> bool {
     let path = Path::new(worktree_path);
-    if path.join(".jj").exists() {
-        return false;
-    }
     match git2::Repository::open(path) {
         Ok(repo) => {
             let mut opts = git2::StatusOptions::new();

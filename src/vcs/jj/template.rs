@@ -5,7 +5,7 @@
 //! stable contract, so every read shanti performs names the exact fields it
 //! wants and gets them back one record per line.
 
-use color_eyre::eyre::{self, eyre};
+use color_eyre::eyre::{self, eyre, WrapErr};
 
 /// Field delimiter inside a record: ASCII unit separator (U+001F).
 ///
@@ -17,6 +17,14 @@ pub const FIELD_SEPARATOR: char = '\u{1f}';
 
 /// A record separator, kept explicit for the same reason as the field one.
 pub const RECORD_SEPARATOR: char = '\n';
+
+/// Separator *inside* one field, for the fields that hold a list.
+///
+/// ASCII record separator (U+001E). A field is sometimes a list — the bookmark
+/// names a workspace sits on — and jj's own `join` needs a delimiter that
+/// cannot occur in a bookmark name. Distinct from [`FIELD_SEPARATOR`] so a
+/// stray value can never be mistaken for a new column.
+pub const VALUE_SEPARATOR: char = '\u{1e}';
 
 /// A jj template that yields one line per record, with named fields.
 ///
@@ -110,6 +118,46 @@ impl Record {
             .ok_or_else(|| eyre!("no field {name:?} in this jj record"))
     }
 
+    /// The value of `name` read as a jj `Boolean`.
+    ///
+    /// Rejects anything that is not exactly `true`/`false` rather than treating
+    /// an unexpected value as `false`: a silent `false` here would report a
+    /// conflicted workspace as clean, which is the class of lie the status
+    /// model exists to avoid.
+    pub fn boolean(&self, name: &str) -> eyre::Result<bool> {
+        match self.get(name)? {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            other => Err(eyre!(
+                "jj rendered {name:?} as {other:?}, which is not a boolean"
+            )),
+        }
+    }
+
+    /// The value of `name` read as a commit count.
+    ///
+    /// Same bargain as [`Record::boolean`]: an unreadable count is an error,
+    /// not a zero, because zero is precisely the reading that means "in sync".
+    pub fn count(&self, name: &str) -> eyre::Result<u32> {
+        let value = self.get(name)?;
+        value.parse().wrap_err_with(|| {
+            format!("jj rendered {name:?} as {value:?}, which is not a commit count")
+        })
+    }
+
+    /// The value of `name` split on [`VALUE_SEPARATOR`], empty entries dropped.
+    ///
+    /// jj renders an empty list as the empty string, and a nested `join` of
+    /// empty lists as nothing but separators; neither is a value.
+    pub fn list(&self, name: &str) -> eyre::Result<Vec<String>> {
+        Ok(self
+            .get(name)?
+            .split(VALUE_SEPARATOR)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect())
+    }
+
     /// Values in output order, for callers that would rather destructure.
     pub fn values(&self) -> &[String] {
         &self.values
@@ -171,6 +219,44 @@ mod tests {
 
         assert!(error.contains("2 field(s)"), "{error}");
         assert!(error.contains("name, change_id, empty"), "{error}");
+    }
+
+    #[test]
+    fn booleans_and_counts_are_read_strictly() {
+        const FIELDS: Template = Template::new(&[("flag", "empty"), ("ahead", "n")]);
+        let records = FIELDS
+            .parse(&format!("true{s}3\n", s = FIELD_SEPARATOR))
+            .unwrap();
+
+        assert!(records[0].boolean("flag").unwrap());
+        assert_eq!(records[0].count("ahead").unwrap(), 3);
+
+        let records = FIELDS
+            .parse(&format!("yes{s}lots\n", s = FIELD_SEPARATOR))
+            .unwrap();
+        assert!(records[0]
+            .boolean("flag")
+            .unwrap_err()
+            .to_string()
+            .contains("yes"));
+        assert!(records[0]
+            .count("ahead")
+            .unwrap_err()
+            .to_string()
+            .contains("lots"));
+    }
+
+    #[test]
+    fn a_list_field_drops_the_separators_jj_leaves_behind() {
+        const FIELDS: Template = Template::new(&[("bookmarks", "b")]);
+        // A nested join over two empty lists renders as separators alone.
+        let records = FIELDS.parse(&format!("{VALUE_SEPARATOR}\n")).unwrap();
+        assert!(records[0].list("bookmarks").unwrap().is_empty());
+
+        let records = FIELDS
+            .parse(&format!("main{VALUE_SEPARATOR}feature\n"))
+            .unwrap();
+        assert_eq!(records[0].list("bookmarks").unwrap(), ["main", "feature"]);
     }
 
     #[test]

@@ -25,12 +25,6 @@
 use super::template::{Record, Template};
 use color_eyre::eyre;
 
-/// The columns shanti reads from `jj bookmark list --all-remotes`.
-///
-/// A local bookmark renders `remote` as the empty string, which is how the two
-/// kinds are told apart without a second query.
-pub const REMOTE_BOOKMARKS: Template = Template::new(&[("name", "name"), ("remote", "remote")]);
-
 /// A revset that is empty exactly when the repository has no mainline of its
 /// own: jj's `trunk()` degrades to the root commit rather than to nothing, and
 /// the root commit is not somewhere anyone wants to start working.
@@ -47,7 +41,18 @@ const GIT_PSEUDO_REMOTE: &str = "git";
 
 /// The remote shanti prefers when several carry the same bookmark, matching the
 /// git backend's hard-coded `origin`.
-const PREFERRED_REMOTE: &str = "origin";
+pub(super) const PREFERRED_REMOTE: &str = "origin";
+
+/// Whether `remote`, as rendered by a bookmark row, is a remote that can tell
+/// us anything about what has been pushed.
+///
+/// The empty string is a local bookmark's row, and [`GIT_PSEUDO_REMOTE`] only
+/// mirrors local refs. One rule, shared with [`super::status`], because a
+/// second copy of it is exactly how a never-pushed bookmark starts looking
+/// pushed in one place and not the other.
+pub(super) fn is_real_remote(remote: &str) -> bool {
+    !remote.is_empty() && remote != GIT_PSEUDO_REMOTE
+}
 
 /// The revision a new workspace will be created on top of.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,7 +107,7 @@ pub fn remote_carrying(records: &[Record], bookmark: &str) -> eyre::Result<Optio
             continue;
         }
         let remote = record.get("remote")?;
-        if remote.is_empty() || remote == GIT_PSEUDO_REMOTE {
+        if !is_real_remote(remote) {
             continue;
         }
         if remote == PREFERRED_REMOTE {
@@ -129,13 +134,17 @@ mod tests {
     use crate::vcs::jj::template::FIELD_SEPARATOR;
     use pretty_assertions::assert_eq;
 
-    /// Build rows as jj would render them for [`REMOTE_BOOKMARKS`].
+    /// Build rows as jj would render them for [`super::super::status::BOOKMARKS`].
+    /// Only the first two columns matter here; the rest are tracking detail
+    /// this module deliberately ignores.
     fn rows(pairs: &[(&str, &str)]) -> Vec<Record> {
         let output: String = pairs
             .iter()
-            .map(|(name, remote)| format!("{name}{FIELD_SEPARATOR}{remote}\n"))
+            .map(|(name, remote)| {
+                format!("{name}{FIELD_SEPARATOR}{remote}{FIELD_SEPARATOR}true{FIELD_SEPARATOR}true{FIELD_SEPARATOR}0{FIELD_SEPARATOR}0\n")
+            })
             .collect();
-        REMOTE_BOOKMARKS.parse(&output).unwrap()
+        crate::vcs::jj::status::BOOKMARKS.parse(&output).unwrap()
     }
 
     #[test]
