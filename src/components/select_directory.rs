@@ -13,22 +13,29 @@ use ratatui::{
 };
 
 use super::{
+    centered,
     list::{ItemOrder, ListComponent},
-    Action, EventState, POPUP_BORDER_STYLE, SELECTED_STYLE,
+    Action, AppContext, EventState, HelpEntry, Modal, ModalFlow, SelectCallback,
+    POPUP_BORDER_STYLE, SELECTED_STYLE,
 };
+use ratatui::layout::Constraint;
 
+/// Picks one directory and hands it to the work supplied by the caller, the same
+/// deferral [`super::ConfirmComponent`] uses.
 pub struct SelectDirectoryComponent {
     pub dirs: Vec<String>,
     state: ListState,
     selected_index: usize,
+    on_select: Option<SelectCallback<String>>,
 }
 
 impl SelectDirectoryComponent {
-    pub fn new(dirs: Vec<String>) -> Self {
+    pub fn new(dirs: Vec<String>, on_select: SelectCallback<String>) -> Self {
         Self {
             dirs,
             state: ListState::default().with_selected(Some(0)),
             selected_index: 0,
+            on_select: Some(on_select),
         }
     }
 
@@ -95,6 +102,45 @@ impl SelectDirectoryComponent {
             }
             _ => EventState::NotConsumed,
         }
+    }
+}
+
+impl Modal for SelectDirectoryComponent {
+    fn area(&self, full: Rect) -> Rect {
+        // Grow with the list, but never past ten rows plus borders and hint.
+        let rows = (self.dirs.len() as u16).min(10) + 4;
+        centered(full, Constraint::Percentage(60), Constraint::Length(rows))
+    }
+
+    fn draw(&mut self, frame: &mut Frame, area: Rect, _ctx: &mut AppContext) {
+        SelectDirectoryComponent::draw(self, frame, area);
+    }
+
+    fn handle(&mut self, action: Action, ctx: &mut AppContext) -> ModalFlow {
+        match action {
+            Action::Select => {
+                let dir = self.selected_dir().to_string();
+                match self.on_select.take() {
+                    Some(work) => work(ctx, dir),
+                    None => ModalFlow::Close,
+                }
+            }
+            Action::ClosePopup | Action::ExitInsertMode => ModalFlow::Close,
+            _ => self.handle_action(action).into(),
+        }
+    }
+
+    fn help(&self) -> Vec<HelpEntry> {
+        vec![
+            HelpEntry::Section("Keybindings"),
+            HelpEntry::Binding("j / ↓", "Move down"),
+            HelpEntry::Binding("k / ↑", "Move up"),
+            HelpEntry::Binding("g / Home", "Go to first"),
+            HelpEntry::Binding("G / End", "Go to last"),
+            HelpEntry::Binding("Enter", "Clone to selected directory"),
+            HelpEntry::Binding("Esc", "Cancel"),
+            HelpEntry::Binding("q / Ctrl+C", "Quit"),
+        ]
     }
 }
 

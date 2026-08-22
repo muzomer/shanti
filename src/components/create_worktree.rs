@@ -1,3 +1,4 @@
+use crate::keymap::InputMode;
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{
@@ -9,7 +10,7 @@ use ratatui::{
     Frame,
 };
 
-use super::{Action, EventState};
+use super::{centered, Action, AppContext, EventState, HelpEntry, Modal, ModalFlow};
 
 pub struct CreateWorktreeComponent {
     character_index: usize,
@@ -170,6 +171,67 @@ impl CreateWorktreeComponent {
 
     fn clamp_cursor(&self, new_cursor_pos: usize) -> usize {
         new_cursor_pos.clamp(0, self.new_worktree_name.chars().count())
+    }
+}
+
+impl Modal for CreateWorktreeComponent {
+    fn area(&self, full: Rect) -> Rect {
+        centered(full, Constraint::Percentage(55), Constraint::Length(9))
+    }
+
+    fn draw(&mut self, frame: &mut Frame, area: Rect, _ctx: &mut AppContext) {
+        CreateWorktreeComponent::draw(self, frame, area);
+    }
+
+    fn mode(&self) -> InputMode {
+        InputMode::Insert
+    }
+
+    fn handle(&mut self, action: Action, ctx: &mut AppContext) -> ModalFlow {
+        match action {
+            Action::Select => {
+                if !self.new_worktree_name.is_empty() {
+                    if let Some(repository) = ctx.repositories.selected_repository() {
+                        match repository
+                            .create_new_worktree(&self.new_worktree_name, &ctx.args.worktrees_dir)
+                        {
+                            Ok(created) => {
+                                ctx.worktrees.last_error = None;
+                                ctx.worktrees.add(created);
+                            }
+                            Err(e) => ctx.worktrees.last_error = Some(format!("{:#}", e)),
+                        }
+                    }
+                }
+                ModalFlow::Close
+            }
+            Action::ClosePopup | Action::ExitInsertMode => ModalFlow::Close,
+            _ => {
+                let result = self.handle_action(action);
+                if result == EventState::Consumed {
+                    // The base branch is derived from the name, so it is
+                    // recomputed on every accepted keystroke.
+                    self.base_branch_hint = if self.new_worktree_name.is_empty() {
+                        None
+                    } else {
+                        ctx.repositories
+                            .selected_repository()
+                            .map(|r| r.resolve_base(&self.new_worktree_name))
+                    };
+                }
+                result.into()
+            }
+        }
+    }
+
+    fn help(&self) -> Vec<HelpEntry> {
+        vec![
+            HelpEntry::Section("Keybindings"),
+            HelpEntry::Binding("Enter", "Create worktree"),
+            HelpEntry::Binding("Esc", "Cancel"),
+            HelpEntry::Binding("Backspace", "Delete character"),
+            HelpEntry::Binding("Ctrl+C", "Quit"),
+        ]
     }
 }
 

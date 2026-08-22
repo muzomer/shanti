@@ -9,7 +9,12 @@ use ratatui::{
     Frame,
 };
 
-use super::{Action, EventState};
+use super::{
+    centered, create_worktree::CreateWorktreeComponent, select_directory::SelectDirectoryComponent,
+    Action, AppContext, ConfirmCallback, ConfirmComponent, EventState, HelpEntry, Modal, ModalFlow,
+    SelectCallback,
+};
+use crate::{github, keymap::InputMode, vcs::git::GitBackend};
 
 pub struct PrWorktreeComponent {
     character_index: usize,
@@ -19,28 +24,19 @@ pub struct PrWorktreeComponent {
 }
 
 impl PrWorktreeComponent {
-    pub fn new() -> Self {
+    /// `auto_clone` skips both the "clone this repo?" prompt and the branch-name
+    /// prompt, going straight from a PR URL to a created worktree.
+    pub fn new(auto_clone: bool) -> Self {
         Self {
             character_index: 0,
             input: String::new(),
             error: None,
-            auto_clone: false,
+            auto_clone,
         }
-    }
-
-    pub fn current_url(&self) -> &str {
-        &self.input
     }
 
     pub fn set_error(&mut self, msg: String) {
         self.error = Some(msg);
-    }
-
-    pub fn reset(&mut self) {
-        self.input.clear();
-        self.character_index = 0;
-        self.error = None;
-        self.auto_clone = false;
     }
 
     pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
@@ -139,6 +135,168 @@ impl PrWorktreeComponent {
         let moved = self.character_index.saturating_sub(1);
         self.character_index = moved.clamp(0, self.input.chars().count());
     }
+}
+
+impl Modal for PrWorktreeComponent {
+    fn area(&self, full: Rect) -> Rect {
+        centered(full, Constraint::Percentage(70), Constraint::Length(9))
+    }
+
+    fn draw(&mut self, frame: &mut Frame, area: Rect, _ctx: &mut AppContext) {
+        PrWorktreeComponent::draw(self, frame, area);
+    }
+
+    fn mode(&self) -> InputMode {
+        InputMode::Insert
+    }
+
+    fn handle(&mut self, action: Action, ctx: &mut AppContext) -> ModalFlow {
+        match action {
+            Action::Select => self.submit(ctx),
+            Action::ClosePopup | Action::ExitInsertMode => ModalFlow::Close,
+            _ => self.handle_action(action).into(),
+        }
+    }
+
+    fn help(&self) -> Vec<HelpEntry> {
+        vec![
+            HelpEntry::Section("Keybindings"),
+            HelpEntry::Binding("Enter", "Fetch PR and open worktree"),
+            HelpEntry::Binding("Esc", "Cancel"),
+            HelpEntry::Binding("Backspace", "Delete character"),
+            HelpEntry::Binding("Ctrl+C", "Quit"),
+        ]
+    }
+}
+
+impl PrWorktreeComponent {
+    /// A rejected URL keeps the prompt open with an error so it can be corrected.
+    fn submit(&mut self, ctx: &mut AppContext) -> ModalFlow {
+        let pr_url = match github::parse_pr_url(&self.input) {
+            Ok(url) => url,
+            Err(e) => {
+                self.set_error(format!("{:#}", e));
+                return ModalFlow::Consumed;
+            }
+        };
+
+        let pr_info = match github::fetch_pr_info(&pr_url) {
+            Ok(info) => info,
+            Err(e) => {
+                self.set_error(format!("{:#}", e));
+                return ModalFlow::Consumed;
+            }
+        };
+
+        let auto = self.auto_clone;
+        if ctx.repositories.select_repository_by_name(&pr_url.repo) {
+            return open_worktree_for_pr(ctx, pr_info, auto);
+        }
+
+        if auto {
+            return clone_flow(ctx, pr_url, pr_info, true);
+        }
+
+        let label = format!("Repository '{}' not found. Clone from GitHub?", pr_url.repo);
+        let remote = format!("git@github.com:{}/{}.git", pr_url.owner, pr_url.repo);
+        let on_confirm: ConfirmCallback =
+            Box::new(move |ctx| clone_flow(ctx, pr_url, pr_info, false));
+        ModalFlow::Replace(Box::new(ConfirmComponent::new(
+            "Clone Repository".to_string(),
+            label,
+            remote,
+            on_confirm,
+        )))
+    }
+}
+
+/// Cloning needs a destination: with several configured repo dirs the user picks
+/// one, otherwise the single dir is used without asking.
+fn clone_flow(
+    ctx: &mut AppContext,
+    pr_url: github::PrUrl,
+    pr_info: github::PrInfo,
+    auto: bool,
+) -> ModalFlow {
+    if ctx.args.repos_dirs.len() > 1 {
+        let on_select: SelectCallback<String> =
+            Box::new(move |ctx, dir| clone_into(ctx, dir, pr_url, pr_info, auto));
+        return ModalFlow::Replace(Box::new(SelectDirectoryComponent::new(
+            ctx.args.repos_dirs.clone(),
+            on_select,
+        )));
+    }
+    let dir = ctx.args.repos_dirs[0].clone();
+    clone_into(ctx, dir, pr_url, pr_info, auto)
+}
+
+fn clone_into(
+    ctx: &mut AppContext,
+    repos_dir: String,
+    pr_url: github::PrUrl,
+    pr_info: github::PrInfo,
+    auto: bool,
+) -> ModalFlow {
+    if let Err(e) = github::clone_repository(&pr_url.owner, &pr_url.repo, &repos_dir) {
+        ctx.worktrees.last_error = Some(format!("{:#}", e));
+        return ModalFlow::Close;
+    }
+
+    let repo_path = format!("{}/{}", repos_dir, pr_url.repo);
+    match GitBackend::from_path(&repo_path, false) {
+        Ok(repo) => {
+            ctx.repositories.add_repository(repo);
+            ctx.repositories.select_repository_by_name(&pr_url.repo);
+        }
+        Err(e) => {
+            ctx.worktrees.last_error = Some(format!("Cloned but failed to load repo: {:#}", e));
+            return ModalFlow::Close;
+        }
+    }
+
+    open_worktree_for_pr(ctx, pr_info, auto)
+}
+
+/// Final step of the PR flow: select the existing worktree, create one outright
+/// (auto mode), or hand over to the branch-name prompt.
+fn open_worktree_for_pr(ctx: &mut AppContext, pr_info: github::PrInfo, auto: bool) -> ModalFlow {
+    let branch = pr_info.branch_name.clone();
+
+    if ctx.worktrees.select_worktree_by_branch(&branch) {
+        if pr_info.is_merged {
+            ctx.worktrees.last_error =
+                Some("PR is merged — existing worktree selected".to_string());
+        }
+        return ModalFlow::Close;
+    }
+
+    let merged_warning = || "Warning: PR is merged, branch may be deleted on remote".to_string();
+
+    if auto {
+        if let Some(repo) = ctx.repositories.selected_repository() {
+            match repo.create_new_worktree(&branch, &ctx.args.worktrees_dir) {
+                Ok(worktree) => {
+                    ctx.worktrees.last_error = pr_info.is_merged.then(merged_warning);
+                    ctx.worktrees.add(worktree);
+                }
+                Err(e) => ctx.worktrees.last_error = Some(format!("{:#}", e)),
+            }
+        }
+        return ModalFlow::Close;
+    }
+
+    let (repo_name, base_branch_hint) = match ctx.repositories.selected_repository() {
+        Some(repo) => (repo.name(), Some(repo.resolve_base(&branch))),
+        None => (String::new(), None),
+    };
+
+    let mut prompt = CreateWorktreeComponent::new_with_branch(
+        repo_name,
+        branch,
+        pr_info.is_merged.then(merged_warning),
+    );
+    prompt.base_branch_hint = base_branch_hint;
+    ModalFlow::Replace(Box::new(prompt))
 }
 
 fn keybinding_hint() -> Line<'static> {

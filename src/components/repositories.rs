@@ -20,9 +20,11 @@ use ratatui::{
 };
 
 use super::{
+    centered,
+    create_worktree::CreateWorktreeComponent,
     filter::FilterComponent,
     list::{Focus, ListComponent},
-    Action, EventState, SELECTED_STYLE,
+    Action, AppContext, EventState, HelpEntry, Modal, ModalFlow, SELECTED_STYLE,
 };
 use crate::keymap::InputMode;
 
@@ -268,5 +270,94 @@ impl ListComponent<GitBackend> for RepositoriesComponent {
 
     fn update_selected_index(&mut self, index: usize) {
         self.selected_index = Some(index);
+    }
+}
+
+/// The repository picker.
+///
+/// The repository list itself is long-lived shared state (the PR clone flow adds
+/// to it, and the create-worktree step reads the selection back), so it stays in
+/// [`AppContext`]; the modal owns only what belongs to this popup — its mode.
+pub struct RepositoriesModal {
+    mode: InputMode,
+}
+
+impl RepositoriesModal {
+    pub fn new() -> Self {
+        Self {
+            mode: InputMode::Normal,
+        }
+    }
+}
+
+impl Default for RepositoriesModal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Modal for RepositoriesModal {
+    fn area(&self, full: Rect) -> Rect {
+        centered(full, Constraint::Percentage(50), Constraint::Percentage(50))
+    }
+
+    fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &mut AppContext) {
+        ctx.repositories.draw(frame, area, self.mode);
+    }
+
+    fn mode(&self) -> InputMode {
+        self.mode
+    }
+
+    fn handle(&mut self, action: Action, ctx: &mut AppContext) -> ModalFlow {
+        match action {
+            Action::Select => {
+                let repo_name = ctx
+                    .repositories
+                    .selected_repository()
+                    .map(|r| r.name())
+                    .unwrap_or_default();
+                // Replace, not stack: cancelling the name prompt returns to the
+                // worktree list, it does not re-open the picker.
+                ModalFlow::Replace(Box::new(CreateWorktreeComponent::new(repo_name)))
+            }
+            Action::ClosePopup => ModalFlow::Close,
+            Action::EnterInsertMode => {
+                self.mode = InputMode::Insert;
+                ctx.repositories.focus_filter();
+                ModalFlow::Consumed
+            }
+            Action::ExitInsertMode => {
+                self.mode = InputMode::Normal;
+                ctx.repositories.focus_list();
+                ModalFlow::Consumed
+            }
+            Action::FocusNext => {
+                ctx.repositories.toggle_focus();
+                self.mode = if ctx.repositories.is_filter_focused() {
+                    InputMode::Insert
+                } else {
+                    InputMode::Normal
+                };
+                ModalFlow::Consumed
+            }
+            _ => ctx.repositories.handle_action(action).into(),
+        }
+    }
+
+    fn help(&self) -> Vec<HelpEntry> {
+        vec![
+            HelpEntry::Section("Keybindings"),
+            HelpEntry::Binding("j / ↓", "Move down"),
+            HelpEntry::Binding("k / ↑", "Move up"),
+            HelpEntry::Binding("g / Home", "Go to first"),
+            HelpEntry::Binding("G / End", "Go to last"),
+            HelpEntry::Binding("i", "Enter filter mode"),
+            HelpEntry::Binding("Tab", "Toggle filter / list"),
+            HelpEntry::Binding("Enter", "Select repository"),
+            HelpEntry::Binding("?", "Show this help"),
+            HelpEntry::Binding("Esc", "Close popup"),
+            HelpEntry::Binding("q / Ctrl+C", "Quit"),
+        ]
     }
 }

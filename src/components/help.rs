@@ -9,7 +9,8 @@ use ratatui::{
     Frame,
 };
 
-use super::{Action, EventState};
+use super::{centered, Action, AppContext, EventState, Modal, ModalFlow};
+use ratatui::layout::Constraint;
 
 pub enum HelpEntry {
     Binding(&'static str, &'static str),
@@ -89,4 +90,55 @@ impl HelpComponent {
     pub fn handle_action(&mut self, _action: Action) -> EventState {
         EventState::NotConsumed
     }
+}
+
+impl Modal for HelpComponent {
+    fn area(&self, full: Rect) -> Rect {
+        let (width, height) = self.dimensions();
+        centered(full, Constraint::Length(width), Constraint::Length(height))
+    }
+
+    fn draw(&mut self, frame: &mut Frame, area: Rect, _ctx: &mut AppContext) {
+        HelpComponent::draw(self, frame, area);
+    }
+
+    fn handle(&mut self, action: Action, _ctx: &mut AppContext) -> ModalFlow {
+        match action {
+            // Consuming `ShowHelp` by closing is what makes '?' a toggle.
+            Action::ClosePopup | Action::ExitInsertMode | Action::ShowHelp => ModalFlow::Close,
+            _ => self.handle_action(action).into(),
+        }
+    }
+}
+
+/// Keybindings for the worktree list, the one layer that is not a modal.
+///
+/// There is no Insert-mode variant: `?` is a literal character in Insert mode,
+/// so help can only ever be opened from Normal mode. The old
+/// `(Worktrees, Insert)` and `(Repositories, Insert)` tables were unreachable
+/// for exactly that reason and have been removed rather than left as decoration.
+pub fn worktrees_bindings() -> Vec<HelpEntry> {
+    vec![
+        HelpEntry::Section("Keybindings"),
+        HelpEntry::Binding("j / ↓", "Move down"),
+        HelpEntry::Binding("k / ↑", "Move up"),
+        HelpEntry::Binding("g / Home", "Go to first"),
+        HelpEntry::Binding("G / End", "Go to last"),
+        HelpEntry::Binding("i / /", "Enter filter mode"),
+        HelpEntry::Binding("Tab", "Toggle filter / list"),
+        HelpEntry::Binding("n", "New worktree (pick repo)"),
+        HelpEntry::Binding("p", "New worktree from PR URL"),
+        HelpEntry::Binding("P", "New worktree from PR URL (auto-clone)"),
+        HelpEntry::Binding("d", "Delete with confirmation"),
+        HelpEntry::Binding("D", "Force delete"),
+        HelpEntry::Binding("Enter", "Print path & exit"),
+        HelpEntry::Binding("?", "Show this help"),
+        HelpEntry::Binding("q / Ctrl+C", "Quit"),
+        HelpEntry::Blank,
+        HelpEntry::Section("Worktree State"),
+        HelpEntry::Binding("✔", "Remote branch exists"),
+        HelpEntry::Binding("✘", "Merged / deleted remotely"),
+        HelpEntry::Binding("⬆", "Never pushed to remote"),
+        HelpEntry::Binding("*", "Dirty working tree"),
+    ]
 }

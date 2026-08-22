@@ -9,20 +9,27 @@ use ratatui::{
     Frame,
 };
 
-use super::{Action, EventState};
+use super::{
+    centered, Action, AppContext, ConfirmCallback, EventState, HelpEntry, Modal, ModalFlow,
+};
 
+/// A generic yes/no dialog. It knows nothing about what "yes" means: the caller
+/// hands it the work to run on confirmation, so no `ConfirmAction` discriminant
+/// has to be kept in sync anywhere else.
 pub struct ConfirmComponent {
     pub title: String,
     pub label: String,
     pub detail: String,
+    on_confirm: Option<ConfirmCallback>,
 }
 
 impl ConfirmComponent {
-    pub fn new(title: String, label: String, detail: String) -> Self {
+    pub fn new(title: String, label: String, detail: String, on_confirm: ConfirmCallback) -> Self {
         Self {
             title,
             label,
             detail,
+            on_confirm: Some(on_confirm),
         }
     }
 
@@ -63,6 +70,37 @@ impl ConfirmComponent {
 
     pub fn handle_action(&mut self, _action: Action) -> EventState {
         EventState::NotConsumed
+    }
+}
+
+impl Modal for ConfirmComponent {
+    fn area(&self, full: Rect) -> Rect {
+        centered(full, Constraint::Percentage(55), Constraint::Length(8))
+    }
+
+    fn draw(&mut self, frame: &mut Frame, area: Rect, _ctx: &mut AppContext) {
+        ConfirmComponent::draw(self, frame, area);
+    }
+
+    fn handle(&mut self, action: Action, ctx: &mut AppContext) -> ModalFlow {
+        match action {
+            Action::Select => match self.on_confirm.take() {
+                // The confirmed work decides where the flow goes next.
+                Some(work) => work(ctx),
+                None => ModalFlow::Close,
+            },
+            Action::ClosePopup | Action::ExitInsertMode => ModalFlow::Close,
+            _ => self.handle_action(action).into(),
+        }
+    }
+
+    fn help(&self) -> Vec<HelpEntry> {
+        vec![
+            HelpEntry::Section("Keybindings"),
+            HelpEntry::Binding("Enter", "Confirm"),
+            HelpEntry::Binding("Esc", "Cancel"),
+            HelpEntry::Binding("q / Ctrl+C", "Quit"),
+        ]
     }
 }
 
