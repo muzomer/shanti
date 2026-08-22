@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use color_eyre::eyre::{self, eyre};
 use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
@@ -29,17 +31,80 @@ use crate::vcs::Space;
 /// into the repository list every time it draws a row.
 pub struct SpaceEntry {
     pub repo_name: String,
+    /// Root of the repository on disk, as the owning backend reports it.
+    ///
+    /// Carried alongside the name so a row can tell whether it *is* the
+    /// repository's own working copy — see [`SpaceEntry::is_default_space`].
+    /// Taken from the backend rather than re-derived from the space's
+    /// [`RepoId`](crate::vcs::RepoId) so the comparison stays a comparison of
+    /// paths even if repository ids stop being paths.
+    pub repo_path: PathBuf,
     pub space: Space,
 }
 
 impl SpaceEntry {
-    /// The name this row is drawn from and filtered on, so that what the user
-    /// sees is what they can type at. The backend tag beside it is an
-    /// annotation, not part of the name, and is deliberately not filterable:
-    /// "git" would otherwise match every git space of a repository called
-    /// `digit`.
+    /// Whether this space is the repository's own working copy rather than one
+    /// shanti created beside it.
+    ///
+    /// Identified by path, never by the name `default`: `jj workspace rename`
+    /// can move that name onto another workspace, while the repository root
+    /// cannot move. This is the rule `JjBackend::is_default_space` applies
+    /// before it refuses a deletion, restated here because the `Vcs` trait the
+    /// UI is allowed to see does not expose it.
+    ///
+    /// Git needs no special case: only *linked* worktrees are listed as spaces,
+    /// so no git row ever sits at the repository root and the answer is simply
+    /// always `false` for one. That is also the right answer — a linked worktree
+    /// carries a name the user chose, and that name is the only thing telling
+    /// two rows of the same repository apart.
+    fn is_default_space(&self) -> bool {
+        self.space.path == self.repo_path
+    }
+
+    /// What this row spells out, in parts.
+    fn row_label(&self) -> RowLabel {
+        RowLabel {
+            repo: self.repo_name.clone(),
+            // A repository has exactly one default space, and it is called
+            // `default` until someone renames it, so naming it says nothing
+            // while costing half the row. Dropping it leaves the two things the
+            // eye is after: which repository, and what state.
+            space: (!self.is_default_space()).then(|| self.space.name.clone()),
+        }
+    }
+
+    /// The text this row is filtered on, so that what the user sees is what they
+    /// can type at. A suppressed space name is deliberately not part of the
+    /// haystack: typing `default` must not match a row that never says it.
+    ///
+    /// The backend tag beside the label is an annotation, not part of the name,
+    /// and is likewise not filterable: "git" would otherwise match every git
+    /// space of a repository called `digit`.
     fn label(&self) -> String {
-        format!("{} / {}", self.repo_name, self.space.name)
+        self.row_label().text()
+    }
+}
+
+/// A row's name, split into the parts it is drawn from.
+///
+/// Kept structured rather than pre-formatted because the renderer styles the
+/// repository and the space differently, and recovering them by re-splitting a
+/// formatted string breaks as soon as either part contains the separator — or,
+/// as here, as soon as one of them is absent.
+struct RowLabel {
+    repo: String,
+    /// The space's name, or `None` when the row is the repository's default
+    /// space and naming it would add nothing.
+    space: Option<String>,
+}
+
+impl RowLabel {
+    /// The label as one string — what the fuzzy filter matches against.
+    fn text(&self) -> String {
+        match &self.space {
+            Some(space) => format!("{} / {}", self.repo, space),
+            None => self.repo.clone(),
+        }
     }
 }
 
@@ -67,11 +132,11 @@ impl WorktreesComponent {
 
     pub fn draw(&mut self, f: &mut Frame, rect: Rect, mode: InputMode, is_active: bool) {
         // Collect display data — ends the filtered_items() borrow before we need &self again.
-        let display_data: Vec<(Space, String)> = {
+        let display_data: Vec<(Space, RowLabel)> = {
             let filtered = self.filtered_items();
             filtered
                 .iter()
-                .map(|entry| (entry.space.clone(), entry.label()))
+                .map(|entry| (entry.space.clone(), entry.row_label()))
                 .collect()
         };
         let total = display_data.len();
@@ -323,12 +388,13 @@ impl WorktreesComponent {
     }
 }
 
-/// One row: the two status slots, then `<repo> / <space>`.
+/// One row: the two status slots, the backend tag, then the label — `<repo> /
+/// <space>`, or just `<repo>` when the space is the repository's default one.
 ///
 /// The renderer is deliberately dumb about state — it asks the status for its
 /// glyphs and maps tones to colours. Matching on the backend here is what would
 /// force every new jj state to be taught to the UI as well.
-fn space_to_list_item(space: &Space, label: &str) -> ListItem<'static> {
+fn space_to_list_item(space: &Space, label: &RowLabel) -> ListItem<'static> {
     let mut spans: Vec<Span<'static>> = space
         .status
         .glyphs()
@@ -353,16 +419,23 @@ fn space_to_list_item(space: &Space, label: &str) -> ListItem<'static> {
         theme::MUTED,
     ));
 
-    match label.split_once(" / ") {
-        Some((repo, name)) => {
-            spans.push(Span::styled(repo.to_string(), theme::SECONDARY));
+    match &label.space {
+        // The space is what tells this row from its siblings, so it takes the
+        // emphasis and the repository recedes to context.
+        Some(name) => {
+            spans.push(Span::styled(label.repo.clone(), theme::SECONDARY));
             spans.push(Span::styled(" / ", theme::MUTED));
             spans.push(Span::styled(
-                name.to_string(),
+                name.clone(),
                 theme::TEXT.add_modifier(Modifier::BOLD),
             ));
         }
-        None => spans.push(Span::from(label.to_string())),
+        // Nothing follows it, so the repository name *is* the row's subject and
+        // takes the emphasis rather than reading as a dimmed prefix to nothing.
+        None => spans.push(Span::styled(
+            label.repo.clone(),
+            theme::TEXT.add_modifier(Modifier::BOLD),
+        )),
     }
 
     ListItem::new(Line::from(spans))
@@ -417,5 +490,119 @@ impl ListComponent<SpaceEntry> for WorktreesComponent {
 
     fn update_selected_index(&mut self, index: usize) {
         self.selected_index = Some(index);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vcs::{Backend, RepoId, SpaceStatus};
+
+    /// A row for the space `name` of a repository rooted at `/repos/<repo>`.
+    ///
+    /// The status is irrelevant to labelling, so every entry gets the unknown
+    /// one: these tests are about what the row *says*, not what it shows.
+    fn entry(repo: &str, backend: Backend, name: &str, path: &str) -> SpaceEntry {
+        let root = PathBuf::from("/repos").join(repo);
+        SpaceEntry {
+            repo_name: repo.to_owned(),
+            repo_path: root.clone(),
+            space: Space::new(
+                RepoId::from_path(&root),
+                backend,
+                name,
+                PathBuf::from(path),
+                SpaceStatus::unknown(backend),
+            ),
+        }
+    }
+
+    #[test]
+    fn a_repositorys_default_space_is_labelled_by_the_repository_alone() {
+        let row = entry("shanti", Backend::Jj, "default", "/repos/shanti");
+        assert_eq!(row.row_label().space, None);
+        assert_eq!(row.label(), "shanti");
+    }
+
+    #[test]
+    fn a_space_the_user_created_is_still_named() {
+        let row = entry("shanti", Backend::Jj, "feat-x", "/spaces/shanti/feat-x");
+        assert_eq!(row.row_label().space.as_deref(), Some("feat-x"));
+        assert_eq!(row.label(), "shanti / feat-x");
+    }
+
+    /// `jj workspace rename` can move the name `default` onto a workspace that
+    /// is not the repository's working copy — and can leave the working copy
+    /// under some other name. Only the path settles it.
+    #[test]
+    fn the_default_space_is_recognised_by_path_not_by_the_name_default() {
+        let renamed = entry("shanti", Backend::Jj, "default", "/spaces/shanti/default");
+        assert_eq!(renamed.label(), "shanti / default");
+
+        let working_copy = entry("shanti", Backend::Jj, "main-copy", "/repos/shanti");
+        assert_eq!(working_copy.label(), "shanti");
+    }
+
+    /// Git lists only linked worktrees, so no git row sits at the repository
+    /// root and every one of them keeps the name the user chose.
+    #[test]
+    fn a_git_linked_worktree_keeps_its_name() {
+        let row = entry("shanti", Backend::Git, "feat-x", "/spaces/shanti/feat-x");
+        assert_eq!(row.label(), "shanti / feat-x");
+    }
+
+    /// A colocated repository contributes rows from both backends under one
+    /// name; suppression applies per row, not per repository.
+    #[test]
+    fn a_colocated_repository_suppresses_only_its_default_row() {
+        let mut component = WorktreesComponent::new(vec![
+            entry("shanti", Backend::Jj, "default", "/repos/shanti"),
+            entry("shanti", Backend::Git, "feat-x", "/spaces/shanti/feat-x"),
+        ]);
+        let labels: Vec<String> = component
+            .filtered_items()
+            .iter()
+            .map(|entry| entry.label())
+            .collect();
+        assert_eq!(labels, vec!["shanti", "shanti / feat-x"]);
+    }
+
+    fn type_filter(component: &mut WorktreesComponent, query: &str) -> Vec<String> {
+        for c in query.chars() {
+            component.handle_action(Action::InsertChar(c));
+        }
+        component
+            .filtered_items()
+            .iter()
+            .map(|entry| entry.label())
+            .collect()
+    }
+
+    /// The haystack is what the row displays, so a name the row no longer shows
+    /// is not something the user can type at.
+    #[test]
+    fn a_suppressed_name_cannot_be_filtered_for() {
+        let rows = vec![
+            entry("shanti", Backend::Jj, "default", "/repos/shanti"),
+            entry("eclair", Backend::Jj, "default", "/repos/eclair"),
+            entry("eclair", Backend::Jj, "feat-default", "/spaces/eclair/d"),
+        ];
+
+        let mut component = WorktreesComponent::new(rows);
+        // Only the row that still spells "default" out matches it.
+        assert_eq!(
+            type_filter(&mut component, "default"),
+            vec!["eclair / feat-default"]
+        );
+    }
+
+    #[test]
+    fn a_default_row_is_still_found_by_its_repository_name() {
+        let rows = vec![
+            entry("shanti", Backend::Jj, "default", "/repos/shanti"),
+            entry("eclair", Backend::Jj, "default", "/repos/eclair"),
+        ];
+        let mut component = WorktreesComponent::new(rows);
+        assert_eq!(type_filter(&mut component, "shanti"), vec!["shanti"]);
     }
 }

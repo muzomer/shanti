@@ -41,10 +41,15 @@ impl AppContext<'_> {
             .selected_repository()
             .ok_or_else(|| eyre!("no repository is selected"))?;
         let repo_name = repo.repo().name.clone();
+        let repo_path = repo.repo().path.clone();
         let dest = vcs::space_dest(&self.args.worktrees_dir, &repo_name, name);
         let space = repo.create_space(name, &dest)?;
 
-        self.worktrees.add(SpaceEntry { repo_name, space });
+        self.worktrees.add(SpaceEntry {
+            repo_name,
+            repo_path,
+            space,
+        });
         Ok(())
     }
 }

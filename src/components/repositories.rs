@@ -282,9 +282,11 @@ impl RepositoriesComponent {
         let mut failed = Vec::new();
         for backend in &self.repositories {
             let repo_name = &backend.repo().name;
+            let repo_path = &backend.repo().path;
             match backend.spaces() {
                 Ok(found) => spaces.extend(found.into_iter().map(|space| SpaceEntry {
                     repo_name: repo_name.clone(),
+                    repo_path: repo_path.clone(),
                     space,
                 })),
                 Err(error) => {
