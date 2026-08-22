@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{RepoId, SpaceStatus};
+use super::{Backend, RepoId, SpaceStatus};
 
 /// A checked-out place to work, belonging to exactly one [`Repo`](super::Repo).
 ///
@@ -15,6 +15,15 @@ pub struct Space {
     /// The repository this space belongs to. An id rather than a `&Repo` so a
     /// list of spaces stays owned, `'static` and cheap to move between threads.
     pub repo: RepoId,
+    /// Which backend owns this space — the one that created it and the only one
+    /// that can act on it.
+    ///
+    /// A colocated repository (`.git` *and* `.jj`) is driven by both backends at
+    /// once, and both are listed, so the repo id alone no longer identifies who
+    /// to route a deletion to: a git worktree and a jj workspace of the same
+    /// repository share an id. This field is what keeps a `git worktree remove`
+    /// from being handed to jj, which knows nothing about it.
+    pub backend: Backend,
     /// User-facing name of the space — in practice the branch or bookmark it
     /// was created for. Unique within a repository.
     pub name: String,
@@ -32,12 +41,14 @@ impl Space {
     /// spaces the same way and future required fields land in one place.
     pub fn new(
         repo: RepoId,
+        backend: Backend,
         name: impl Into<String>,
         path: impl Into<PathBuf>,
         status: SpaceStatus,
     ) -> Self {
         Self {
             repo,
+            backend,
             name: name.into(),
             path: path.into(),
             status,

@@ -17,7 +17,7 @@ use super::{
 use crate::{
     github::{self, PrFetcher},
     keymap::InputMode,
-    vcs,
+    vcs::{self, Backend},
 };
 
 pub struct PrWorktreeComponent {
@@ -255,8 +255,12 @@ fn clone_into(
     // land somewhere that is already colocated with jj, and one rule for picking
     // a backend is the whole point of the seam.
     match vcs::open_at(&repo_path, false) {
-        Ok(repo) => {
-            ctx.repositories.add_repository(repo);
+        Ok(backends) => {
+            // One entry per backend that drives the clone; the picker still
+            // shows a colocated one once.
+            for backend in backends {
+                ctx.repositories.add_repository(backend);
+            }
             ctx.repositories.select_repository_by_name(&pr_url.repo);
         }
         Err(e) => {
@@ -291,13 +295,26 @@ fn open_worktree_for_pr(ctx: &mut AppContext, pr_info: github::PrInfo, auto: boo
         return ModalFlow::Close;
     }
 
-    let (repo_name, base_branch_hint) = match ctx.repositories.selected_repository() {
-        Some(repo) => (repo.repo().name.clone(), Some(repo.resolve_base(&branch))),
-        None => (String::new(), None),
+    let selected = ctx.repositories.selected_repository().map(|repo| {
+        (
+            repo.repo().name.clone(),
+            repo.repo().id.clone(),
+            repo.backend(),
+            repo.resolve_base(&branch),
+        )
+    });
+    let (repo_name, backend, colocated, base_branch_hint) = match selected {
+        Some((name, id, backend, base)) => {
+            let colocated = ctx.repositories.backends_of(&id).len() > 1;
+            (name, backend, colocated, Some(base))
+        }
+        None => (String::new(), Backend::Git, false, None),
     };
 
     let mut prompt = CreateWorktreeComponent::new_with_branch(
         repo_name,
+        backend,
+        colocated,
         branch,
         pr_info.is_merged.then(merged_warning),
     );

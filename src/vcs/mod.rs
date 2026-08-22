@@ -38,7 +38,7 @@ use rayon::prelude::*;
 use tracing::{debug, error};
 
 pub use backend::Backend;
-pub use discover::{backend_at, discover, Discovered};
+pub use discover::{backend_at, backends_at, discover, Discovered};
 pub use repo::{Repo, RepoId};
 pub use space::Space;
 pub use status::{JjLocal, LocalState, RemoteState, SpaceStatus, StatusGlyph, Tone};
@@ -128,7 +128,8 @@ pub fn space_dest(worktrees_dir: &str, repo_name: &str, space_name: &str) -> Pat
         .join(space_name)
 }
 
-/// Open every repository a walk found, in parallel, as the backend that owns it.
+/// Open every repository a walk found, in parallel, through every backend that
+/// can drive it.
 ///
 /// Opening is the expensive half of listing — it reads refs, spawns `jj`, and
 /// optionally fetches — hence `par_iter`. A repository that will not open is
@@ -137,11 +138,11 @@ pub fn space_dest(worktrees_dir: &str, repo_name: &str, space_name: &str) -> Pat
 pub fn open_backends(found: &[Discovered], run_fetch: bool) -> Vec<BoxedVcs> {
     found
         .par_iter()
-        .filter_map(|found| match open(found, run_fetch) {
-            Ok(backend) => Some(backend),
+        .flat_map_iter(|found| match open(found, run_fetch) {
+            Ok(backends) => backends,
             Err(error) => {
                 error!(path = %found.path.display(), %error, "could not open the repository");
-                None
+                Vec::new()
             }
         })
         .collect()
@@ -152,35 +153,58 @@ pub fn open_backends(found: &[Discovered], run_fetch: bool) -> Vec<BoxedVcs> {
 ///
 /// The entry point for a repository that appears *after* the initial walk — a
 /// fresh clone, say — so that it is bound to a backend by the same rule.
-pub fn open_at(path: &Path, run_fetch: bool) -> eyre::Result<BoxedVcs> {
-    let backend = backend_at(path)
+pub fn open_at(path: &Path, run_fetch: bool) -> eyre::Result<Vec<BoxedVcs>> {
+    let (backend, additional) = backends_at(path)
         .ok_or_else(|| eyre::eyre!("{} is not a repository shanti can drive", path.display()))?;
     open(
         &Discovered {
             path: path.to_path_buf(),
             backend,
+            additional,
         },
         run_fetch,
     )
 }
 
-/// Bind one find to its backend.
+/// Open one find as every backend that can drive it, the owner first.
+///
+/// A colocated repository yields two: jj, which owns the working copy, *and*
+/// git, whose worktrees exist whether or not shanti lists them. Only the owner
+/// failing to open is fatal — an extra backend that will not open costs the user
+/// its spaces, not the whole repository.
+fn open(found: &Discovered, run_fetch: bool) -> eyre::Result<Vec<BoxedVcs>> {
+    let mut opened = vec![open_one(&found.path, found.backend, run_fetch)?];
+    for backend in found.additional.iter().copied() {
+        match open_one(&found.path, backend, run_fetch) {
+            Ok(vcs) => opened.push(vcs),
+            Err(error) => {
+                error!(
+                    path = %found.path.display(),
+                    %backend,
+                    %error,
+                    "could not open the repository through its additional backend"
+                );
+            }
+        }
+    }
+    Ok(opened)
+}
+
+/// Bind one (path, backend) pair to an implementation.
 ///
 /// This match is the *only* place that turns a [`Backend`] tag into an
 /// implementation; everything above it holds a [`BoxedVcs`] and never asks which
-/// one it got. A colocated repository (`.git` *and* `.jj`) therefore reaches jj,
-/// because the walk said so — driving it with raw git behind jj's back would
-/// leave jj's view of the working copy stale.
-fn open(found: &Discovered, run_fetch: bool) -> eyre::Result<BoxedVcs> {
-    match found.backend {
+/// one it got.
+fn open_one(path: &Path, backend: Backend, run_fetch: bool) -> eyre::Result<BoxedVcs> {
+    match backend {
         Backend::Git => {
             // `from_path` fetches for us, tolerating failure, so there is
             // nothing extra to do for git here.
-            let backend = GitBackend::from_path(&found.path.display().to_string(), run_fetch)?;
+            let backend = GitBackend::from_path(&path.display().to_string(), run_fetch)?;
             Ok(Box::new(backend))
         }
         Backend::Jj => {
-            let backend = JjBackend::discover(&found.path)?;
+            let backend = JjBackend::discover(path)?;
             if run_fetch {
                 // A backend that cannot fetch — jj's, until shanti-nhe.6 — is
                 // still worth listing: the cost is a stale view of the remotes,
@@ -229,10 +253,26 @@ mod tests {
         let found = Discovered {
             path: PathBuf::from("/nowhere/jj-only"),
             backend: Backend::Jj,
+            additional: vec![],
         };
         // Nothing is there, so this can only fail — the point is *how*: through
         // the jj adapter, never through git2.
         assert!(open(&found, false).is_err());
         assert!(open_backends(std::slice::from_ref(&found), false).is_empty());
+    }
+
+    /// The owner is what a repository *is*; an extra backend is a bonus. A
+    /// colocated repo whose git side will not open must still list its jj
+    /// workspaces rather than disappearing.
+    #[test]
+    fn an_additional_backend_that_will_not_open_is_not_fatal() {
+        let found = Discovered {
+            path: PathBuf::from("/nowhere/colocated"),
+            backend: Backend::Jj,
+            additional: vec![Backend::Git],
+        };
+        // Both halves fail here (nothing is on disk), so the assertion is about
+        // the *shape* of the failure: it is the owner's, reported once.
+        assert!(open(&found, false).is_err());
     }
 }

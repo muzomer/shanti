@@ -18,16 +18,31 @@ use tracing::{debug, error};
 
 use super::{Backend, Repo};
 
-/// A repository root the walk recognised, and the backend that owns it.
+/// A repository root the walk recognised, and the backends that can drive it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Discovered {
     /// Root of the repository on disk, canonicalised where possible.
     pub path: PathBuf,
-    /// The backend shanti must drive this repository through.
+    /// The backend that owns the repository's working copy, and the one a *new*
+    /// space is created through.
     pub backend: Backend,
+    /// Other backends that hold spaces of this repository. Only a colocated
+    /// repository has any: jj owns its working copy, yet the git worktrees that
+    /// were made before `jj init` are still real directories the user works in.
+    /// Hiding them — which is what listing the owner alone did — loses sight of
+    /// them with no message.
+    pub additional: Vec<Backend>,
 }
 
 impl Discovered {
+    /// Every backend to open for this repository, the owner first.
+    ///
+    /// Order matters downstream: the first backend of a repository is the one
+    /// the picker offers and the one a new space is created through.
+    pub fn backends(&self) -> impl Iterator<Item = Backend> + '_ {
+        std::iter::once(self.backend).chain(self.additional.iter().copied())
+    }
+
     /// Turn the raw find into the domain model, naming the repo after its
     /// directory (with the conventional `.git` suffix of a bare repo dropped).
     pub fn to_repo(&self) -> Repo {
@@ -92,14 +107,26 @@ fn is_skipped_dir_name(name: &OsStr) -> bool {
 /// working copy stale — so a colocated repo must be driven through jj even
 /// though git would happily open it.
 pub fn backend_at(dir: &Path) -> Option<Backend> {
+    Some(backends_at(dir)?.0)
+}
+
+/// Which backends drive the repository rooted at `dir`: the owner, and any other
+/// that also holds spaces there.
+///
+/// A colocated repository answers `(Jj, [Git])`. jj still owns it — see
+/// [`backend_at`] — but its git worktrees exist and are the user's, so they are
+/// listed too and acted on through git, which is the same way they were created.
+pub fn backends_at(dir: &Path) -> Option<(Backend, Vec<Backend>)> {
     if !dir.is_dir() {
         return None;
     }
+    let git = is_git_workdir(dir) || is_bare_git_dir(dir);
     if is_jj_workspace_root(dir) {
-        return Some(Backend::Jj);
+        let additional = if git { vec![Backend::Git] } else { vec![] };
+        return Some((Backend::Jj, additional));
     }
-    if is_git_workdir(dir) || is_bare_git_dir(dir) {
-        return Some(Backend::Git);
+    if git {
+        return Some((Backend::Git, vec![]));
     }
     None
 }
@@ -137,11 +164,12 @@ fn collect(path: &Path, excluded: &[PathBuf], depth: usize, found: &mut Vec<Disc
         return;
     }
 
-    if let Some(backend) = backend_at(path) {
+    if let Some((backend, additional)) = backends_at(path) {
         debug!("Found a {} repository at: {:?}", backend, path);
         found.push(Discovered {
             path: path.to_path_buf(),
             backend,
+            additional,
         });
         // A repository is a leaf: nested checkouts are not ours to manage.
         return;
@@ -233,6 +261,45 @@ mod tests {
         );
     }
 
+    /// jj owning a colocated repository must not make its git worktrees vanish:
+    /// they exist on disk, the user made them, and only git can act on them.
+    #[test]
+    fn test_colocated_repository_also_reports_git() {
+        let temp_dir = tempdir().expect("Could not create temporary directory");
+        make_dirs(temp_dir.path(), &["colocated/.jj/repo", "colocated/.git"]);
+        let colocated = temp_dir.path().join("colocated");
+
+        assert_eq!(
+            backends_at(&colocated),
+            Some((Backend::Jj, vec![Backend::Git])),
+            "a colocated repo is owned by jj and additionally driven by git"
+        );
+
+        let found = discover(temp_dir.path(), &[]);
+        let found = found.first().expect("the colocated repo must be found");
+        assert_eq!(
+            found.backends().collect::<Vec<_>>(),
+            vec![Backend::Jj, Backend::Git],
+            "the owner comes first, so it stays the default for a new space"
+        );
+    }
+
+    /// The single-backend case must not grow a phantom second one.
+    #[test]
+    fn test_a_repository_with_one_backend_has_no_additional_backends() {
+        let temp_dir = tempdir().expect("Could not create temporary directory");
+        make_dirs(temp_dir.path(), &["plain/.git", "jj_only/.jj/repo"]);
+
+        assert_eq!(
+            backends_at(&temp_dir.path().join("plain")),
+            Some((Backend::Git, vec![]))
+        );
+        assert_eq!(
+            backends_at(&temp_dir.path().join("jj_only")),
+            Some((Backend::Jj, vec![]))
+        );
+    }
+
     #[test]
     fn test_plain_git_repository_is_unaffected_by_jj_detection() {
         let temp_dir = tempdir().expect("Could not create temporary directory");
@@ -281,6 +348,7 @@ mod tests {
             Discovered {
                 path: bare,
                 backend: Backend::Git,
+                additional: vec![],
             }
             .to_repo()
             .name,

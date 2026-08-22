@@ -274,6 +274,7 @@ impl GitBackend {
         let dirty = is_worktree_dirty(&path.to_string_lossy());
         Space::new(
             self.repo.id.clone(),
+            Backend::Git,
             name,
             path,
             SpaceStatus::git(remote, dirty),

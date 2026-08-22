@@ -11,21 +11,43 @@ use ratatui::{
 };
 
 use super::{centered, Action, AppContext, EventState, HelpEntry, Modal, ModalFlow};
+use crate::vcs::Backend;
+
+/// Title case for a backend's own word for a space ("worktree" -> "Worktree").
+fn capitalised(word: &str) -> String {
+    let mut chars = word.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
 
 pub struct CreateWorktreeComponent {
     character_index: usize,
     pub new_worktree_name: String,
     repo_name: String,
+    /// The backend this prompt will create through.
+    ///
+    /// Carried rather than looked up at draw time because it is what the prompt
+    /// *promises*: on a colocated repository "new space" is ambiguous, and a
+    /// prompt that says "worktree" while creating a jj workspace would be a lie
+    /// the user only discovers afterwards.
+    backend: Backend,
+    /// Whether the repository is driven by more than one backend. Purely so the
+    /// prompt can explain why it picked one, instead of silently choosing.
+    colocated: bool,
     pub base_branch_hint: Option<String>,
     pub warning: Option<String>,
 }
 
 impl CreateWorktreeComponent {
-    pub fn new(repo_name: String) -> Self {
+    pub fn new(repo_name: String, backend: Backend, colocated: bool) -> Self {
         Self {
             character_index: 0,
             new_worktree_name: String::new(),
             repo_name,
+            backend,
+            colocated,
             base_branch_hint: None,
             warning: None,
         }
@@ -33,6 +55,8 @@ impl CreateWorktreeComponent {
 
     pub fn new_with_branch(
         repo_name: String,
+        backend: Backend,
+        colocated: bool,
         branch_name: String,
         warning: Option<String>,
     ) -> Self {
@@ -41,6 +65,8 @@ impl CreateWorktreeComponent {
             character_index,
             new_worktree_name: branch_name,
             repo_name,
+            backend,
+            colocated,
             base_branch_hint: None,
             warning,
         }
@@ -59,9 +85,14 @@ impl CreateWorktreeComponent {
         let outer_block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(super::POPUP_BORDER_STYLE)
-            .title(Line::from(" New Worktree ").style(Style::new().fg(GREEN.c300).bold()))
+            // Titled in the vocabulary of the backend that will do the work, so
+            // a jj user is not offered a "worktree" they will never see.
+            .title(
+                Line::from(format!(" New {} ", capitalised(self.backend.space_noun())))
+                    .style(Style::new().fg(GREEN.c300).bold()),
+            )
             .title_top(
-                Line::from(format!(" repo: {} ", self.repo_name))
+                Line::from(format!(" repo: {} · {} ", self.repo_name, self.backend))
                     .style(Style::new().fg(SLATE.c400))
                     .right_aligned(),
             )
@@ -79,9 +110,25 @@ impl CreateWorktreeComponent {
         .horizontal_margin(4)
         .areas(inner_area);
 
-        Paragraph::new("Branch name:")
-            .style(Style::new().fg(SLATE.c300))
+        Paragraph::new(match self.backend {
+            Backend::Git => "Branch name:",
+            Backend::Jj => "Bookmark name:",
+        })
+        .style(Style::new().fg(SLATE.c300))
+        .render(label_area, frame.buffer_mut());
+
+        // A colocated repository could take either backend, so the default is
+        // stated out loud rather than left for the user to discover in the list.
+        if self.colocated {
+            Paragraph::new(format!(
+                "colocated repo — creating a {} {} ",
+                self.backend,
+                self.backend.space_noun()
+            ))
+            .style(Style::new().fg(AMBER.c300))
+            .right_aligned()
             .render(label_area, frame.buffer_mut());
+        }
 
         Paragraph::new(self.new_worktree_name.as_str())
             .block(

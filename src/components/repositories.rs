@@ -4,7 +4,7 @@ use nucleo_matcher::{
 };
 
 use super::list::ItemOrder;
-use crate::vcs::{BoxedVcs, Space, Vcs};
+use crate::vcs::{Backend, BoxedVcs, RepoId, Space, Vcs};
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{
@@ -223,8 +223,50 @@ impl RepositoriesComponent {
     pub fn backend_for(&self, space: &Space) -> Option<&dyn Vcs> {
         self.repositories
             .iter()
-            .find(|backend| backend.repo().id == space.repo)
+            // The pair, not the id alone: a colocated repository is open twice,
+            // once per backend, and both copies share an id (it is derived from
+            // the path). Matching on the id alone would hand a git worktree's
+            // deletion to jj, which knows nothing about it.
+            .find(|backend| backend.repo().id == space.repo && backend.backend() == space.backend)
             .map(|backend| backend.as_ref())
+    }
+
+    /// Every backend open on the repository `id`, in the order they were opened
+    /// — the owner first.
+    ///
+    /// More than one means a colocated repository, which is the only case the UI
+    /// has to explain: "new space" there is ambiguous, and the create prompt
+    /// says which backend it settled on.
+    pub fn backends_of(&self, id: &RepoId) -> Vec<Backend> {
+        self.repositories
+            .iter()
+            .filter(|backend| &backend.repo().id == id)
+            .map(|backend| backend.backend())
+            .collect()
+    }
+
+    /// One entry per repository, for the picker.
+    ///
+    /// The picker asks "which repository?", not "which backend?", so a colocated
+    /// repository must appear once rather than twice. The entry kept is the jj
+    /// one, which is also what makes a new space on a colocated repo a jj
+    /// workspace by default — shanti-12z.5's rule that jj owns such a repo.
+    fn repository_choices(&self) -> Vec<&BoxedVcs> {
+        let mut chosen: Vec<&BoxedVcs> = Vec::with_capacity(self.repositories.len());
+        for candidate in &self.repositories {
+            match chosen
+                .iter_mut()
+                .find(|kept| kept.repo().id == candidate.repo().id)
+            {
+                Some(kept) => {
+                    if candidate.backend() == Backend::Jj {
+                        *kept = candidate;
+                    }
+                }
+                None => chosen.push(candidate),
+            }
+        }
+        chosen
     }
 
     /// Every space of every repository, and the names of the repositories that
@@ -233,6 +275,11 @@ impl RepositoriesComponent {
     /// Listing is per repository and each one can fail on its own (an unreadable
     /// worktree registration, a `jj` that will not run), so a failure is reported
     /// alongside the spaces that *did* list rather than replacing them.
+    ///
+    /// A colocated repository is open once per backend, so its git worktrees and
+    /// its jj workspaces both land here — merged by iterating the backend list,
+    /// with no special case of its own. Each space carries the backend that owns
+    /// it, which is what keeps the merged list actionable.
     pub fn collect_spaces(&self) -> (Vec<SpaceEntry>, Vec<String>) {
         let mut spaces = Vec::new();
         let mut failed = Vec::new();
@@ -266,8 +313,9 @@ fn repos_keybinding_hint() -> Line<'static> {
 impl ListComponent<BoxedVcs> for RepositoriesComponent {
     fn filtered_items(&mut self) -> Vec<&BoxedVcs> {
         let query = self.filter.value.as_str();
+        let choices = self.repository_choices();
         if query.is_empty() {
-            let mut items: Vec<&BoxedVcs> = self.repositories.iter().collect();
+            let mut items = choices;
             items.sort_by(|a, b| a.repo().name.cmp(&b.repo().name));
             return items;
         }
@@ -286,9 +334,8 @@ impl ListComponent<BoxedVcs> for RepositoriesComponent {
             })
             .collect();
         let mut buf = Vec::new();
-        let mut scored: Vec<(&BoxedVcs, u32)> = self
-            .repositories
-            .iter()
+        let mut scored: Vec<(&BoxedVcs, u32)> = choices
+            .into_iter()
             .filter_map(|r| {
                 let name = &r.repo().name;
                 let mut total = 0u32;
@@ -354,14 +401,25 @@ impl Modal for RepositoriesModal {
     fn handle(&mut self, action: Action, ctx: &mut AppContext) -> ModalFlow {
         match action {
             Action::Select => {
-                let repo_name = ctx
+                let selected = ctx
                     .repositories
                     .selected_repository()
-                    .map(|r| r.repo().name.clone())
-                    .unwrap_or_default();
+                    .map(|r| (r.repo().name.clone(), r.repo().id.clone(), r.backend()));
+                let (repo_name, backend, colocated) = match selected {
+                    // The picker offers one entry per repository, and that entry
+                    // is the owner — so what it hands over here *is* the default
+                    // backend for a new space.
+                    Some((name, id, backend)) => {
+                        let colocated = ctx.repositories.backends_of(&id).len() > 1;
+                        (name, backend, colocated)
+                    }
+                    None => (String::new(), Backend::Git, false),
+                };
                 // Replace, not stack: cancelling the name prompt returns to the
                 // worktree list, it does not re-open the picker.
-                ModalFlow::Replace(Box::new(CreateWorktreeComponent::new(repo_name)))
+                ModalFlow::Replace(Box::new(CreateWorktreeComponent::new(
+                    repo_name, backend, colocated,
+                )))
             }
             Action::ClosePopup => ModalFlow::Close,
             Action::EnterInsertMode => {
@@ -401,5 +459,175 @@ impl Modal for RepositoriesModal {
             HelpEntry::Binding("Esc", "Close popup"),
             HelpEntry::Binding("q / Ctrl+C", "Quit"),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vcs::{Repo, SpaceStatus};
+    use color_eyre::eyre;
+    use std::path::{Path, PathBuf};
+
+    /// A backend that answers from a fixed list.
+    ///
+    /// The behaviour under test is routing, not version control: what matters is
+    /// that two backends can share one repository — which is what a colocated
+    /// repo *is* — and still be told apart. A stub also keeps these tests free
+    /// of a `jj` binary, which the machine running them may not have.
+    struct StubVcs {
+        repo: Repo,
+        spaces: Vec<Space>,
+    }
+
+    impl StubVcs {
+        /// A backend on `path` holding one space per name in `spaces`.
+        fn new(path: &str, backend: Backend, spaces: &[&str]) -> Self {
+            let repo = Repo::new("shanti", path, backend);
+            let spaces = spaces
+                .iter()
+                .map(|name| {
+                    Space::new(
+                        repo.id.clone(),
+                        backend,
+                        *name,
+                        PathBuf::from(path).join(name),
+                        SpaceStatus::unknown(backend),
+                    )
+                })
+                .collect();
+            Self { repo, spaces }
+        }
+
+        fn boxed(self) -> BoxedVcs {
+            Box::new(self)
+        }
+    }
+
+    impl Vcs for StubVcs {
+        fn repo(&self) -> &Repo {
+            &self.repo
+        }
+        fn spaces(&self) -> eyre::Result<Vec<Space>> {
+            Ok(self.spaces.clone())
+        }
+        fn create_space(&self, _name: &str, _dest: &Path) -> eyre::Result<Space> {
+            unimplemented!("not exercised by these tests")
+        }
+        fn delete_space(&self, _space: &Space) -> eyre::Result<()> {
+            Ok(())
+        }
+        fn fetch(&self) -> eyre::Result<()> {
+            Ok(())
+        }
+        fn resolve_base(&self, _name: &str) -> String {
+            String::new()
+        }
+    }
+
+    /// The two backends a colocated repository is opened as: jj owns it, git
+    /// still holds the worktrees made before `jj init`.
+    fn colocated() -> RepositoriesComponent {
+        RepositoriesComponent::new(vec![
+            StubVcs::new("/repos/shanti", Backend::Jj, &["default"]).boxed(),
+            StubVcs::new("/repos/shanti", Backend::Git, &["feature-a", "feature-b"]).boxed(),
+        ])
+    }
+
+    /// The bug this change fixes: the git worktrees of a colocated repo were
+    /// listed by nobody, because only the owning backend was ever opened.
+    #[test]
+    fn a_colocated_repository_lists_the_spaces_of_both_backends() {
+        let (spaces, failed) = colocated().collect_spaces();
+
+        assert!(
+            failed.is_empty(),
+            "nothing should have failed: {:?}",
+            failed
+        );
+        let names: Vec<&str> = spaces.iter().map(|e| e.space.name.as_str()).collect();
+        assert_eq!(names, vec!["default", "feature-a", "feature-b"]);
+        let backends: Vec<Backend> = spaces.iter().map(|e| e.space.backend).collect();
+        assert_eq!(
+            backends,
+            vec![Backend::Jj, Backend::Git, Backend::Git],
+            "every space must remember which backend produced it"
+        );
+    }
+
+    /// The crux: both backends share a repo id, so the id alone cannot say who
+    /// to route to. Getting this wrong hands a git worktree to jj.
+    #[test]
+    fn a_space_is_routed_to_the_backend_that_owns_it() {
+        let repos = colocated();
+        let (spaces, _) = repos.collect_spaces();
+
+        for entry in &spaces {
+            let backend = repos
+                .backend_for(&entry.space)
+                .unwrap_or_else(|| panic!("no backend for the space {:?}", entry.space.name));
+            assert_eq!(
+                backend.backend(),
+                entry.space.backend,
+                "the space {:?} was routed to the wrong backend",
+                entry.space.name
+            );
+        }
+    }
+
+    /// A space whose backend is not open must not be quietly handed to the other
+    /// backend of the same repository; saying "no" is what makes the caller
+    /// report it instead.
+    #[test]
+    fn a_space_of_a_backend_that_is_not_open_routes_nowhere() {
+        let repos = RepositoriesComponent::new(vec![StubVcs::new(
+            "/repos/shanti",
+            Backend::Jj,
+            &["default"],
+        )
+        .boxed()]);
+        let orphan = Space::new(
+            RepoId::from_path("/repos/shanti"),
+            Backend::Git,
+            "feature-a",
+            "/repos/shanti/feature-a",
+            SpaceStatus::unknown(Backend::Git),
+        );
+
+        assert!(repos.backend_for(&orphan).is_none());
+    }
+
+    /// The picker asks which *repository*, so a colocated one appears once — as
+    /// jj, which is also the default a new space is created through.
+    #[test]
+    fn the_picker_shows_a_colocated_repository_once_as_its_owner() {
+        let mut repos = colocated();
+
+        let listed: Vec<Backend> = repos.filtered_items().iter().map(|r| r.backend()).collect();
+        assert_eq!(listed, vec![Backend::Jj]);
+        assert_eq!(
+            repos.selected_repository().map(|r| r.backend()),
+            Some(Backend::Jj),
+            "creating on a colocated repo defaults to jj"
+        );
+    }
+
+    /// A filtered picker must dedupe too, or typing a name brings the second
+    /// copy back.
+    #[test]
+    fn filtering_the_picker_still_shows_a_colocated_repository_once() {
+        let mut repos = colocated();
+        repos.filter.value = "shan".to_string();
+
+        assert_eq!(repos.filtered_items().len(), 1);
+    }
+
+    /// What the create prompt uses to decide whether to explain its choice.
+    #[test]
+    fn backends_of_reports_every_backend_open_on_a_repository() {
+        assert_eq!(
+            colocated().backends_of(&RepoId::from_path("/repos/shanti")),
+            vec![Backend::Jj, Backend::Git]
+        );
     }
 }

@@ -207,7 +207,9 @@ impl Fixture {
         // Order matters: Help renders on top of the Repositories popup.
         if screen.contains(" Help ") {
             Modal::Help
-        } else if screen.contains("New Worktree") {
+        // The prompt is titled in the vocabulary of the backend it will create
+        // through, so a jj repository says "Workspace" where git says "Worktree".
+        } else if screen.contains("New Worktree") || screen.contains("New Workspace") {
             Modal::CreateWorktree
         } else if screen.contains("Worktree from PR") {
             Modal::PrWorktree
@@ -312,6 +314,27 @@ fn starts_on_the_worktree_list_in_normal_mode() {
         f.screen().contains("Worktrees (1/1)"),
         "fixture worktree should be listed:\n{}",
         f.screen()
+    );
+}
+
+/// A colocated repository contributes git worktrees *and* jj workspaces to one
+/// list under one name (shanti-nhe.9), and the two behave differently when
+/// deleted — so every row says which backend owns it, even in this git-only
+/// fixture where the answer is never in doubt.
+#[test]
+fn worktree_rows_name_the_backend_that_owns_them() {
+    let mut f = Fixture::new();
+    let screen = f.screen();
+    let row = screen
+        .lines()
+        .find(|line| line.contains("alpha /"))
+        .unwrap_or_else(|| panic!("the fixture worktree should be listed:\n{}", screen));
+
+    let (before, _) = row.split_once("alpha /").expect("the row was just matched");
+    assert!(
+        before.contains("git"),
+        "the row must say which backend owns the space:\n{}",
+        row
     );
 }
 

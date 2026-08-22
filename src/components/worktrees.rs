@@ -38,8 +38,11 @@ pub struct SpaceEntry {
 }
 
 impl SpaceEntry {
-    /// The one string this row is drawn from and filtered on, so that what the
-    /// user sees is exactly what they can type at.
+    /// The name this row is drawn from and filtered on, so that what the user
+    /// sees is what they can type at. The backend tag beside it is an
+    /// annotation, not part of the name, and is deliberately not filterable:
+    /// "git" would otherwise match every git space of a repository called
+    /// `digit`.
     fn label(&self) -> String {
         format!("{} / {}", self.repo_name, self.space.name)
     }
@@ -320,7 +323,10 @@ impl WorktreesComponent {
         self.selected_index.and_then(|index| {
             self.filtered_items()
                 .get(index)
-                .map(|entry| entry.space.status.backend())
+                // The owner recorded on the space, not the one implied by its
+                // status: the status is a probe result and may be `Unknown`,
+                // while the owner is what the deletion will actually go through.
+                .map(|entry| entry.space.backend)
         })
     }
 }
@@ -345,6 +351,15 @@ fn space_to_list_item(space: &Space, label: &str) -> ListItem<'static> {
         })
         .collect();
     spans.push(Span::raw(" "));
+
+    // Which backend owns the row. A colocated repository contributes both its
+    // git worktrees and its jj workspaces to this list under one name, so
+    // without this the two are indistinguishable — and they behave differently
+    // when deleted. Padded so the repo names still line up in a column.
+    spans.push(Span::styled(
+        format!("{:<3} ", space.backend.label()),
+        Style::default().fg(SLATE.c600),
+    ));
 
     match label.split_once(" / ") {
         Some((repo, name)) => {

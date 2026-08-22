@@ -227,6 +227,7 @@ impl JjBackend {
         });
         Space::new(
             self.repo.id.clone(),
+            Backend::Jj,
             workspace.name.clone(),
             workspace.root.clone(),
             SpaceStatus::jj(remote, workspace.local),
