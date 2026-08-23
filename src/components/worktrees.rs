@@ -125,10 +125,144 @@ struct RowLabel {
 
 impl RowLabel {
     /// The label as one string — what the fuzzy filter matches against.
+    ///
+    /// Deliberately the *unpadded* text: the column padding [`RowLayout`] adds
+    /// is a property of the frame, not of the row, and a haystack that changed
+    /// width with the terminal would make a query match or miss depending on
+    /// how wide the window happened to be.
     fn text(&self) -> String {
         match &self.space {
-            Some(space) => format!("{} / {}", self.repo, space),
+            Some(space) => format!("{}{}{}", self.repo, SEPARATOR, space),
             None => self.repo.clone(),
+        }
+    }
+}
+
+/// Between the repository column and the space column. Also the separator in
+/// the filter haystack, so what the user reads is what they can type at.
+const SEPARATOR: &str = " / ";
+
+/// Width of the backend tag column: the widest [`Backend::label`], fixed rather
+/// than measured, so a list of only jj rows does not shift sideways the moment
+/// a git row arrives.
+const BACKEND_WIDTH: usize = 3;
+
+/// Everything left of the repository name: two status cells, a gap, the backend
+/// tag, a gap.
+const PREFIX_WIDTH: usize = 2 + 1 + BACKEND_WIDTH + 1;
+
+/// The width of `text` on screen.
+fn text_width(text: &str) -> usize {
+    Span::raw(text).width()
+}
+
+/// `text` cut to `max` cells, keeping the head and marking the cut with `…`.
+fn clip_end(text: &str, max: usize) -> String {
+    if text_width(text) <= max {
+        return text.to_owned();
+    }
+    let mut out = String::new();
+    let mut width = 0;
+    for c in text.chars() {
+        let w = text_width(&c.to_string());
+        if width + w > max.saturating_sub(1) {
+            break;
+        }
+        out.push(c);
+        width += w;
+    }
+    out.push('\u{2026}');
+    out
+}
+
+/// `text` cut to `max` cells, keeping the *tail*.
+///
+/// The repository column is right-aligned against the separator, so its last
+/// characters are the ones sitting in the column; dropping the head keeps the
+/// alignment honest and keeps the half of the name nearest the space it belongs
+/// to.
+fn clip_start(text: &str, max: usize) -> String {
+    if text_width(text) <= max {
+        return text.to_owned();
+    }
+    let mut tail = String::new();
+    let mut width = 0;
+    for c in text.chars().rev() {
+        let w = text_width(&c.to_string());
+        if width + w > max.saturating_sub(1) {
+            break;
+        }
+        tail.push(c);
+        width += w;
+    }
+    let mut out = String::from('\u{2026}');
+    out.extend(tail.chars().rev());
+    out
+}
+
+/// `text` pushed to the right of a `width`-wide column.
+fn pad_start(text: &str, width: usize) -> String {
+    let mut out = " ".repeat(width.saturating_sub(text_width(text)));
+    out.push_str(text);
+    out
+}
+
+/// The column widths this frame's rows are drawn in.
+///
+/// Measured once per frame from the rows that are actually on screen, rather
+/// than fixed: a list of short names should not reserve a column for a long one
+/// that is filtered out. Measured from *all* filtered rows rather than the ones
+/// currently scrolled into view, so scrolling never shifts the columns
+/// underneath the user.
+#[derive(Debug, PartialEq, Eq)]
+struct RowLayout {
+    /// Cells for the repository name, right-aligned against the separator.
+    repo: usize,
+    /// Cells for the space name. Zero when no row on screen names a space —
+    /// then there is no separator and no second column at all.
+    space: usize,
+}
+
+impl RowLayout {
+    /// Splits `width` between the two name columns.
+    ///
+    /// Each column asks for what its longest name needs. When both fit, both get
+    /// it. When they do not, whichever fits in half the space keeps its full
+    /// width and the other takes the remainder — so one very long repository
+    /// name costs the space names at most half the row, instead of pushing them
+    /// off the edge as the old free-flowing layout did.
+    fn measure<'a>(labels: impl Iterator<Item = &'a RowLabel> + Clone, width: u16) -> RowLayout {
+        let budget = (width as usize).saturating_sub(PREFIX_WIDTH);
+        let repo_natural = labels
+            .clone()
+            .map(|label| text_width(&label.repo))
+            .max()
+            .unwrap_or(0);
+        let Some(space_natural) = labels
+            .filter_map(|label| label.space.as_deref())
+            .map(text_width)
+            .max()
+        else {
+            // Every row is a repository's default space, so there is no second
+            // column to line anything up against.
+            return RowLayout {
+                repo: budget,
+                space: 0,
+            };
+        };
+
+        let avail = budget.saturating_sub(text_width(SEPARATOR));
+        let half = avail / 2;
+        let repo = if repo_natural + space_natural <= avail || repo_natural <= half {
+            repo_natural
+        } else if space_natural <= avail - half {
+            avail - space_natural
+        } else {
+            half
+        };
+        RowLayout {
+            repo,
+            space: avail - repo,
         }
     }
 }
@@ -141,6 +275,16 @@ pub struct WorktreesComponent {
     selected_index: Option<usize>,
     /// `Some` while repositories are still being discovered.
     scan: Option<ScanProgress>,
+    /// Whether a scan has ever reported to this list.
+    ///
+    /// Without it an empty list at startup is indistinguishable from an empty
+    /// list after a completed scan, and only the second one is entitled to say
+    /// that nothing was found.
+    scanned: bool,
+    /// How many repositories the last scan reported. The one thing that tells
+    /// "your configuration found nothing" apart from "your repositories have no
+    /// spaces yet".
+    repos_seen: usize,
     pub last_error: Option<String>,
 }
 
@@ -154,6 +298,8 @@ impl WorktreesComponent {
             selected_index,
             spaces,
             scan: None,
+            scanned: false,
+            repos_seen: 0,
             last_error: None,
         }
     }
@@ -188,6 +334,14 @@ impl WorktreesComponent {
     /// Says a scan is running and how many repositories it has found; `None`
     /// means it is over and the spinner goes away.
     pub fn set_scan(&mut self, found: Option<usize>) {
+        // Taken as reported rather than accumulated: the count is cumulative
+        // within a scan and starts again at zero when a new one begins, so a
+        // rescan that now finds nothing must be able to say so. The last count
+        // survives the scan ending, which is what the empty state reads.
+        if let Some(found) = found {
+            self.scanned = true;
+            self.repos_seen = found;
+        }
         match (found, &mut self.scan) {
             (Some(found), Some(scan)) => scan.found = found,
             (Some(found), slot) => *slot = Some(ScanProgress { found, frame: 0 }),
@@ -202,6 +356,25 @@ impl WorktreesComponent {
     pub fn tick(&mut self) {
         if let Some(scan) = &mut self.scan {
             scan.frame = scan.frame.wrapping_add(1);
+        }
+    }
+
+    /// Why the pane is empty, in the order the answers become knowable: a scan
+    /// in flight has not finished being wrong yet, a filter is the user's own
+    /// doing, and only a completed scan may speak about repositories at all.
+    fn empty_state(&self) -> EmptyState {
+        if self.scan.is_some() {
+            EmptyState::Scanning
+        } else if !self.filter.value.is_empty() {
+            EmptyState::Filtered
+        } else if !self.scanned {
+            EmptyState::Unknown
+        } else if self.repos_seen == 0 {
+            EmptyState::NoRepositories
+        } else {
+            EmptyState::NoSpaces {
+                repos: self.repos_seen,
+            }
         }
     }
 
@@ -257,10 +430,6 @@ impl WorktreesComponent {
                 .collect()
         };
         let total = display_data.len();
-        let items: Vec<ListItem<'static>> = display_data
-            .iter()
-            .map(|(space, label)| space_to_list_item(space, label))
-            .collect();
 
         // B: cap current to total so a stale selected_index never shows x > y in (x/y)
         let current = self.selected_index.map(|i| (i + 1).min(total)).unwrap_or(0);
@@ -362,6 +531,18 @@ impl WorktreesComponent {
             inner_area
         };
 
+        // The scrollbar is drawn *over* the right-hand column of the list, so
+        // the row has to give it up before the columns are measured — otherwise
+        // the last character of the longest space name disappears under the
+        // track exactly when the list is long enough to need one.
+        let scrolls = total > list_area.height as usize;
+        let row_width = list_area.width.saturating_sub(u16::from(scrolls));
+        let cols = RowLayout::measure(display_data.iter().map(|(_, label)| label), row_width);
+        let items: Vec<ListItem<'static>> = display_data
+            .iter()
+            .map(|(space, label)| space_to_list_item(space, label, &cols))
+            .collect();
+
         let list = List::new(items)
             .style(theme::TEXT)
             .highlight_style(theme::SELECTED_ROW)
@@ -372,16 +553,21 @@ impl WorktreesComponent {
         // scan the pane *is* empty for a moment. One line says which of the two
         // this is.
         if total == 0 {
-            let [line] = Layout::vertical([Constraint::Length(1.min(list_area.height))])
+            let lines = self.empty_state().lines();
+            let height = (lines.len() as u16).min(list_area.height);
+            let [area] = Layout::vertical([Constraint::Length(height)])
                 .flex(ratatui::layout::Flex::Center)
                 .areas(list_area);
-            f.render_widget(empty_notice(self.scan.is_some(), &self.filter.value), line);
+            f.render_widget(
+                Paragraph::new(lines).centered().wrap(Wrap { trim: true }),
+                area,
+            );
         }
 
         // Only when there are rows off-screen: a full-height track beside a list
         // that already fits is chrome that says nothing, and on a short terminal
         // it is a whole column spent saying it.
-        if total > list_area.height as usize {
+        if scrolls {
             let mut scroll_state = ScrollbarState::new(total)
                 .position(self.state.offset())
                 .viewport_content_length(list_area.height as usize);
@@ -542,13 +728,26 @@ impl WorktreesComponent {
     }
 }
 
-/// One row: the two status slots, the backend tag, then the label — `<repo> /
-/// <space>`, or just `<repo>` when the space is the repository's default one.
+/// One row of the table: the two status slots, the backend tag, then the label
+/// — `<repo> / <space>`, or just `<repo>` when the space is the repository's
+/// default one.
+///
+/// Everything left of the space name sits in a fixed-width column, and the
+/// repository name is right-aligned inside its own, so ` / ` falls in the same
+/// place on every row and the eye can run down either name column. Right
+/// alignment rather than left is what makes that possible without a ragged gap
+/// before the separator.
 ///
 /// The renderer is deliberately dumb about state — it asks the status for its
 /// glyphs and maps tones to colours. Matching on the backend here is what would
 /// force every new jj state to be taught to the UI as well.
-fn space_to_list_item(space: &Space, label: &RowLabel) -> ListItem<'static> {
+fn space_to_list_item(space: &Space, label: &RowLabel, cols: &RowLayout) -> ListItem<'static> {
+    ListItem::new(space_row(space, label, cols))
+}
+
+/// The row itself, as styled spans. Split from [`space_to_list_item`] so a test
+/// can read back what a row says without going through a terminal.
+fn space_row(space: &Space, label: &RowLabel, cols: &RowLayout) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = space
         .status
         .glyphs()
@@ -569,30 +768,52 @@ fn space_to_list_item(space: &Space, label: &RowLabel) -> ListItem<'static> {
     // without this the two are indistinguishable — and they behave differently
     // when deleted. Padded so the repo names still line up in a column.
     spans.push(Span::styled(
-        format!("{:<3} ", space.backend.label()),
+        format!("{:<width$} ", space.backend.label(), width = BACKEND_WIDTH),
         theme::MUTED,
     ));
 
-    match &label.space {
+    match (&label.space, cols.space) {
         // The space is what tells this row from its siblings, so it takes the
         // emphasis and the repository recedes to context.
-        Some(name) => {
-            spans.push(Span::styled(label.repo.clone(), theme::SECONDARY));
-            spans.push(Span::styled(" / ", theme::MUTED));
+        (Some(name), space_width) if space_width > 0 => {
             spans.push(Span::styled(
-                name.clone(),
+                pad_start(&clip_start(&label.repo, cols.repo), cols.repo),
+                theme::SECONDARY,
+            ));
+            spans.push(Span::styled(SEPARATOR, theme::MUTED));
+            spans.push(Span::styled(
+                clip_end(name, space_width),
                 theme::TEXT.add_modifier(Modifier::BOLD),
             ));
         }
         // Nothing follows it, so the repository name *is* the row's subject and
         // takes the emphasis rather than reading as a dimmed prefix to nothing.
-        None => spans.push(Span::styled(
-            label.repo.clone(),
-            theme::TEXT.add_modifier(Modifier::BOLD),
-        )),
+        //
+        // Padded to the repository column so its right edge lands on the same
+        // spine as the separators around it, but allowed to run past that spine
+        // when it is longer: the rest of the row is empty on a row like this, so
+        // clipping the name to the column would throw away characters to line up
+        // with nothing.
+        (_, space_width) => {
+            let room = cols.repo
+                + if space_width > 0 {
+                    text_width(SEPARATOR) + space_width
+                } else {
+                    0
+                };
+            let name = clip_end(&label.repo, room);
+            // With no space column there is no spine to align against, so the
+            // names start at the left instead of floating away from the tag.
+            let name = if space_width > 0 {
+                pad_start(&name, cols.repo)
+            } else {
+                name
+            };
+            spans.push(Span::styled(name, theme::TEXT.add_modifier(Modifier::BOLD)));
+        }
     }
 
-    ListItem::new(Line::from(spans))
+    Line::from(spans)
 }
 
 impl ListComponent<SpaceEntry> for WorktreesComponent {
@@ -646,21 +867,72 @@ impl ListComponent<SpaceEntry> for WorktreesComponent {
         self.selected_index = Some(index);
     }
 }
-/// What stands in for the list when there is nothing to show.
+/// Why the list is empty — which decides what the pane says instead of rows.
 ///
-/// Deliberately lower case and unbordered: it is a state of the pane, not a
-/// message the user has to dismiss.
-fn empty_notice(scanning: bool, filter: &str) -> Paragraph<'static> {
-    let text = if scanning {
-        "scanning for repositories\u{2026}"
-    } else if filter.is_empty() {
-        "no spaces yet"
-    } else {
-        "nothing matches the filter"
-    };
-    Paragraph::new(Line::from(Span::styled(text, theme::MUTED)))
-        .centered()
-        .wrap(Wrap { trim: true })
+/// An empty pane is an instruction, not a void: each of these is a different
+/// situation with a different next step, and the old single "no spaces yet"
+/// answered for all of them at once.
+#[derive(Debug, PartialEq, Eq)]
+enum EmptyState {
+    /// Repositories are still being discovered; anything else would be a lie
+    /// told one frame too early.
+    Scanning,
+    /// There are rows, but the filter excludes all of them.
+    Filtered,
+    /// Nothing has been scanned yet, so nothing can be claimed.
+    Unknown,
+    /// The scan finished and found no repository at all — which almost always
+    /// means the repos dir is not where shanti was told to look.
+    NoRepositories,
+    /// Repositories were found and none of them has a space yet. Everything
+    /// works; the user simply has not made one.
+    NoSpaces { repos: usize },
+}
+
+impl EmptyState {
+    /// The notice, as an accented headline followed by muted detail.
+    ///
+    /// Every line is kept short enough to sit inside the 40-column floor
+    /// unwrapped, because the wrap that would otherwise save them costs a row
+    /// the centring has not reserved.
+    fn lines(&self) -> Vec<Line<'static>> {
+        let headline = |text: &'static str| Line::from(Span::styled(text, theme::TITLE));
+        let detail = |text: String| Line::from(Span::styled(text, theme::MUTED));
+
+        match self {
+            EmptyState::Scanning => vec![detail("scanning for repositories\u{2026}".to_owned())],
+            EmptyState::Filtered => vec![
+                headline("nothing matches the filter"),
+                detail("press / to change it".to_owned()),
+            ],
+            EmptyState::Unknown => vec![detail("no spaces yet".to_owned())],
+            // The paths themselves would say more than the names of the
+            // settings, and `cli::Args` holds them along with the `Origin` each
+            // came from — but the list is never handed the arguments, and
+            // resolving the repos dir a second time here would put the
+            // precedence rules in two places. Naming the three inputs, in the
+            // order that wins, is the honest fallback until `App` passes them in.
+            EmptyState::NoRepositories => vec![
+                headline("no repositories found"),
+                detail("nothing was found in the repos dir".to_owned()),
+                detail("set it with --repos-dir,".to_owned()),
+                detail("SHANTI_REPOS_DIR or config.toml".to_owned()),
+            ],
+            EmptyState::NoSpaces { repos } => vec![
+                headline("no spaces yet"),
+                detail(format!(
+                    "{} {}, none with a space",
+                    repos,
+                    if *repos == 1 {
+                        "repository"
+                    } else {
+                        "repositories"
+                    }
+                )),
+                detail("press n to create one".to_owned()),
+            ],
+        }
+    }
 }
 
 /// The whole interface, when the terminal is below [`MIN_WIDTH`] × [`MIN_HEIGHT`].
@@ -763,6 +1035,278 @@ mod tests {
             .map(|entry| entry.label())
             .collect();
         assert_eq!(labels, vec!["shanti", "shanti / feat-x"]);
+    }
+
+    /// The row as plain text, so a test can see where the columns fall.
+    fn render(entry: &SpaceEntry, cols: &RowLayout) -> String {
+        space_row(&entry.space, &entry.row_label(), cols)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    fn layout(rows: &[SpaceEntry], width: u16) -> RowLayout {
+        let labels: Vec<RowLabel> = rows.iter().map(|entry| entry.row_label()).collect();
+        RowLayout::measure(labels.iter(), width)
+    }
+
+    /// Which cell the separator sits in — cells, not bytes, since the status
+    /// glyphs left of it are not ASCII.
+    fn spine(row: &str) -> Option<usize> {
+        row.find(SEPARATOR).map(|at| text_width(&row[..at]))
+    }
+
+    /// The point of the table: the separator falls in the same cell on every
+    /// row, however long the names either side of it are.
+    #[test]
+    fn the_separator_falls_in_one_column_on_every_row() {
+        let rows = vec![
+            entry("a", Backend::Git, "one", "/spaces/a/one"),
+            entry("much-longer-name", Backend::Jj, "two", "/spaces/m/two"),
+        ];
+        let cols = layout(&rows, 80);
+        let first = spine(&render(&rows[0], &cols));
+        let second = spine(&render(&rows[1], &cols));
+        assert!(first.is_some(), "the separator is missing");
+        assert_eq!(first, second, "the rows do not line up");
+    }
+
+    /// A row that names no space still ends on the spine, so a mixed list reads
+    /// as one table rather than two.
+    #[test]
+    fn a_default_row_ends_where_the_separator_would_start() {
+        let rows = vec![
+            entry("alpha", Backend::Jj, "default", "/repos/alpha"),
+            entry("beta", Backend::Git, "feat-x", "/spaces/beta/feat-x"),
+        ];
+        let cols = layout(&rows, 80);
+        let default_row = render(&rows[0], &cols);
+        let named_row = render(&rows[1], &cols);
+        assert!(
+            default_row.ends_with("alpha"),
+            "the default row should say the repository and stop: {default_row:?}"
+        );
+        assert_eq!(
+            text_width(&default_row),
+            spine(&named_row).expect("a separator"),
+            "the default row does not end on the spine"
+        );
+    }
+
+    /// The shape the app-level tests read: the backend tag comes first, and the
+    /// label still reads `<repo> / <space>` with the separator against the
+    /// repository name.
+    #[test]
+    fn a_row_names_its_backend_before_its_label() {
+        let rows = vec![entry(
+            "alpha",
+            Backend::Git,
+            "feat-x",
+            "/spaces/alpha/feat-x",
+        )];
+        let row = render(&rows[0], &layout(&rows, 80));
+        let (before, after) = row.split_once("alpha /").expect("the label is intact");
+        assert!(
+            before.contains("git"),
+            "the backend tag is missing: {row:?}"
+        );
+        assert_eq!(after.trim(), "feat-x");
+    }
+
+    /// Right alignment is what lets the repository column be padded without
+    /// opening a ragged gap in front of the separator.
+    #[test]
+    fn a_short_repository_name_is_pushed_up_against_the_separator() {
+        let rows = vec![
+            entry("a", Backend::Git, "one", "/spaces/a/one"),
+            entry("bbbb", Backend::Git, "two", "/spaces/b/two"),
+        ];
+        let cols = layout(&rows, 80);
+        assert_eq!(cols.repo, 4, "the column should fit the longest name");
+        let short = render(&rows[0], &cols);
+        assert!(
+            short.contains("   a / one"),
+            "the short name should be right-aligned: {short:?}"
+        );
+    }
+
+    /// Both columns fit, so neither is trimmed and the rest of the row is left
+    /// to the space names.
+    #[test]
+    fn columns_take_only_what_the_names_need() {
+        let rows = vec![entry("alpha", Backend::Git, "feature-one", "/s/a/one")];
+        let cols = layout(&rows, 80);
+        assert_eq!(cols.repo, "alpha".len());
+        assert_eq!(
+            cols.space,
+            80 - PREFIX_WIDTH - text_width(SEPARATOR) - cols.repo
+        );
+    }
+
+    /// At the 40-column floor a very long repository name costs the space names
+    /// at most half the room, and both cuts are marked rather than silent.
+    #[test]
+    fn at_the_minimum_width_one_long_name_cannot_crowd_the_other_out() {
+        // The 40-column floor, less the two border cells the pane draws.
+        let width = MIN_WIDTH - 2;
+        let rows = vec![entry(
+            "an-extremely-long-repository-name",
+            Backend::Git,
+            "an-extremely-long-space-name",
+            "/s/x/y",
+        )];
+        let cols = layout(&rows, width);
+        let avail = width as usize - PREFIX_WIDTH - text_width(SEPARATOR);
+        assert_eq!(
+            cols.repo,
+            avail / 2,
+            "the repository column took more than half"
+        );
+        assert!(cols.space >= avail / 2, "the space column was crowded out");
+
+        let row = render(&rows[0], &cols);
+        assert_eq!(
+            row.matches('\u{2026}').count(),
+            2,
+            "both names should be marked as cut: {row:?}"
+        );
+        assert!(
+            text_width(&row) <= width as usize,
+            "the row overflows the pane: {row:?}"
+        );
+    }
+
+    /// The head of a repository name is what gets dropped, because the tail is
+    /// the half sitting against the space it belongs to.
+    #[test]
+    fn a_clipped_name_says_which_end_was_cut() {
+        assert_eq!(clip_start("abcdefgh", 4), "\u{2026}fgh");
+        assert_eq!(clip_end("abcdefgh", 4), "abc\u{2026}");
+        assert_eq!(clip_end("abc", 4), "abc", "a name that fits is left alone");
+    }
+
+    /// With no space column there is no spine, so the names start at the left
+    /// instead of drifting away from the backend tag.
+    #[test]
+    fn a_list_of_only_default_spaces_is_left_aligned() {
+        let rows = vec![
+            entry("alpha", Backend::Jj, "default", "/repos/alpha"),
+            entry("b", Backend::Jj, "main", "/repos/b"),
+        ];
+        let cols = layout(&rows, 80);
+        assert_eq!(cols.space, 0, "there is no second column to line up");
+        for row in &rows {
+            let text = render(row, &cols);
+            assert!(
+                text.ends_with(&row.repo_name),
+                "the name should not be padded: {text:?}"
+            );
+        }
+    }
+
+    /// The haystack is the label, never the padded row: a filter that matched or
+    /// missed depending on the width of the window would be unusable.
+    #[test]
+    fn the_filter_matches_the_label_not_the_padding() {
+        let rows = vec![entry("a", Backend::Git, "one", "/spaces/a/one")];
+        let padded = render(&rows[0], &layout(&rows, 80));
+        assert_eq!(rows[0].label(), "a / one");
+        assert!(padded.contains("a / one"), "{padded:?}");
+        assert_ne!(padded.trim(), rows[0].label(), "the row is padded");
+    }
+
+    /// Nothing found and nothing created are different situations with
+    /// different fixes, and one message cannot answer for both.
+    #[test]
+    fn an_empty_list_says_which_kind_of_empty_it_is() {
+        let mut component = WorktreesComponent::new(Vec::new());
+        assert_eq!(
+            component.empty_state(),
+            EmptyState::Unknown,
+            "nothing has been scanned, so nothing may be claimed"
+        );
+
+        component.set_scan(Some(0));
+        assert_eq!(component.empty_state(), EmptyState::Scanning);
+
+        // The scan ended having found nothing: the configuration is the suspect.
+        component.set_scan(None);
+        assert_eq!(component.empty_state(), EmptyState::NoRepositories);
+
+        // A second scan finds repositories, none of which has a space.
+        component.set_scan(Some(3));
+        component.set_scan(None);
+        assert_eq!(component.empty_state(), EmptyState::NoSpaces { repos: 3 });
+    }
+
+    /// A filter the user typed is their own doing, and says so rather than
+    /// blaming the configuration.
+    #[test]
+    fn a_filter_that_matches_nothing_is_not_reported_as_a_missing_repository() {
+        let mut component =
+            WorktreesComponent::new(vec![entry("alpha", Backend::Git, "one", "/s/a/one")]);
+        component.set_scan(Some(1));
+        component.set_scan(None);
+        type_filter(&mut component, "zzz");
+        assert_eq!(component.empty_state(), EmptyState::Filtered);
+    }
+
+    /// The no-repos notice names the settings that decide where shanti looks;
+    /// the no-spaces notice names the key that makes one.
+    #[test]
+    fn each_empty_state_says_what_to_do_next() {
+        let text = |state: EmptyState| {
+            state
+                .lines()
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let no_repos = text(EmptyState::NoRepositories);
+        assert!(no_repos.contains("no repositories found"), "{no_repos}");
+        assert!(no_repos.contains("--repos-dir"), "{no_repos}");
+        assert!(no_repos.contains("SHANTI_REPOS_DIR"), "{no_repos}");
+
+        let no_spaces = text(EmptyState::NoSpaces { repos: 1 });
+        assert!(no_spaces.contains("no spaces yet"), "{no_spaces}");
+        assert!(no_spaces.contains("1 repository,"), "{no_spaces}");
+        assert!(no_spaces.contains("press n to create one"), "{no_spaces}");
+
+        assert!(text(EmptyState::NoSpaces { repos: 2 }).contains("2 repositories,"));
+    }
+
+    /// Every notice has to fit the 40-column floor unwrapped, because the
+    /// centring reserves exactly as many rows as there are lines.
+    #[test]
+    fn every_empty_notice_fits_the_minimum_size() {
+        let inner = (MIN_WIDTH - 2) as usize;
+        for state in [
+            EmptyState::Scanning,
+            EmptyState::Filtered,
+            EmptyState::Unknown,
+            EmptyState::NoRepositories,
+            EmptyState::NoSpaces { repos: 12 },
+        ] {
+            let lines = state.lines();
+            assert!(
+                lines.len() <= (MIN_HEIGHT - 2) as usize,
+                "{state:?} is taller than the pane"
+            );
+            for line in lines {
+                assert!(
+                    line.width() <= inner,
+                    "{state:?} has a line wider than {inner} cells: {line:?}"
+                );
+            }
+        }
     }
 
     fn type_filter(component: &mut WorktreesComponent, query: &str) -> Vec<String> {
