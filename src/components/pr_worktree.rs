@@ -190,7 +190,14 @@ impl PrWorktreeComponent {
             return clone_flow(ctx, pr_url, pr_info, true);
         }
 
-        let label = format!("Repository '{}' not found. Clone from GitHub?", pr_url.repo);
+        // Names the backend, because this dialog is where the repository's shape
+        // is decided: `github::clone_repository` always clones with git, and a jj
+        // user who is not told here finds out much later. One extra word rather
+        // than a sentence — the picker that follows carries the jj escape hatch.
+        let label = format!(
+            "Repository '{}' not found. Clone from GitHub with git?",
+            pr_url.repo
+        );
         let remote = format!("git@github.com:{}/{}.git", pr_url.owner, pr_url.repo);
         let on_confirm: ConfirmCallback =
             Box::new(move |ctx| clone_flow(ctx, pr_url, pr_info, false));
