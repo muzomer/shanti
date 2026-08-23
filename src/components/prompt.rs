@@ -211,8 +211,11 @@ pub fn footer(entries: &[FooterEntry<'_>], width: u16) -> Line<'static> {
 }
 
 /// The two entries every prompt ends with: confirm, and the way out.
-pub fn confirm_and_cancel(verb: &'static str) -> [FooterEntry<'static>; 2] {
+pub fn confirm_and_cancel(verb: &'static str) -> [FooterEntry<'static>; 3] {
     [
+        // First, because `footer` drops entries from the front when the width
+        // budget is tight: on a narrow prompt the hint goes before a real action.
+        ("F1", "help", theme::KEY),
         ("Enter", verb, theme::KEY),
         ("Esc", "cancel", theme::KEY_SAFE),
     ]

@@ -24,6 +24,16 @@ use crate::theme;
 /// popup scannable rather than a list of sentences.
 const KEY_COLUMN: usize = 12;
 
+/// A key padded out to the gutter, always with at least one space after it.
+///
+/// A binding wider than the gutter (`↑ / Ctrl+K / Ctrl+P`) would otherwise run
+/// straight into its own description. Counted in characters, not bytes, so the
+/// arrow glyphs do not shift the column.
+fn key_cell(key: &str) -> String {
+    let pad = KEY_COLUMN.saturating_sub(key.chars().count()).max(1);
+    format!("{}{}", key, " ".repeat(pad))
+}
+
 pub enum HelpEntry {
     Binding(&'static str, &'static str),
     Section(&'static str),
@@ -61,8 +71,10 @@ impl HelpComponent {
             .entries
             .iter()
             .map(|e| match e {
-                HelpEntry::Binding(key, desc) => key.len().max(KEY_COLUMN) + desc.len(),
-                HelpEntry::Section(title) => title.len(),
+                HelpEntry::Binding(key, desc) => {
+                    key_cell(key).chars().count() + desc.chars().count()
+                }
+                HelpEntry::Section(title) => title.chars().count(),
                 HelpEntry::Blank => 0,
             })
             .max()
@@ -91,7 +103,7 @@ impl HelpComponent {
             .iter()
             .flat_map(|e| match e {
                 HelpEntry::Binding(key, desc) => vec![Line::from(vec![
-                    Span::styled(format!("{:<KEY_COLUMN$}", key), theme::KEY),
+                    Span::styled(key_cell(key), theme::KEY),
                     Span::styled(*desc, theme::SECONDARY),
                 ])],
                 HelpEntry::Section(title) => vec![
@@ -256,10 +268,12 @@ impl Modal for HelpComponent {
 
 /// Keybindings for the worktree list, the one layer that is not a modal.
 ///
-/// There is no Insert-mode variant: `?` is a literal character in Insert mode,
-/// so help can only ever be opened from Normal mode. The old
-/// `(Worktrees, Insert)` and `(Repositories, Insert)` tables were unreachable
-/// for exactly that reason and have been removed rather than left as decoration.
+/// Filter mode gets a section rather than a table of its own. Help is now
+/// reachable from Insert mode too (`F1`, since `?` is a literal there), so the
+/// bindings that only apply while filtering have to be documented again — but
+/// as one scrollable table, not two mode-dependent ones: the reader is already
+/// in filter mode when they ask, and the surrounding list keys are the other
+/// half of what they need.
 pub fn worktrees_bindings() -> Vec<HelpEntry> {
     vec![
         HelpEntry::Section("Keybindings"),
@@ -275,8 +289,18 @@ pub fn worktrees_bindings() -> Vec<HelpEntry> {
         HelpEntry::Binding("d", "Delete with confirmation"),
         HelpEntry::Binding("D", "Delete (skips the question, not the guard)"),
         HelpEntry::Binding("Enter", "Print path & exit"),
-        HelpEntry::Binding("?", "Show this help"),
+        HelpEntry::Binding("? / F1", "Show this help"),
         HelpEntry::Binding("q / Ctrl+C", "Quit"),
+        HelpEntry::Blank,
+        HelpEntry::Section("Filter mode"),
+        HelpEntry::Binding("Esc", "Leave filter mode"),
+        HelpEntry::Binding("Tab", "Toggle filter / list"),
+        HelpEntry::Binding("↑ / Ctrl+K / Ctrl+P", "Move up in list"),
+        HelpEntry::Binding("↓ / Ctrl+J / Ctrl+N", "Move down in list"),
+        HelpEntry::Binding("Backspace", "Delete filter character"),
+        HelpEntry::Binding("Enter", "Print path & exit"),
+        HelpEntry::Binding("F1", "Show this help"),
+        HelpEntry::Binding("Ctrl+C", "Quit"),
         HelpEntry::Blank,
         // Two slots per row: the first says how the space stands to its
         // upstream, the second what its own working state is. The wording

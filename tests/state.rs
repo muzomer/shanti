@@ -490,7 +490,7 @@ fn worktree_rows_name_the_backend_that_owns_them() {
 #[test]
 fn unbound_key_is_not_consumed() {
     let mut f = Fixture::new();
-    assert_eq!(f.press(key(KeyCode::F(1))), NOT_CONSUMED);
+    assert_eq!(f.press(key(KeyCode::F(2))), NOT_CONSUMED);
     f.assert_at_worktree_list();
 }
 

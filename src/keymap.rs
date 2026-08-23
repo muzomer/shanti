@@ -47,7 +47,9 @@ fn resolve_normal(key: KeyEvent) -> Option<Action> {
             Some(Action::EnterInsertMode)
         }
         (KeyCode::Tab, KeyModifiers::NONE) => Some(Action::FocusNext),
-        (KeyCode::Char('?'), KeyModifiers::NONE) => Some(Action::ShowHelp),
+        (KeyCode::Char('?'), KeyModifiers::NONE) | (KeyCode::F(1), KeyModifiers::NONE) => {
+            Some(Action::ShowHelp)
+        }
         (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Action::Quit),
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(Action::Quit),
         _ => None,
@@ -64,6 +66,13 @@ fn resolve_insert(key: KeyEvent) -> Option<Action> {
         };
     }
     match key.code {
+        // Insert mode's help key. It cannot be '?', which is a literal character
+        // here — and a legitimate one inside a PR URL's query string. F1 is the
+        // one key every terminal already agrees means "help", it carries no
+        // modifier a text field could want, and nothing else in this table
+        // claims it, so it is safe to bind in both modes: help then answers to
+        // the same key everywhere, whether or not a text field has focus.
+        KeyCode::F(1) => Some(Action::ShowHelp),
         KeyCode::Esc => Some(Action::ExitInsertMode),
         KeyCode::Enter => Some(Action::Select),
         KeyCode::Tab => Some(Action::FocusNext),
@@ -72,5 +81,40 @@ fn resolve_insert(key: KeyEvent) -> Option<Action> {
         KeyCode::Down => Some(Action::MoveDown),
         KeyCode::Up => Some(Action::MoveUp),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn f1_opens_help_in_both_modes() {
+        assert_eq!(
+            resolve(InputMode::Normal, key(KeyCode::F(1))),
+            Some(Action::ShowHelp)
+        );
+        assert_eq!(
+            resolve(InputMode::Insert, key(KeyCode::F(1))),
+            Some(Action::ShowHelp)
+        );
+    }
+
+    /// Why Insert mode needs a help key of its own: `?` belongs to the text
+    /// field there — it is a legitimate character inside a PR URL.
+    #[test]
+    fn question_mark_stays_a_literal_in_insert_mode() {
+        assert_eq!(
+            resolve(InputMode::Insert, key(KeyCode::Char('?'))),
+            Some(Action::InsertChar('?'))
+        );
+        assert_eq!(
+            resolve(InputMode::Normal, key(KeyCode::Char('?'))),
+            Some(Action::ShowHelp)
+        );
     }
 }
