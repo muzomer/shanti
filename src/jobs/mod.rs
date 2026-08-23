@@ -188,12 +188,11 @@ impl Job {
                 owner,
                 repo,
                 repos_dir,
-            } => {
-                github::clone_repository(&owner, &repo, &repos_dir)?;
-                Ok(Completion::Cloned {
-                    path: PathBuf::from(repos_dir).join(repo),
-                })
-            }
+            } => Ok(Completion::Cloned {
+                // The destination is the clone's to report: it is the one that
+                // decided the path and proved it was not already taken.
+                path: github::clone_repository(&owner, &repo, &repos_dir)?,
+            }),
             Job::SpaceStatus { path } => {
                 let mut spaces = Vec::new();
                 for backend in vcs::open_at(&path, false)? {
@@ -224,7 +223,8 @@ pub enum Completion {
     /// Boxed because a `PrInfo` is far wider than the other arms, and an enum is
     /// as big as its widest arm.
     PullRequest(Box<PrInfo>),
-    /// Where the clone landed.
+    /// Where the clone landed. The directory did not exist before the job ran,
+    /// which is what lets [`discard`] remove it again when nobody wants it.
     Cloned { path: PathBuf },
     /// One repository's spaces, freshly read.
     Spaces(Vec<Space>),
@@ -424,13 +424,21 @@ fn spawn_worker(shared: Arc<Shared>, results: Sender<AppEvent>) -> JoinHandle<()
                 Err(_) => Err(eyre::eyre!("the {kind} job panicked")),
             };
 
-            let wanted = {
+            let (abandoned, stopping) = {
                 let mut state = shared.lock();
                 state.pending.remove(&id);
-                !state.cancelled.remove(&id) && !state.stopping
+                (state.cancelled.remove(&id), state.stopping)
             };
-            if !wanted {
+            if abandoned || stopping {
                 debug!(?id, %kind, "dropping the result of a cancelled job");
+                // Only an abandoned job cleans up after itself. At shutdown the
+                // process is about to end underneath this thread, and a
+                // `remove_dir_all` cut in half is a worse leftover than the one
+                // it was removing — so quitting leaves the directory alone and
+                // lets the next run's clone refuse on it by name.
+                if abandoned && !stopping {
+                    discard(outcome);
+                }
                 continue;
             }
 
@@ -441,6 +449,23 @@ fn spawn_worker(shared: Arc<Shared>, results: Sender<AppEvent>) -> JoinHandle<()
             }
         }
     })
+}
+
+/// Undoes what a result nobody wants left on disk.
+///
+/// Cancelling a clone means "stop caring", not "stop now": the subprocess runs
+/// to completion and only its *result* is suppressed. That is enough for the UI
+/// — the repository is never added to the list — but not for the filesystem,
+/// which is left holding a directory nobody asked for. This is where that is
+/// paid back, and it runs only after the job body has returned, so nothing is
+/// removed out from under a `git clone` still writing into it.
+///
+/// Every other completion is pure data and needs nothing.
+fn discard(outcome: eyre::Result<Completion>) {
+    if let Ok(Completion::Cloned { path }) = outcome {
+        debug!(path = %path.display(), "removing the clone nobody waited for");
+        github::discard_clone(&path);
+    }
 }
 
 /// Blocks until there is a job, or until the pool is stopping (`None`).
@@ -603,6 +628,82 @@ mod tests {
         assert!(
             rx.recv_timeout(Duration::from_millis(500)).is_err(),
             "the result of a cancelled job was delivered"
+        );
+    }
+
+    /// A job whose body left a directory behind must not leave it behind when
+    /// its result is thrown away. Suppressing the result is enough for the UI;
+    /// the disk needs this.
+    #[test]
+    fn cancelling_a_clone_removes_the_directory_it_left_behind() {
+        let repos = tempfile::tempdir().expect("a temp repos dir");
+        let dest = repos.path().join("half-cloned");
+        let (tx, rx) = mpsc::channel();
+        let (started, has_started) = mpsc::channel();
+        let gate = Arc::new(Gate::default());
+        let worker = Worker::with_threads(tx, 1);
+
+        // Stands in for a clone: it creates its destination, then blocks where
+        // a real one would still be talking to the remote.
+        let id = {
+            let gate = Arc::clone(&gate);
+            let dest = dest.clone();
+            worker.submit(Job::Custom(Box::new(move || {
+                std::fs::create_dir(&dest).expect("the clone destination");
+                std::fs::write(dest.join("HEAD"), b"ref: refs/heads/main").expect("some content");
+                let _ = started.send(());
+                gate.wait();
+                Ok(Completion::Cloned { path: dest })
+            })))
+        };
+        has_started.recv().expect("the clone started");
+
+        worker.cancel(id);
+        gate.open();
+
+        assert!(
+            rx.recv_timeout(Duration::from_millis(500)).is_err(),
+            "the result of a cancelled clone was delivered"
+        );
+        assert!(
+            !dest.exists(),
+            "an abandoned clone left {} behind",
+            dest.display()
+        );
+    }
+
+    /// Quitting is the other half, and it is deliberately *not* symmetrical:
+    /// the process is ending, so a half-finished `remove_dir_all` would be a
+    /// worse leftover than the directory itself. The next run refuses on it by
+    /// name instead.
+    #[test]
+    fn quitting_mid_clone_leaves_the_directory_for_the_next_run() {
+        let repos = tempfile::tempdir().expect("a temp repos dir");
+        let dest = repos.path().join("half-cloned");
+        let (tx, _rx) = mpsc::channel();
+        let (started, has_started) = mpsc::channel();
+        let gate = Arc::new(Gate::default());
+        let worker = Worker::with_threads(tx, 1);
+
+        {
+            let gate = Arc::clone(&gate);
+            let dest = dest.clone();
+            worker.submit(Job::Custom(Box::new(move || {
+                std::fs::create_dir(&dest).expect("the clone destination");
+                let _ = started.send(());
+                gate.wait();
+                Ok(Completion::Cloned { path: dest })
+            })));
+        }
+        has_started.recv().expect("the clone started");
+
+        drop(worker); // as at quit: stop caring, do not wait
+        gate.open();
+        thread::sleep(Duration::from_millis(100));
+
+        assert!(
+            dest.exists(),
+            "shutdown deleted a directory it cannot finish"
         );
     }
 
