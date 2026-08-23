@@ -21,11 +21,13 @@ use ratatui::{
 use super::{
     create_worktree::CreateWorktreeComponent,
     filter::FilterComponent,
+    footer_entries,
     list::{Focus, ListComponent},
     popup_area,
     prompt::footer,
     worktrees::SpaceEntry,
-    Action, AppContext, EventState, Extent, HelpEntry, Modal, ModalFlow,
+    Action, AppContext, EventState, Extent, HelpEntry, Modal, ModalFlow, FILTER_SECTION,
+    KEYS_SECTION,
 };
 use crate::keymap::InputMode;
 use tracing::error;
@@ -78,14 +80,14 @@ impl RepositoriesComponent {
             Line::from(spans).alignment(Alignment::Center)
         };
 
-        let mut block = Block::bordered()
+        // Drawn in both modes, not just Normal: filter mode is exactly where a
+        // user is most likely to have forgotten which key gets them back out.
+        let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(theme::BORDER_FOCUSED)
             .style(theme::POPUP_SURFACE)
-            .title(title);
-        if matches!(mode, InputMode::Normal) {
-            block = block.title_bottom(repos_keybinding_hint(rect.width));
-        }
+            .title(title)
+            .title_bottom(repos_keybinding_hint(mode, rect.width));
 
         let inner_area = block.inner(rect);
         f.render_widget(block, rect);
@@ -402,16 +404,14 @@ pub fn spaces_of(backends: &[BoxedVcs]) -> (Vec<SpaceEntry>, Vec<String>) {
     (spaces, failed)
 }
 
-fn repos_keybinding_hint(width: u16) -> Line<'static> {
-    footer(
-        &[
-            ("↑/↓", "move", theme::KEY),
-            ("i", "filter", theme::KEY),
-            ("Enter", "select", theme::KEY),
-            ("Esc", "close", theme::KEY_SAFE),
-        ],
-        width,
-    )
+/// The picker's footer, taken from the same table its help popup shows and cut
+/// to the section the current mode is in.
+fn repos_keybinding_hint(mode: InputMode, width: u16) -> Line<'static> {
+    let section = match mode {
+        InputMode::Normal => KEYS_SECTION,
+        InputMode::Insert => FILTER_SECTION,
+    };
+    footer(&footer_entries(&repositories_bindings(), section), width)
 }
 
 /// One row: the repository name at full weight, its backend tagged beside it.
@@ -569,20 +569,48 @@ impl Modal for RepositoriesModal {
     }
 
     fn help(&self) -> Vec<HelpEntry> {
-        vec![
-            HelpEntry::Section("Keybindings"),
-            HelpEntry::Binding("j / ↓", "Move down"),
-            HelpEntry::Binding("k / ↑", "Move up"),
-            HelpEntry::Binding("g / Home", "Go to first"),
-            HelpEntry::Binding("G / End", "Go to last"),
-            HelpEntry::Binding("i", "Enter filter mode"),
-            HelpEntry::Binding("Tab", "Toggle filter / list"),
-            HelpEntry::Binding("Enter", "Select repository"),
-            HelpEntry::Binding("?", "Show this help"),
-            HelpEntry::Binding("Esc", "Close popup"),
-            HelpEntry::Binding("q / Ctrl+C", "Quit"),
-        ]
+        repositories_bindings()
     }
+}
+
+/// Keybindings for the repository picker, and the source its footer is read
+/// from — the popup has two input modes, so the table has a section for each.
+pub fn repositories_bindings() -> Vec<HelpEntry> {
+    vec![
+        HelpEntry::Section(KEYS_SECTION),
+        HelpEntry::bind("j / ↓", "Move down").hint("j/k", "move"),
+        HelpEntry::bind("k / ↑", "Move up"),
+        HelpEntry::bind("g / Home", "Go to first"),
+        HelpEntry::bind("G / End", "Go to last"),
+        HelpEntry::bind("i", "Enter filter mode").hint("i", "filter"),
+        HelpEntry::bind("Tab", "Toggle filter / list"),
+        HelpEntry::bind("Enter", "Select repository").hint("Enter", "select"),
+        HelpEntry::bind("? / F1", "Show this help")
+            .hint("?", "help")
+            .aside(),
+        HelpEntry::bind("Esc", "Close popup")
+            .hint("Esc", "close")
+            .safe()
+            .essential(),
+        HelpEntry::bind("q / Ctrl+C", "Quit"),
+        HelpEntry::Blank,
+        // Deliberately the short version: what differs while typing a filter,
+        // and nothing that the section above already says in the same words. The
+        // help popup sizes itself from this table and is centred over the picker
+        // it was opened from, so a second full-length section would grow past the
+        // picker and bury the title telling the reader what they are reading
+        // about.
+        HelpEntry::Section(FILTER_SECTION),
+        HelpEntry::bind("Esc", "Leave filter mode")
+            .hint("Esc", "list")
+            .safe()
+            .essential(),
+        HelpEntry::bind("↑ / ↓ / Ctrl+K / Ctrl+J", "Move in list").hint("↑/↓", "move"),
+        HelpEntry::bind("Enter", "Select repository").hint("Enter", "select"),
+        HelpEntry::bind("F1", "Show this help")
+            .hint("F1", "help")
+            .aside(),
+    ]
 }
 
 #[cfg(test)]

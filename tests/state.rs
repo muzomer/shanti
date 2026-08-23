@@ -1652,3 +1652,106 @@ fn a_filter_typed_during_a_scan_survives_the_next_batch() {
         "every row of both roots should be back"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The keybinding footer (shanti-hq6.3)
+// ---------------------------------------------------------------------------
+
+/// Renders into a terminal of a chosen size, which the footer tests need: the
+/// point of a footer is what it gives up when the frame is narrow, and
+/// [`Fixture::screen`] is deliberately wide enough to hide that.
+fn screen_at(f: &mut Fixture, width: u16, height: u16) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal init");
+    terminal
+        .draw(|frame| f.app.draw(frame))
+        .expect("draw failed");
+    let buffer = terminal.backend().buffer().clone();
+    (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The bottom row, where the status zone and the footer share one border.
+fn bottom_row(screen: &str) -> String {
+    screen.lines().last().unwrap_or_default().to_owned()
+}
+
+#[test]
+fn the_space_list_names_its_keys_without_opening_help() {
+    let mut f = Fixture::new();
+    let bottom = bottom_row(&f.screen());
+
+    for hint in [
+        "[j/k] move",
+        "[n] new",
+        "[d] delete",
+        "[Enter] path",
+        "[?] help",
+    ] {
+        assert!(
+            bottom.contains(hint),
+            "the footer should carry {hint}:\n{bottom}"
+        );
+    }
+    // The status zone keeps its own end of the same border.
+    assert!(
+        bottom.contains(" NORMAL "),
+        "the mode indicator and the footer must coexist:\n{bottom}"
+    );
+}
+
+#[test]
+fn the_footer_follows_the_input_mode() {
+    let mut f = Fixture::new();
+    f.press_char('i');
+
+    let bottom = bottom_row(&f.screen());
+    assert!(
+        bottom.contains("[Esc] normal"),
+        "filter mode must advertise the way back out:\n{bottom}"
+    );
+    assert!(
+        !bottom.contains("[n] new"),
+        "a key that types a character while filtering must not be offered as a command:\n{bottom}"
+    );
+}
+
+/// What a 40-column terminal gets: whole entries dropped from the least
+/// important end, never a hint cut in half or wrapped onto another row.
+#[test]
+fn the_footer_sheds_entries_on_a_narrow_terminal() {
+    let mut f = Fixture::new();
+    let bottom = bottom_row(&screen_at(&mut f, 40, 10));
+
+    assert!(bottom.contains("[?] help"), "{bottom}");
+    assert!(bottom.contains("[q] quit"), "{bottom}");
+    assert!(
+        !bottom.contains("path") && !bottom.contains("delete"),
+        "the heavier entries should have been dropped whole:\n{bottom}"
+    );
+    assert_eq!(
+        bottom.chars().count(),
+        40,
+        "the footer must stay on its own row:\n{bottom}"
+    );
+}
+
+/// The picker used to hide its footer while a filter was being typed — the one
+/// moment its user is most likely to have forgotten the way out.
+#[test]
+fn the_repository_picker_keeps_its_footer_in_filter_mode() {
+    let mut f = Fixture::new();
+    f.press_char('n');
+    f.press_char('i');
+
+    let screen = f.screen();
+    assert!(
+        screen.contains("[Esc] list"),
+        "the picker's footer should follow it into filter mode:\n{screen}"
+    );
+}

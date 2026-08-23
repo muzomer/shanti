@@ -20,11 +20,11 @@ use ratatui::{layout::Rect, Frame};
 
 use super::{
     create_worktree::CreateWorktreeComponent,
-    popup_area,
-    prompt::{confirm_and_cancel, prompt_width, FooterEntry, Prompt, PROMPT_HEIGHT},
+    footer_entries, popup_area,
+    prompt::{prompt_width, FooterEntry, Prompt, PROMPT_HEIGHT},
     select_directory::SelectDirectoryComponent,
     Action, AppContext, ConfirmCallback, ConfirmComponent, EventState, Extent, HelpEntry, Modal,
-    ModalFlow, SelectCallback,
+    ModalFlow, SelectCallback, KEYS_SECTION,
 };
 use crate::theme;
 use crate::{
@@ -378,12 +378,11 @@ impl PrWorktreeComponent {
         .render(frame, area);
     }
 
-    /// Enter means nothing while a job is out, so it is not offered.
+    /// Read off [`Modal::help`], which already knows that Enter means nothing
+    /// while a job is out — so the footer stops offering it for the same reason
+    /// and at the same moment as the help popup does.
     fn footer(&self) -> Vec<FooterEntry<'static>> {
-        if self.waiting.is_some() {
-            return vec![("Esc", "cancel", theme::KEY_SAFE)];
-        }
-        confirm_and_cancel("open").to_vec()
+        footer_entries(&self.help(), KEYS_SECTION)
     }
 
     pub fn handle_action(&mut self, action: Action) -> EventState {
@@ -521,17 +520,26 @@ impl Modal for PrWorktreeComponent {
     fn help(&self) -> Vec<HelpEntry> {
         if self.waiting.is_some() {
             return vec![
-                HelpEntry::Section("Keybindings"),
-                HelpEntry::Binding("Esc", "Stop waiting and cancel"),
-                HelpEntry::Binding("Ctrl+C", "Quit"),
+                HelpEntry::Section(KEYS_SECTION),
+                HelpEntry::bind("Esc", "Stop waiting and cancel")
+                    .hint("Esc", "cancel")
+                    .safe()
+                    .essential(),
+                HelpEntry::bind("Ctrl+C", "Quit"),
             ];
         }
         vec![
-            HelpEntry::Section("Keybindings"),
-            HelpEntry::Binding("Enter", "Fetch PR and open worktree"),
-            HelpEntry::Binding("Esc", "Cancel"),
-            HelpEntry::Binding("Backspace", "Delete character"),
-            HelpEntry::Binding("Ctrl+C", "Quit"),
+            HelpEntry::Section(KEYS_SECTION),
+            HelpEntry::bind("Enter", "Fetch PR and open worktree").hint("Enter", "open"),
+            HelpEntry::bind("F1", "Show this help")
+                .hint("F1", "help")
+                .aside(),
+            HelpEntry::bind("Esc", "Cancel")
+                .hint("Esc", "cancel")
+                .safe()
+                .essential(),
+            HelpEntry::bind("Backspace", "Delete character"),
+            HelpEntry::bind("Ctrl+C", "Quit"),
         ]
     }
 }

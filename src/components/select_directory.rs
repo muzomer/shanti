@@ -9,10 +9,12 @@ use ratatui::{
 };
 
 use super::{
+    footer_entries,
     list::{ItemOrder, ListComponent},
     popup_area,
     prompt::footer,
     Action, AppContext, EventState, Extent, HelpEntry, Modal, ModalFlow, SelectCallback,
+    KEYS_SECTION,
 };
 use crate::theme;
 use ratatui::layout::Constraint;
@@ -57,12 +59,9 @@ impl SelectDirectoryComponent {
             .border_style(theme::BORDER_FOCUSED)
             .style(theme::POPUP_SURFACE)
             .title(title)
+            // Read off the same table the help popup shows.
             .title_bottom(footer(
-                &[
-                    ("↑/↓", "move", theme::KEY),
-                    ("Enter", "select", theme::KEY),
-                    ("Esc", "cancel", theme::KEY_SAFE),
-                ],
+                &footer_entries(&self.help(), KEYS_SECTION),
                 area.width,
             ));
 
@@ -181,14 +180,20 @@ impl Modal for SelectDirectoryComponent {
 
     fn help(&self) -> Vec<HelpEntry> {
         vec![
-            HelpEntry::Section("Keybindings"),
-            HelpEntry::Binding("j / ↓", "Move down"),
-            HelpEntry::Binding("k / ↑", "Move up"),
-            HelpEntry::Binding("g / Home", "Go to first"),
-            HelpEntry::Binding("G / End", "Go to last"),
-            HelpEntry::Binding("Enter", "Clone to selected directory"),
-            HelpEntry::Binding("Esc", "Cancel"),
-            HelpEntry::Binding("q / Ctrl+C", "Quit"),
+            HelpEntry::Section(KEYS_SECTION),
+            HelpEntry::bind("j / ↓", "Move down").hint("↑/↓", "move"),
+            HelpEntry::bind("k / ↑", "Move up"),
+            HelpEntry::bind("g / Home", "Go to first"),
+            HelpEntry::bind("G / End", "Go to last"),
+            HelpEntry::bind("Enter", "Clone to selected directory").hint("Enter", "select"),
+            HelpEntry::bind("? / F1", "Show this help")
+                .hint("?", "help")
+                .aside(),
+            HelpEntry::bind("Esc", "Cancel")
+                .hint("Esc", "cancel")
+                .safe()
+                .essential(),
+            HelpEntry::bind("q / Ctrl+C", "Quit"),
         ]
     }
 }

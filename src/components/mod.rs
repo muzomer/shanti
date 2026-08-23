@@ -11,7 +11,9 @@ mod select_directory;
 mod worktrees;
 
 pub use confirm::ConfirmComponent;
-pub use help::{worktrees_bindings, HelpComponent, HelpEntry};
+pub use help::{
+    footer_entries, worktrees_bindings, HelpComponent, HelpEntry, FILTER_SECTION, KEYS_SECTION,
+};
 pub use modal::{
     fits, gutter, place_cursor, popup_area, AppContext, ConfirmCallback, Extent, Modal, ModalFlow,
     SelectCallback, MIN_HEIGHT, MIN_WIDTH,

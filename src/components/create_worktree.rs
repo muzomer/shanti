@@ -2,9 +2,9 @@ use crate::keymap::InputMode;
 use ratatui::{layout::Rect, Frame};
 
 use super::{
-    popup_area,
-    prompt::{confirm_and_cancel, prompt_width, Prompt, PROMPT_HEIGHT},
-    Action, AppContext, EventState, Extent, HelpEntry, Modal, ModalFlow,
+    footer_entries, popup_area,
+    prompt::{prompt_width, Prompt, PROMPT_HEIGHT},
+    Action, AppContext, EventState, Extent, HelpEntry, Modal, ModalFlow, KEYS_SECTION,
 };
 use crate::theme;
 use crate::vcs::Backend;
@@ -111,7 +111,9 @@ impl CreateWorktreeComponent {
             cursor: self.character_index,
             valid,
             status,
-            footer: confirm_and_cancel("create").to_vec(),
+            // Read off the same table the help popup shows, so the prompt cannot
+            // promise one thing here and another there.
+            footer: footer_entries(&self.help(), KEYS_SECTION),
         }
         .render(frame, area);
     }
@@ -228,11 +230,17 @@ impl Modal for CreateWorktreeComponent {
 
     fn help(&self) -> Vec<HelpEntry> {
         vec![
-            HelpEntry::Section("Keybindings"),
-            HelpEntry::Binding("Enter", "Create worktree"),
-            HelpEntry::Binding("Esc", "Cancel"),
-            HelpEntry::Binding("Backspace", "Delete character"),
-            HelpEntry::Binding("Ctrl+C", "Quit"),
+            HelpEntry::Section(KEYS_SECTION),
+            HelpEntry::bind("Enter", "Create worktree").hint("Enter", "create"),
+            HelpEntry::bind("F1", "Show this help")
+                .hint("F1", "help")
+                .aside(),
+            HelpEntry::bind("Esc", "Cancel")
+                .hint("Esc", "cancel")
+                .safe()
+                .essential(),
+            HelpEntry::bind("Backspace", "Delete character"),
+            HelpEntry::bind("Ctrl+C", "Quit"),
         ]
     }
 }

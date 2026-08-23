@@ -19,7 +19,8 @@ use ratatui::{
 
 use super::list::{Focus, ItemOrder, ListComponent};
 use super::{
-    filter::FilterComponent, Action, EventState, RepositoriesComponent, MIN_HEIGHT, MIN_WIDTH,
+    filter::FilterComponent, footer_entries, prompt::footer, worktrees_bindings, Action,
+    EventState, RepositoriesComponent, FILTER_SECTION, KEYS_SECTION, MIN_HEIGHT, MIN_WIDTH,
 };
 use crate::keymap::InputMode;
 use crate::theme;
@@ -434,14 +435,28 @@ impl WorktreesComponent {
         // B: cap current to total so a stale selected_index never shows x > y in (x/y)
         let current = self.selected_index.map(|i| (i + 1).min(total)).unwrap_or(0);
 
-        let mode_indicator = match mode {
-            InputMode::Normal => Line::from(" NORMAL ").style(theme::SUCCESS_TEXT),
-            InputMode::Insert => Line::from(" INSERT ").style(theme::WARNING_TEXT),
+        let in_filter =
+            is_active && matches!(mode, InputMode::Insert) && matches!(self.focus, Focus::Filter);
+
+        // The bottom border has two zones, and this is where that is decided
+        // once: the left says *what is going on* — the input mode, or the newest
+        // thing that went wrong — and the right says *what the keys do*. They
+        // cannot collide, because the status zone is measured first and capped
+        // at half the border, and the footer is fitted into what is left.
+        let (status, status_width) = self.status_zone(mode, rect.width);
+        // Which half of the table applies is the mode's business, but only while
+        // the pane actually owns the keyboard: with a popup on top the pane is
+        // showing the keys it will offer again once the popup closes.
+        let bindings = worktrees_bindings();
+        let section = if in_filter {
+            FILTER_SECTION
+        } else {
+            KEYS_SECTION
         };
-        let bottom_left = match &self.last_error {
-            Some(err) => Line::from(format!(" {} ", err)).style(theme::DANGER_TEXT),
-            None => mode_indicator,
-        };
+        let keys = footer(
+            &footer_entries(&bindings, section),
+            rect.width.saturating_sub(status_width),
+        );
 
         // When a filter is active in Normal mode, show it in the title so it's always visible.
         let title = {
@@ -472,29 +487,17 @@ impl WorktreesComponent {
             Line::from(spans)
         };
 
-        let mut block = Block::bordered()
+        let block = Block::bordered()
             .border_type(ratatui::widgets::BorderType::Rounded)
             .border_style(theme::BORDER)
             .style(theme::CANVAS)
             .title(title)
-            .title_bottom(bottom_left);
-
-        if matches!(mode, InputMode::Normal) {
-            block = block.title_bottom(
-                Line::from(vec![
-                    Span::styled(" ? ", theme::KEY),
-                    Span::styled("help ", theme::MUTED),
-                ])
-                .right_aligned(),
-            );
-        }
+            .title_bottom(status)
+            .title_bottom(keys);
 
         // A: render the block frame first, then lay out filter + list inside its inner area
         let inner_area = block.inner(rect);
         f.render_widget(block, rect);
-
-        let in_filter =
-            is_active && matches!(mode, InputMode::Insert) && matches!(self.focus, Focus::Filter);
 
         let list_area = if in_filter {
             // Split: filter line / separator / list. `Min(1)` on the list states
@@ -578,6 +581,33 @@ impl WorktreesComponent {
                 .track_style(theme::RULE);
             f.render_stateful_widget(scrollbar, list_area, &mut scroll_state);
         }
+    }
+
+    /// The left zone of the bottom border, and how many columns it claims.
+    ///
+    /// One line, one voice: the input mode is what there is to say when nothing
+    /// has gone wrong, and an error takes the slot while it is the newer news.
+    /// `shanti-nbt.3` replaces `last_error` with a notification queue — it
+    /// inherits this zone and this cap rather than opening a third one, because
+    /// the bottom border only has two ends and the right one is spoken for.
+    ///
+    /// The cap is half the border. A message is never a reason to stop telling
+    /// the user which key gets them out of the situation it is reporting, so the
+    /// footer keeps its half and a long error is elided instead.
+    fn status_zone(&self, mode: InputMode, width: u16) -> (Line<'static>, u16) {
+        let Some(error) = &self.last_error else {
+            return match mode {
+                InputMode::Normal => (Line::from(" NORMAL ").style(theme::SUCCESS_TEXT), 8),
+                InputMode::Insert => (Line::from(" INSERT ").style(theme::WARNING_TEXT), 8),
+            };
+        };
+        // Two for the spaces that keep the text off the border's corners.
+        let text = elide(error, (width / 2).saturating_sub(2) as usize);
+        let claimed = text.chars().count() as u16 + 2;
+        (
+            Line::from(format!(" {} ", text)).style(theme::DANGER_TEXT),
+            claimed,
+        )
     }
 
     pub fn handle_action(&mut self, action: Action) -> EventState {
@@ -932,6 +962,26 @@ impl EmptyState {
                 detail("press n to create one".to_owned()),
             ],
         }
+    }
+}
+
+/// `text` cut to `budget` characters, with an ellipsis standing for what was
+/// cut.
+///
+/// Counted in characters rather than bytes, so a path with an accent in it does
+/// not slice a `char` in half. A budget of nothing yields nothing: at that point
+/// the border has no room for a message at all.
+fn elide(text: &str, budget: usize) -> String {
+    if text.chars().count() <= budget {
+        return text.to_owned();
+    }
+    match budget {
+        0 => String::new(),
+        _ => text
+            .chars()
+            .take(budget - 1)
+            .chain(std::iter::once('\u{2026}'))
+            .collect(),
     }
 }
 

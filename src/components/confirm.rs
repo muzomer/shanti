@@ -7,8 +7,8 @@ use ratatui::{
 };
 
 use super::{
-    gutter, place_cursor, popup_area, prompt::footer, Action, AppContext, ConfirmCallback,
-    EventState, Extent, HelpEntry, Modal, ModalFlow,
+    footer_entries, gutter, place_cursor, popup_area, prompt::footer, Action, AppContext,
+    ConfirmCallback, EventState, Extent, HelpEntry, Modal, ModalFlow, KEYS_SECTION,
 };
 use crate::keymap::InputMode;
 use crate::theme;
@@ -314,23 +314,13 @@ impl ConfirmComponent {
 
     /// The dialog's own footer, fitted to `width`.
     ///
-    /// The confirming key is coloured as destructive and the escape as safe, so
-    /// which of the two ends badly is legible before either word is read. Cancel
-    /// goes last because [`footer`] drops from the left: on the narrowest dialog
-    /// the way *out* is the hint worth keeping.
+    /// Read straight off [`Modal::help`], so the dialog cannot offer one word
+    /// here and another in the help popup. The confirming key is coloured as
+    /// destructive and the escape as safe, so which of the two ends badly is
+    /// legible before either word is read; cancel is marked essential, because
+    /// on the narrowest dialog the way *out* is the hint worth keeping.
     fn keybinding_hint(&self, width: u16) -> Line<'static> {
-        let confirm = match &self.gate {
-            Gate::Enter => ("Enter", "confirm"),
-            Gate::Override => ("X", "delete anyway"),
-            Gate::Phrase { .. } => ("Enter", "once typed"),
-        };
-        footer(
-            &[
-                (confirm.0, confirm.1, theme::KEY_DESTRUCTIVE),
-                ("Esc", "cancel", theme::KEY_SAFE),
-            ],
-            width,
-        )
+        footer(&footer_entries(&self.help(), KEYS_SECTION), width)
     }
 }
 
@@ -394,15 +384,22 @@ impl Modal for ConfirmComponent {
 
     fn help(&self) -> Vec<HelpEntry> {
         let confirm = match &self.gate {
-            Gate::Enter => HelpEntry::Binding("Enter", "Confirm"),
-            Gate::Override => HelpEntry::Binding("X", "Delete anyway"),
-            Gate::Phrase { .. } => HelpEntry::Binding("Enter", "Confirm, once the name is typed"),
+            Gate::Enter => HelpEntry::bind("Enter", "Confirm").hint("Enter", "confirm"),
+            Gate::Override => HelpEntry::bind("X", "Delete anyway").hint("X", "delete anyway"),
+            Gate::Phrase { .. } => HelpEntry::bind("Enter", "Confirm, once the name is typed")
+                .hint("Enter", "once typed"),
         };
         vec![
-            HelpEntry::Section("Keybindings"),
-            confirm,
-            HelpEntry::Binding("Esc", "Cancel"),
-            HelpEntry::Binding("Ctrl+C", "Quit"),
+            HelpEntry::Section(KEYS_SECTION),
+            confirm.destructive(),
+            HelpEntry::bind("F1", "Show this help")
+                .hint("F1", "help")
+                .aside(),
+            HelpEntry::bind("Esc", "Cancel")
+                .hint("Esc", "cancel")
+                .safe()
+                .essential(),
+            HelpEntry::bind("Ctrl+C", "Quit"),
         ]
     }
 }

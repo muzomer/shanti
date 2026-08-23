@@ -210,13 +210,6 @@ pub fn footer(entries: &[FooterEntry<'_>], width: u16) -> Line<'static> {
     Line::from(spans).right_aligned()
 }
 
-/// The two entries every prompt ends with: confirm, and the way out.
-pub fn confirm_and_cancel(verb: &'static str) -> [FooterEntry<'static>; 3] {
-    [
-        // First, because `footer` drops entries from the front when the width
-        // budget is tight: on a narrow prompt the hint goes before a real action.
-        ("F1", "help", theme::KEY),
-        ("Enter", verb, theme::KEY),
-        ("Esc", "cancel", theme::KEY_SAFE),
-    ]
-}
+// There is deliberately no helper here that *writes* a footer. A footer is now
+// the short form of a screen's binding table — see `help::footer_entries` — so
+// the words come from the same place the help popup reads them.

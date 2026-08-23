@@ -7,6 +7,7 @@
 
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
+    style::Style,
     text::{Line, Span},
     widgets::{
         Block, BorderType, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
@@ -15,7 +16,9 @@ use ratatui::{
 };
 
 use super::{
-    gutter, popup_area, prompt::footer, Action, AppContext, EventState, Extent, Modal, ModalFlow,
+    gutter, popup_area,
+    prompt::{footer, FooterEntry},
+    Action, AppContext, EventState, Extent, Modal, ModalFlow,
 };
 use crate::theme;
 
@@ -34,10 +37,149 @@ fn key_cell(key: &str) -> String {
     format!("{}{}", key, " ".repeat(pad))
 }
 
+/// The name of the section every binding table opens with.
+///
+/// Named rather than spelled out at each call site because the footer picks its
+/// entries *by section* — see [`footer_entries`].
+pub const KEYS_SECTION: &str = "Keybindings";
+/// The section of [`worktrees_bindings`] that applies while a filter is being
+/// typed. The space list has two input modes but only one table, so the mode
+/// chooses a section out of it.
+pub const FILTER_SECTION: &str = "Filter mode";
+
+/// One key and what it does, as the help table states it.
+///
+/// `hint` is the same binding as the always-visible footer shows it, and is
+/// `Some` only for the handful worth that space. Keeping it here — beside the
+/// long description rather than in a second list somewhere else — is what stops
+/// the footer and the help popup from ever disagreeing: a binding that changes
+/// changes in exactly one place.
+pub struct Binding {
+    keys: &'static str,
+    description: &'static str,
+    hint: Option<FooterEntry<'static>>,
+    /// How readily the footer gives this hint up as the terminal narrows. See
+    /// [`footer_entries`].
+    rank: Rank,
+}
+
+/// What a footer hint is worth when the width runs out.
+///
+/// Three levels rather than a table position, because a help table is ordered
+/// for *reading* — the action first, the way out last — and a footer sheds
+/// entries in order of *importance*. Stating the rank on the binding keeps both
+/// orders correct without either dictating the other.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Rank {
+    /// A convenience. First to go.
+    Aside,
+    /// What this screen is for.
+    Ordinary,
+    /// The way out, and the way to the full table. Last to go.
+    Essential,
+}
+
 pub enum HelpEntry {
-    Binding(&'static str, &'static str),
+    Binding(Binding),
     Section(&'static str),
     Blank,
+}
+
+impl HelpEntry {
+    /// A binding the help popup lists and the footer does not.
+    pub fn bind(keys: &'static str, description: &'static str) -> Self {
+        HelpEntry::Binding(Binding {
+            keys,
+            description,
+            hint: None,
+            rank: Rank::Ordinary,
+        })
+    }
+
+    /// Also carry this binding in the always-visible footer, in short form.
+    ///
+    /// The footer gets its own key and verb because the two are read at
+    /// different moments: `Delete (skips the question, not the guard)` is a
+    /// sentence for someone who stopped to ask, `[D] force` a reminder for
+    /// someone who did not.
+    ///
+    /// The builder methods here apply to a binding; on a section or a blank they
+    /// do nothing, because nothing else is ever chained onto those.
+    pub fn hint(mut self, key: &'static str, verb: &'static str) -> Self {
+        if let HelpEntry::Binding(binding) = &mut self {
+            binding.hint = Some((key, verb, theme::KEY));
+        }
+        self
+    }
+
+    /// Paints the hint's key in the destructive colour, so the footer doubles as
+    /// a warning: what cannot be undone is what stands out in it.
+    pub fn destructive(self) -> Self {
+        self.restyle(theme::KEY_DESTRUCTIVE)
+    }
+
+    /// Paints the hint's key as the way safely back out.
+    pub fn safe(self) -> Self {
+        self.restyle(theme::KEY_SAFE)
+    }
+
+    /// Holds this hint back to the end of the footer, where [`footer_entries`]
+    /// puts the bindings that survive longest on a narrow terminal.
+    pub fn essential(self) -> Self {
+        self.rank(Rank::Essential)
+    }
+
+    /// Marks this hint as the first the footer may drop — a convenience the
+    /// screen still works without, such as the pointer to the help popup.
+    pub fn aside(self) -> Self {
+        self.rank(Rank::Aside)
+    }
+
+    fn rank(mut self, rank: Rank) -> Self {
+        if let HelpEntry::Binding(binding) = &mut self {
+            binding.rank = rank;
+        }
+        self
+    }
+
+    fn restyle(mut self, style: Style) -> Self {
+        if let HelpEntry::Binding(Binding {
+            hint: Some(hint), ..
+        }) = &mut self
+        {
+            hint.2 = style;
+        }
+        self
+    }
+}
+
+/// The footer form of a binding table, ordered so [`footer`] sheds the least
+/// important entry first.
+///
+/// `footer` drops from the *front*, so this is importance ascending: [`Rank`]
+/// order first, and the table's own order within a rank. The last entry is
+/// therefore the one that survives a 40-column terminal.
+///
+/// `section` says which part of the table to read, because one table may cover
+/// two modes and a footer only ever describes the mode the user is in.
+pub fn footer_entries(entries: &[HelpEntry], section: &str) -> Vec<FooterEntry<'static>> {
+    let mut hints: Vec<(Rank, FooterEntry<'static>)> = Vec::new();
+    let mut inside = false;
+    for entry in entries {
+        match entry {
+            HelpEntry::Section(title) => inside = *title == section,
+            HelpEntry::Binding(binding) if inside => {
+                if let Some(hint) = binding.hint {
+                    hints.push((binding.rank, hint));
+                }
+            }
+            _ => {}
+        }
+    }
+    // Stable, so two hints of the same rank stay in the order the table gave
+    // them.
+    hints.sort_by_key(|(rank, _)| *rank);
+    hints.into_iter().map(|(_, hint)| hint).collect()
 }
 
 pub struct HelpComponent {
@@ -71,8 +213,8 @@ impl HelpComponent {
             .entries
             .iter()
             .map(|e| match e {
-                HelpEntry::Binding(key, desc) => {
-                    key_cell(key).chars().count() + desc.chars().count()
+                HelpEntry::Binding(b) => {
+                    key_cell(b.keys).chars().count() + b.description.chars().count()
                 }
                 HelpEntry::Section(title) => title.chars().count(),
                 HelpEntry::Blank => 0,
@@ -102,9 +244,9 @@ impl HelpComponent {
         self.entries
             .iter()
             .flat_map(|e| match e {
-                HelpEntry::Binding(key, desc) => vec![Line::from(vec![
-                    Span::styled(key_cell(key), theme::KEY),
-                    Span::styled(*desc, theme::SECONDARY),
+                HelpEntry::Binding(b) => vec![Line::from(vec![
+                    Span::styled(key_cell(b.keys), theme::KEY),
+                    Span::styled(b.description, theme::SECONDARY),
                 ])],
                 HelpEntry::Section(title) => vec![
                     Line::from(vec![
@@ -276,46 +418,69 @@ impl Modal for HelpComponent {
 /// half of what they need.
 pub fn worktrees_bindings() -> Vec<HelpEntry> {
     vec![
-        HelpEntry::Section("Keybindings"),
-        HelpEntry::Binding("j / ↓", "Move down"),
-        HelpEntry::Binding("k / ↑", "Move up"),
-        HelpEntry::Binding("g / Home", "Go to first"),
-        HelpEntry::Binding("G / End", "Go to last"),
-        HelpEntry::Binding("i / /", "Enter filter mode"),
-        HelpEntry::Binding("Tab", "Toggle filter / list"),
-        HelpEntry::Binding("n", "New worktree (pick repo)"),
-        HelpEntry::Binding("p", "New worktree from PR URL"),
-        HelpEntry::Binding("P", "New worktree from PR URL (auto-clone)"),
-        HelpEntry::Binding("d", "Delete with confirmation"),
-        HelpEntry::Binding("D", "Delete (skips the question, not the guard)"),
-        HelpEntry::Binding("Enter", "Print path & exit"),
-        HelpEntry::Binding("? / F1", "Show this help"),
-        HelpEntry::Binding("q / Ctrl+C", "Quit"),
+        HelpEntry::Section(KEYS_SECTION),
+        // The footer hint hangs off the `j` row alone: `j/k` names both halves
+        // of the pair, and one entry costs half the width of two.
+        HelpEntry::bind("j / ↓", "Move down").hint("j/k", "move"),
+        HelpEntry::bind("k / ↑", "Move up"),
+        HelpEntry::bind("g / Home", "Go to first"),
+        HelpEntry::bind("G / End", "Go to last"),
+        HelpEntry::bind("i / /", "Enter filter mode").hint("i", "filter"),
+        HelpEntry::bind("Tab", "Toggle filter / list"),
+        HelpEntry::bind("n", "New worktree (pick repo)").hint("n", "new"),
+        // `p` and `P` stay out of the footer: they are a whole flow rather than
+        // a key, and the footer is not the place to learn a flow exists.
+        HelpEntry::bind("p", "New worktree from PR URL"),
+        HelpEntry::bind("P", "New worktree from PR URL (auto-clone)"),
+        HelpEntry::bind("d", "Delete with confirmation")
+            .hint("d", "delete")
+            .destructive(),
+        HelpEntry::bind("D", "Delete (skips the question, not the guard)")
+            .hint("D", "force")
+            .destructive(),
+        HelpEntry::bind("Enter", "Print path & exit").hint("Enter", "path"),
+        // Both essential, and in this order, because the footer keeps its tail:
+        // on the narrowest terminal `? help` is the one entry that leads to all
+        // the others, so it is the one that outlives even `quit`.
+        HelpEntry::bind("q / Ctrl+C", "Quit")
+            .hint("q", "quit")
+            .essential(),
+        HelpEntry::bind("? / F1", "Show this help")
+            .hint("?", "help")
+            .essential(),
         HelpEntry::Blank,
-        HelpEntry::Section("Filter mode"),
-        HelpEntry::Binding("Esc", "Leave filter mode"),
-        HelpEntry::Binding("Tab", "Toggle filter / list"),
-        HelpEntry::Binding("↑ / Ctrl+K / Ctrl+P", "Move up in list"),
-        HelpEntry::Binding("↓ / Ctrl+J / Ctrl+N", "Move down in list"),
-        HelpEntry::Binding("Backspace", "Delete filter character"),
-        HelpEntry::Binding("Enter", "Print path & exit"),
-        HelpEntry::Binding("F1", "Show this help"),
-        HelpEntry::Binding("Ctrl+C", "Quit"),
+        HelpEntry::Section(FILTER_SECTION),
+        // Marked essential, so the way back to Normal mode is the hint that
+        // outlives every other on a narrow terminal — in a mode the user may
+        // have entered by accident, the exit is the promise worth keeping.
+        HelpEntry::bind("Esc", "Leave filter mode")
+            .hint("Esc", "normal")
+            .safe()
+            .essential(),
+        HelpEntry::bind("Tab", "Toggle filter / list").hint("Tab", "list"),
+        HelpEntry::bind("↑ / Ctrl+K / Ctrl+P", "Move up in list").hint("↑/↓", "move"),
+        HelpEntry::bind("↓ / Ctrl+J / Ctrl+N", "Move down in list"),
+        HelpEntry::bind("Backspace", "Delete filter character"),
+        HelpEntry::bind("Enter", "Print path & exit").hint("Enter", "path"),
+        HelpEntry::bind("F1", "Show this help")
+            .hint("F1", "help")
+            .aside(),
+        HelpEntry::bind("Ctrl+C", "Quit"),
         HelpEntry::Blank,
         // Two slots per row: the first says how the space stands to its
         // upstream, the second what its own working state is. The wording
         // mirrors `SpaceStatus::glyphs`, which is what actually draws them.
         HelpEntry::Section("Space State — upstream"),
-        HelpEntry::Binding("✔", "In sync with upstream"),
-        HelpEntry::Binding("↑ / ↓ / ↕", "Ahead / behind / diverged"),
-        HelpEntry::Binding("✘", "Upstream is gone (merged or deleted)"),
-        HelpEntry::Binding("⬆", "Never pushed"),
+        HelpEntry::bind("✔", "In sync with upstream"),
+        HelpEntry::bind("↑ / ↓ / ↕", "Ahead / behind / diverged"),
+        HelpEntry::bind("✘", "Upstream is gone (merged or deleted)"),
+        HelpEntry::bind("⬆", "Never pushed"),
         HelpEntry::Blank,
         HelpEntry::Section("Space State — local"),
-        HelpEntry::Binding("*", "Uncommitted changes (git)"),
-        HelpEntry::Binding("!", "Change has conflicts (jj)"),
-        HelpEntry::Binding("≠", "Change is divergent (jj)"),
-        HelpEntry::Binding("∅", "Working copy is empty (jj)"),
-        HelpEntry::Binding("·", "Not checked yet"),
+        HelpEntry::bind("*", "Uncommitted changes (git)"),
+        HelpEntry::bind("!", "Change has conflicts (jj)"),
+        HelpEntry::bind("≠", "Change is divergent (jj)"),
+        HelpEntry::bind("∅", "Working copy is empty (jj)"),
+        HelpEntry::bind("·", "Not checked yet"),
     ]
 }
