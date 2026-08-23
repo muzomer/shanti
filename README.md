@@ -211,7 +211,7 @@ Two further keys, `backend` (`"git"` / `"jujutsu"`) and `editor`, are accepted b
 | `SHANTI_RUN_FETCH`     | `--run-fetch`     | Fetch every repository at startup                                  |
 | `SHANTI_CONFIG`        | `--config`        | Directory holding `config.toml` (the flag names the file itself)   |
 | `SHANTI_JJ_BIN`        | —                 | Path to the `jj` binary, when it is not on `PATH`                  |
-| `SHANTI_DATA`          | —                 | Directory for shanti's log file                                    |
+| `SHANTI_DATA`          | —                 | Directory for shanti's log file (default `~/.local/state/shanti`)  |
 | `SHANTI_LOGLEVEL`      | —                 | Log level, e.g. `debug` (`RUST_LOG` takes precedence)              |
 | `GITHUB_TOKEN`         | —                 | Read-only token for the GitHub PR flow                             |
 
