@@ -15,9 +15,9 @@ use crate::{
     cli,
     components::{
         resume_pr_flow, spaces_of, worktrees_bindings, Action, Activity, AppContext,
-        ConfirmComponent, EventState, HelpComponent, Modal, ModalFlow, PrCommand, PrRequests,
-        PrStep, PrWorktreeComponent, RepositoriesComponent, RepositoriesModal, SpaceEntry,
-        WorktreesComponent,
+        ConfirmComponent, EventState, HelpComponent, Modal, ModalFlow, Notifications, PrCommand,
+        PrRequests, PrStep, PrWorktreeComponent, RepositoriesComponent, RepositoriesModal,
+        SpaceEntry, WorktreesComponent,
     },
     github,
     hooks::{self, HookOutcome, HookPlan, HookReport},
@@ -36,6 +36,14 @@ use crate::{
 pub struct App {
     worktrees_component: WorktreesComponent,
     repositories_component: RepositoriesComponent,
+    /// What the app has to tell the user right now, if anything.
+    ///
+    /// Owned here rather than by the list because a notification is the *app's*
+    /// news — a failed clone, a job that could not start — and only some of it
+    /// is about spaces. The list is handed the current message to draw and owns
+    /// none of it, which is what stops a second `last_error` from growing on
+    /// some other component.
+    notifications: Notifications,
     modals: Vec<Box<dyn Modal>>,
     args: cli::Args,
     /// How the PR flow looks a pull request up. Held here, not reached for
@@ -144,6 +152,7 @@ impl App {
         Self {
             worktrees_component: WorktreesComponent::new(Vec::new()),
             repositories_component: RepositoriesComponent::new(Vec::new()),
+            notifications: Notifications::default(),
             modals: Vec::new(),
             args,
             pr_fetcher,
@@ -312,8 +321,10 @@ impl App {
             .backend_for(&space)
             .map(|backend| backend.repo().path.clone())
         else {
-            self.worktrees_component.last_error =
-                Some(format!("no open repository owns {}", space.path.display()));
+            // An error, not a warning: the fetch the user asked for did not
+            // happen, and nothing will make it happen later.
+            self.notifications
+                .error(format!("no open repository owns {}", space.path.display()));
             return;
         };
 
@@ -389,7 +400,8 @@ impl App {
             // same line a failed delete uses: a job that could not run is news
             // for the user, not for the log file.
             Err(error) => {
-                self.worktrees_component.last_error = Some(format!("{kind} failed: {error:#}"));
+                self.notifications
+                    .error(format!("{kind} failed: {error:#}"));
             }
             // The refreshed refs are on disk; the list is what has to catch up.
             // Only *this* repository's rows can have changed, so it re-reads
@@ -436,8 +448,12 @@ impl App {
 
         self.repositories_component.add_repositories(found);
         self.worktrees_component.extend(entries);
-        let previous_error = self.worktrees_component.last_error.take();
-        self.worktrees_component.last_error = listing_failure_notice(&failed).or(previous_error);
+        // Only spoken when something actually failed. The old code had to take
+        // the previous message and put it back so a clean batch would not wipe
+        // it; a notification that nobody raises is simply not raised.
+        if let Some(notice) = listing_failure_notice(&failed) {
+            self.notifications.error(notice);
+        }
 
         if self.args.run_fetch {
             for path in fetch {
@@ -509,6 +525,9 @@ impl App {
     pub fn on_tick(&mut self) {
         // The spinner's only clock; see `WorktreesComponent::tick`.
         self.worktrees_component.tick();
+        // ...and the notification's. Both ride the same 100 ms tick rather than
+        // owning timers of their own.
+        self.notifications.expire();
     }
 
     /// Points the PR flow at a different lookup than the live GitHub one.
@@ -530,17 +549,25 @@ impl App {
         let Self {
             worktrees_component,
             repositories_component,
+            notifications,
             modals,
             args,
             pending_hooks,
             ..
         } = self;
 
-        worktrees_component.draw(frame, full_area, mode, modals.is_empty());
+        worktrees_component.draw(
+            frame,
+            full_area,
+            mode,
+            modals.is_empty(),
+            notifications.current(),
+        );
 
         let mut ctx = AppContext {
             worktrees: worktrees_component,
             repositories: repositories_component,
+            notify: notifications,
             args,
             // Drawing creates nothing, so nothing is ever left here by a draw;
             // the field is part of the context, not of this call.
@@ -616,6 +643,7 @@ impl App {
         let Self {
             worktrees_component,
             repositories_component,
+            notifications,
             modals,
             args,
             pending_hooks,
@@ -626,6 +654,7 @@ impl App {
             let mut ctx = AppContext {
                 worktrees: worktrees_component,
                 repositories: repositories_component,
+                notify: notifications,
                 args,
                 pending_hooks,
             };
@@ -691,8 +720,7 @@ impl App {
             // it would spin for a job that does not exist.
             None => {
                 self.modals.pop();
-                self.worktrees_component.last_error =
-                    Some("no background worker is running".to_string());
+                self.notifications.error("no background worker is running");
             }
         }
     }
@@ -707,6 +735,7 @@ impl App {
         let Self {
             worktrees_component,
             repositories_component,
+            notifications,
             args,
             pending_hooks,
             ..
@@ -715,6 +744,7 @@ impl App {
             let mut ctx = AppContext {
                 worktrees: worktrees_component,
                 repositories: repositories_component,
+                notify: notifications,
                 args,
                 pending_hooks,
             };
@@ -873,18 +903,28 @@ impl App {
                 warn!(command, %status, "post-create hook output:\n{output}");
             }
         }
-        self.worktrees_component.last_error = Some(format!("{summary}; see the log for details"));
+        // An error rather than a warning, even though the space survived: the
+        // setup the user configured did not run, and the space is not in the
+        // state they asked for until they act on it.
+        self.notifications
+            .error(format!("{summary}; see the log for details"));
     }
 
     fn delete_selected_worktree(&mut self) {
         let Self {
             worktrees_component,
             repositories_component,
+            notifications,
             ..
         } = self;
         match worktrees_component.delete_selected_space(repositories_component) {
-            Ok(()) => worktrees_component.last_error = None,
-            Err(e) => worktrees_component.last_error = Some(format!("{:#}", e)),
+            // A delete that worked needs no words — the row is gone, which is
+            // the whole message — but it does take down a previous failure that
+            // is now untrue.
+            Ok(()) => notifications.clear(),
+            // The row is deliberately left in place on failure, so the message
+            // is the only thing saying why it is still there.
+            Err(e) => notifications.error(format!("{:#}", e)),
         }
     }
 }
@@ -932,8 +972,12 @@ fn confirm_delete(space: &Space, risk: DeletionRisk) -> ConfirmComponent {
         space.path.display().to_string(),
         Box::new(|ctx| {
             match ctx.worktrees.delete_selected_space(ctx.repositories) {
-                Ok(()) => ctx.worktrees.last_error = None,
-                Err(e) => ctx.worktrees.last_error = Some(format!("{:#}", e)),
+                // The vanished row says "done"; the message only has to stop a
+                // previous failure from outliving the fix.
+                Ok(()) => ctx.notify.clear(),
+                // A failed delete leaves the row where it was on purpose, so
+                // this is the only thing that explains why it is still there.
+                Err(e) => ctx.notify.error(format!("{:#}", e)),
             }
             ModalFlow::Close
         }),
@@ -1135,11 +1179,10 @@ mod tests {
         app.handle_job(next_result(&results));
 
         let shown = app
-            .worktrees_component
-            .last_error
-            .as_deref()
+            .notifications
+            .current()
             .expect("the failure is on screen");
-        assert!(shown.contains("no such remote"), "{shown}");
+        assert!(shown.text.contains("no such remote"), "{}", shown.text);
     }
 
     /// The staleness rule: the user moved on, so the answer is no longer wanted
@@ -1159,7 +1202,7 @@ mod tests {
         app.handle_job(result);
 
         assert!(
-            app.worktrees_component.last_error.is_none(),
+            app.notifications.current().is_none(),
             "a stale result was applied"
         );
     }
@@ -1194,7 +1237,7 @@ mod tests {
         // And the re-read itself lands without disturbing anything else.
         app.handle_job(next_result(&results));
         assert!(app.refreshes.is_empty() && app.outstanding.is_empty());
-        assert!(app.worktrees_component.last_error.is_none());
+        assert!(app.notifications.current().is_none());
     }
 
     /// `r` is one job per repository, so the list is repaired repository by

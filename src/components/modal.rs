@@ -15,7 +15,8 @@ use ratatui::{
 use crate::{cli, hooks::HookPlan, keymap::InputMode, vcs};
 
 use super::{
-    worktrees::SpaceEntry, Action, EventState, HelpEntry, RepositoriesComponent, WorktreesComponent,
+    notify::Notifications, worktrees::SpaceEntry, Action, EventState, HelpEntry,
+    RepositoriesComponent, WorktreesComponent,
 };
 
 /// The state that outlives any single popup, lent to a modal while it runs.
@@ -25,6 +26,11 @@ use super::{
 pub struct AppContext<'a> {
     pub worktrees: &'a mut WorktreesComponent,
     pub repositories: &'a mut RepositoriesComponent,
+    /// Where a modal says what happened, graded by how loud it should be.
+    ///
+    /// Lent rather than owned by any component: a modal closes the moment it is
+    /// done, and its news has to outlive it by the few seconds it takes to read.
+    pub notify: &'a mut Notifications,
     pub args: &'a cli::Args,
     /// Where a created space leaves the setup work it cannot do itself.
     ///
@@ -378,7 +384,7 @@ mod tests {
 
             let mut spaces = WorktreesComponent::new(Vec::new());
             frame_at(size, |frame, full| {
-                spaces.draw(frame, full, InputMode::Insert, true);
+                spaces.draw(frame, full, InputMode::Insert, true, None);
             });
         }
     }

@@ -203,8 +203,10 @@ impl Modal for CreateWorktreeComponent {
             Action::Select => {
                 if !self.new_worktree_name.is_empty() {
                     match ctx.create_space(&self.new_worktree_name) {
-                        Ok(()) => ctx.worktrees.last_error = None,
-                        Err(e) => ctx.worktrees.last_error = Some(format!("{:#}", e)),
+                        // The new row is the success message; all that is left
+                        // to do is retire a failure the user has since fixed.
+                        Ok(()) => ctx.notify.clear(),
+                        Err(e) => ctx.notify.error(format!("{:#}", e)),
                     }
                 }
                 ModalFlow::Close

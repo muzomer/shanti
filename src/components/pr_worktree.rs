@@ -134,7 +134,7 @@ pub fn resume_pr_flow(
             after_lookup(ctx, url, *info, flow)
         }
         (Stage::Clone { .. }, Err(error)) => {
-            ctx.worktrees.last_error = Some(format!("{:#}", error));
+            ctx.notify.error(format!("{:#}", error));
             ModalFlow::Close
         }
         (Stage::Clone { url, info }, Ok(Completion::Cloned { path })) => {
@@ -145,7 +145,8 @@ pub fn resume_pr_flow(
         // It is still said out loud: a flow that stopped without a word would
         // read as shanti having forgotten the request.
         (_, Ok(other)) => {
-            ctx.worktrees.last_error = Some(format!("unexpected background result: {other:?}"));
+            ctx.notify
+                .error(format!("unexpected background result: {other:?}"));
             ModalFlow::Close
         }
     }
@@ -240,7 +241,8 @@ fn after_clone(
             ctx.repositories.select_repository_by_name(&url.repo);
         }
         Err(e) => {
-            ctx.worktrees.last_error = Some(format!("Cloned but failed to load repo: {:#}", e));
+            ctx.notify
+                .error(format!("Cloned but failed to load repo: {:#}", e));
             return ModalFlow::Close;
         }
     }
@@ -544,6 +546,13 @@ impl Modal for PrWorktreeComponent {
     }
 }
 
+/// Said in both places a space is created from a merged PR — the name prompt,
+/// which shows it in the warning style, and the notification raised after an
+/// automatic creation, which is a `Severity::Warning`. One string so the two
+/// cannot drift apart, and no "Warning:" prefix in it: both places already say
+/// that with colour.
+const MERGED_BRANCH_WARNING: &str = "PR is merged, branch may be deleted on remote";
+
 /// Final step of the PR flow: select the existing worktree, create one outright
 /// (auto mode), or hand over to the branch-name prompt.
 fn open_worktree_for_pr(ctx: &mut AppContext, pr_info: github::PrInfo, auto: bool) -> ModalFlow {
@@ -558,18 +567,25 @@ fn open_worktree_for_pr(ctx: &mut AppContext, pr_info: github::PrInfo, auto: boo
 
     if ctx.worktrees.select_worktree_by_branch(&branch) {
         if pr_info.is_merged {
-            ctx.worktrees.last_error =
-                Some("PR is merged — existing worktree selected".to_string());
+            // Informational, and this is the message the issue names: nothing
+            // failed, nothing is owed. The user asked for a PR's space and got
+            // one — the news is only that the PR has already landed.
+            ctx.notify.info("PR is merged — existing worktree selected");
         }
         return ModalFlow::Close;
     }
 
-    let merged_warning = || "Warning: PR is merged, branch may be deleted on remote".to_string();
-
     if auto {
         match ctx.create_space(&branch) {
-            Ok(()) => ctx.worktrees.last_error = pr_info.is_merged.then(merged_warning),
-            Err(e) => ctx.worktrees.last_error = Some(format!("{:#}", e)),
+            // A warning, not an error: the space exists and is usable, but it
+            // was based on a branch the remote may already have deleted, so it
+            // is not the space the user was picturing. The word "Warning:" is
+            // gone from the text — the severity now says that in colour, and
+            // repeating it cost characters the half-width status zone does not
+            // have.
+            Ok(()) if pr_info.is_merged => ctx.notify.warn(MERGED_BRANCH_WARNING),
+            Ok(()) => ctx.notify.clear(),
+            Err(e) => ctx.notify.error(format!("{:#}", e)),
         }
         return ModalFlow::Close;
     }
@@ -595,7 +611,7 @@ fn open_worktree_for_pr(ctx: &mut AppContext, pr_info: github::PrInfo, auto: boo
         backend,
         colocated,
         branch,
-        pr_info.is_merged.then(merged_warning),
+        pr_info.is_merged.then(|| MERGED_BRANCH_WARNING.to_string()),
     );
     prompt.base_branch_hint = base_branch_hint;
     ModalFlow::Replace(Box::new(prompt))
@@ -608,7 +624,7 @@ mod tests {
     use ratatui::{backend::TestBackend, Terminal};
 
     use super::*;
-    use crate::components::{RepositoriesComponent, WorktreesComponent};
+    use crate::components::{Notifications, RepositoriesComponent, WorktreesComponent};
     use crate::jobs::JobKind;
 
     fn a_flow(requests: &PrRequests) -> Flow {
@@ -651,6 +667,7 @@ mod tests {
                 let mut ctx = AppContext {
                     worktrees: &mut worktrees,
                     repositories: &mut repositories,
+                    notify: &mut Notifications::default(),
                     args: &args,
                     pending_hooks: &mut Vec::new(),
                 };
@@ -715,6 +732,7 @@ mod tests {
         let mut ctx = AppContext {
             worktrees: &mut worktrees,
             repositories: &mut repositories,
+            notify: &mut Notifications::default(),
             args: &args,
             pending_hooks: &mut Vec::new(),
         };

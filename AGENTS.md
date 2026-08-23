@@ -69,6 +69,7 @@ src/
     select_directory.rs          # popup to pick one of the repos dirs (used when cloning)
     confirm.rs                   # generic yes/no dialog, deferring the "yes" to a callback
     help.rs                      # context-sensitive keybinding help popup; HelpEntry
+    notify.rs                    # notifications: severity, expiry, and the single message slot
     list.rs                      # generic list widget shared by the list views
     filter.rs                    # filter/search input state
   vcs/

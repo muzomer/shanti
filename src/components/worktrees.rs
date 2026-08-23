@@ -19,8 +19,9 @@ use ratatui::{
 
 use super::list::{Focus, ItemOrder, ListComponent};
 use super::{
-    filter::FilterComponent, footer_entries, prompt::footer, worktrees_bindings, Action,
-    EventState, RepositoriesComponent, FILTER_SECTION, KEYS_SECTION, MIN_HEIGHT, MIN_WIDTH,
+    filter::FilterComponent, footer_entries, notify::Notification, prompt::footer,
+    worktrees_bindings, Action, EventState, RepositoriesComponent, FILTER_SECTION, KEYS_SECTION,
+    MIN_HEIGHT, MIN_WIDTH,
 };
 use crate::keymap::InputMode;
 use crate::theme;
@@ -333,7 +334,6 @@ pub struct WorktreesComponent {
     /// "your configuration found nothing" apart from "your repositories have no
     /// spaces yet".
     repos_seen: usize,
-    pub last_error: Option<String>,
 }
 
 impl WorktreesComponent {
@@ -354,7 +354,6 @@ impl WorktreesComponent {
             frame: 0,
             scanned: false,
             repos_seen: 0,
-            last_error: None,
         }
     }
 
@@ -496,7 +495,14 @@ impl WorktreesComponent {
         self.state.select(Some(index));
     }
 
-    pub fn draw(&mut self, f: &mut Frame, rect: Rect, mode: InputMode, is_active: bool) {
+    pub fn draw(
+        &mut self,
+        f: &mut Frame,
+        rect: Rect,
+        mode: InputMode,
+        is_active: bool,
+        notice: Option<&Notification>,
+    ) {
         // Below the supported floor there is no honest layout left: the border
         // alone would eat most of a row and a truncated space name is worse than
         // no space name. One sentence, and the popups above stay closed
@@ -523,11 +529,12 @@ impl WorktreesComponent {
             is_active && matches!(mode, InputMode::Insert) && matches!(self.focus, Focus::Filter);
 
         // The bottom border has two zones, and this is where that is decided
-        // once: the left says *what is going on* — the input mode, or the newest
-        // thing that went wrong — and the right says *what the keys do*. They
-        // cannot collide, because the status zone is measured first and capped
-        // at half the border, and the footer is fitted into what is left.
-        let (status, status_width) = self.status_zone(mode, rect.width);
+        // once: the left says *what is going on* — the input mode, and the
+        // newest thing shanti has to say — and the right says *what the keys
+        // do*. They cannot collide, because the status zone is measured first
+        // and capped at half the border, and the footer is fitted into what is
+        // left.
+        let (status, status_width) = status_zone(mode, rect.width, notice);
         // Which half of the table applies is the mode's business, but only while
         // the pane actually owns the keyboard: with a popup on top the pane is
         // showing the keys it will offer again once the popup closes.
@@ -666,33 +673,6 @@ impl WorktreesComponent {
                 .track_style(theme::RULE);
             f.render_stateful_widget(scrollbar, list_area, &mut scroll_state);
         }
-    }
-
-    /// The left zone of the bottom border, and how many columns it claims.
-    ///
-    /// One line, one voice: the input mode is what there is to say when nothing
-    /// has gone wrong, and an error takes the slot while it is the newer news.
-    /// `shanti-nbt.3` replaces `last_error` with a notification queue — it
-    /// inherits this zone and this cap rather than opening a third one, because
-    /// the bottom border only has two ends and the right one is spoken for.
-    ///
-    /// The cap is half the border. A message is never a reason to stop telling
-    /// the user which key gets them out of the situation it is reporting, so the
-    /// footer keeps its half and a long error is elided instead.
-    fn status_zone(&self, mode: InputMode, width: u16) -> (Line<'static>, u16) {
-        let Some(error) = &self.last_error else {
-            return match mode {
-                InputMode::Normal => (Line::from(" NORMAL ").style(theme::SUCCESS_TEXT), 8),
-                InputMode::Insert => (Line::from(" INSERT ").style(theme::WARNING_TEXT), 8),
-            };
-        };
-        // Two for the spaces that keep the text off the border's corners.
-        let text = elide(error, (width / 2).saturating_sub(2) as usize);
-        let claimed = text.chars().count() as u16 + 2;
-        (
-            Line::from(format!(" {} ", text)).style(theme::DANGER_TEXT),
-            claimed,
-        )
     }
 
     pub fn handle_action(&mut self, action: Action) -> EventState {
@@ -1070,6 +1050,65 @@ fn elide(text: &str, budget: usize) -> String {
     }
 }
 
+/// The left zone of the bottom border, and how many columns it claims.
+///
+/// The border has exactly two ends, and `shanti-hq6.3` spent them both: the
+/// right one is the keybinding footer, this is the left one. A notification
+/// therefore *shares* this zone with the mode indicator rather than taking a
+/// row of its own — a row would have to come out of the list, which is the
+/// point of the screen, and the issue's own guideline is that `hq6.3` settles
+/// the arrangement and this must honour it.
+///
+/// Sharing, not replacing: the mode indicator is drawn first and always, so a
+/// message no longer costs the user their mode feedback the way `last_error`
+/// did. The message follows it after a divider, in its severity's colour.
+///
+/// The cap is half the border, and it applies to the pair. A message is never a
+/// reason to stop telling the user which key gets them out of the situation it
+/// is reporting, so the footer keeps its half and a long message is elided.
+/// When the terminal is so narrow that the half cannot hold a readable
+/// fragment, the mode indicator stands alone: three characters and an ellipsis
+/// tell the user nothing while still costing them the mode. The message is on a
+/// clock anyway, and every one of them is in the log as well.
+fn status_zone(mode: InputMode, width: u16, notice: Option<&Notification>) -> (Line<'static>, u16) {
+    let (label, style) = match mode {
+        InputMode::Normal => (" NORMAL ", theme::SUCCESS_TEXT),
+        InputMode::Insert => (" INSERT ", theme::WARNING_TEXT),
+    };
+    let indicator = Span::styled(label, style);
+    let mode_width = label.chars().count() as u16;
+
+    let Some(notice) = notice else {
+        return (Line::from(indicator), mode_width);
+    };
+
+    // The mode indicator, the divider and its space, and the space that keeps
+    // the text off the border's corner.
+    let chrome = mode_width + 3;
+    let budget = (width / 2).saturating_sub(chrome) as usize;
+    if budget < MIN_MESSAGE {
+        return (Line::from(indicator), mode_width);
+    }
+
+    let text = elide(&notice.text, budget);
+    let claimed = chrome + text.chars().count() as u16;
+    (
+        Line::from(vec![
+            indicator,
+            Span::styled("\u{2502} ", theme::RULE),
+            Span::styled(format!("{text} "), notice.severity.style()),
+        ]),
+        claimed,
+    )
+}
+
+/// The shortest message worth drawing: sixteen columns, about two words and an
+/// ellipsis. At the 40-column floor half the border leaves nine, and
+/// `could no…` tells the user nothing they can act on while still spending
+/// the space the divider and the message cost. Below the threshold the mode
+/// indicator simply stands alone; the message is in the log either way.
+const MIN_MESSAGE: usize = 16;
+
 /// The whole interface, when the terminal is below [`MIN_WIDTH`] × [`MIN_HEIGHT`].
 ///
 /// No border and no block: at this size chrome is the problem, not the solution.
@@ -1101,6 +1140,7 @@ fn draw_too_small(f: &mut Frame, rect: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::components::notify::{Notifications, Severity};
     use crate::vcs::{Backend, RepoId, SpaceStatus};
 
     /// A row for the space `name` of a repository rooted at `/repos/<repo>`.
@@ -1628,5 +1668,87 @@ mod tests {
             vec!["alpha / one", "alpha / three", "beta / two"],
             "a repository was listed twice"
         );
+    }
+
+    // --- The status zone ----------------------------------------------------
+
+    fn notice(severity: Severity, text: &str) -> Notification {
+        let mut notifications = Notifications::default();
+        match severity {
+            Severity::Info => notifications.info(text),
+            Severity::Warning => notifications.warn(text),
+            Severity::Error => notifications.error(text),
+        }
+        notifications.current().expect("just raised").clone()
+    }
+
+    /// The promise `last_error` broke: saying something must not cost the user
+    /// their mode feedback.
+    #[test]
+    fn a_message_never_takes_the_mode_indicators_place() {
+        let notice = notice(Severity::Error, "Hook failed for feature-two");
+        let (line, _) = status_zone(InputMode::Insert, 120, Some(&notice));
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+
+        assert!(
+            text.contains("INSERT"),
+            "the mode was displaced by:\n{text}"
+        );
+        assert!(
+            text.contains("Hook failed"),
+            "the message is missing:\n{text}"
+        );
+    }
+
+    /// The half-border cap `shanti-hq6.3` set: whatever is said, the footer
+    /// keeps its own half of the border to say which keys get the user out.
+    #[test]
+    fn the_zone_never_takes_more_than_half_the_border() {
+        let notice = notice(
+            Severity::Error,
+            "Hook failed for feature-two: exit status 3 — the worktree was created and is intact",
+        );
+        for width in [40, 60, 80, 140, 200] {
+            let (line, claimed) = status_zone(InputMode::Normal, width, Some(&notice));
+            assert!(
+                claimed <= width / 2,
+                "the status zone claimed {claimed} of {width} columns"
+            );
+            assert_eq!(
+                claimed as usize,
+                line.spans
+                    .iter()
+                    .map(|s| s.content.chars().count())
+                    .sum::<usize>(),
+                "the zone claimed a width it does not draw at {width} columns"
+            );
+        }
+    }
+
+    /// The bug in one line: informational news must not be dressed as a failure.
+    /// Each severity gets its own token, and none of them is chosen here.
+    #[test]
+    fn each_severity_is_drawn_in_its_own_colour() {
+        let colour = |severity| {
+            let notice = notice(severity, "something happened");
+            let (line, _) = status_zone(InputMode::Normal, 140, Some(&notice));
+            line.spans.last().expect("the message span").style.fg
+        };
+
+        assert_eq!(colour(Severity::Info), Some(theme::INFO));
+        assert_eq!(colour(Severity::Warning), Some(theme::WARNING));
+        assert_eq!(colour(Severity::Error), Some(theme::DANGER));
+    }
+
+    /// At the size floor half a border cannot hold a sentence, and a word
+    /// followed by an ellipsis is not worth hiding the mode for.
+    #[test]
+    fn a_terminal_too_narrow_for_a_message_keeps_the_mode_instead() {
+        let notice = notice(Severity::Error, "could not delete the worktree");
+        let (line, claimed) = status_zone(InputMode::Normal, MIN_WIDTH, Some(&notice));
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+
+        assert_eq!(text, " NORMAL ");
+        assert_eq!(claimed, 8);
     }
 }

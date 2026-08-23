@@ -121,6 +121,10 @@ pub const KEY_SAFE: Style = Style::new().fg(SUCCESS).add_modifier(Modifier::BOLD
 
 /// A success message.
 pub const SUCCESS_TEXT: Style = Style::new().fg(SUCCESS).add_modifier(Modifier::BOLD);
+/// An informational message: news, not a problem. The only one of the four
+/// that is not bold — an announcement that shouts reads as a failure, which is
+/// the confusion `shanti-nbt.3` exists to end.
+pub const INFO_TEXT: Style = Style::new().fg(INFO);
 /// A warning message.
 pub const WARNING_TEXT: Style = Style::new().fg(WARNING).add_modifier(Modifier::BOLD);
 /// An error message.

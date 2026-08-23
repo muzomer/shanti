@@ -1528,6 +1528,32 @@ fn a_merged_pr_on_an_existing_worktree_reports_why_nothing_was_created() {
     );
 }
 
+/// The regression `last_error` was: being told something cost the user their
+/// mode feedback, because one slot on the border was doing both jobs. The two
+/// share that slot now, and the footer still keeps its own half.
+#[test]
+fn a_message_shares_the_border_with_the_mode_and_the_footer() {
+    let mut f = Fixture::new();
+    f.stub_pr_branch("feature-one", true);
+
+    f.press_char('p');
+    submit_pr(&mut f, "https://github.com/acme/alpha/pull/7");
+
+    let bottom = bottom_row(&f.screen());
+    assert!(
+        bottom.contains("merged"),
+        "the message left the border:\n{bottom}"
+    );
+    assert!(
+        bottom.contains(" NORMAL "),
+        "the message displaced the mode indicator:\n{bottom}"
+    );
+    assert!(
+        bottom.contains("[?] help"),
+        "the message ate into the keybinding footer:\n{bottom}"
+    );
+}
+
 #[test]
 fn a_pr_on_an_unknown_repo_offers_to_clone_it() {
     let mut f = Fixture::new();
