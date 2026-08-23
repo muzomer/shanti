@@ -22,13 +22,17 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::TestBackend, Terminal};
 use shanti::app::App;
 use shanti::cli::Args;
+use shanti::events::AppEvent;
 use shanti::github::PrInfo;
+use shanti::jobs::Worker;
 use tempfile::{tempdir, TempDir};
 
 const CONSUMED: &str = "Consumed";
@@ -70,6 +74,12 @@ enum Mode {
 
 struct Fixture {
     app: App,
+    /// Where the worker reports its results.
+    ///
+    /// Held for the life of the fixture, not just for the boot: the pool sends
+    /// on the other end of this channel, and dropping it would make every later
+    /// result vanish rather than arrive.
+    results: Receiver<AppEvent>,
     repos_dir: TempDir,
     worktrees_dir: TempDir,
     /// Second repos dir, only populated by [`Fixture::with_two_repos_dirs`].
@@ -92,6 +102,47 @@ impl Fixture {
     /// makes the clone flow ask which directory to clone into.
     fn with_two_repos_dirs() -> Self {
         Self::build(true)
+    }
+
+    /// Two repos dirs of two repositories each, with the startup scan still
+    /// running — one result per dir, neither of them applied yet.
+    ///
+    /// The pool runs on one thread here (see [`booting`]), so the roots land in
+    /// the order they were configured: the first `deliver_one` is always the
+    /// first repos dir, and the half-filled list always holds its two rows.
+    fn streaming() -> Self {
+        let repos_dir = tempdir().expect("could not create repos dir");
+        let extra = tempdir().expect("could not create second repos dir");
+        let worktrees_dir = tempdir().expect("could not create worktrees dir");
+
+        for (dir, repos) in [
+            (repos_dir.path(), ["alpha", "beta"]),
+            (extra.path(), ["gamma", "delta"]),
+        ] {
+            for repo in repos {
+                init_repo(dir, repo);
+                add_worktree(dir, repo, worktrees_dir.path(), &format!("feature-{repo}"));
+            }
+        }
+
+        let args = Args::for_dirs(
+            worktrees_dir.path().display().to_string(),
+            vec![
+                repos_dir.path().display().to_string(),
+                extra.path().display().to_string(),
+            ],
+        );
+        let (app, results) = booting(&args);
+
+        Self {
+            app,
+            results,
+            repos_dir,
+            worktrees_dir,
+            _extra_repos_dir: Some(extra),
+            _remote_dir: None,
+            args,
+        }
     }
 
     fn build(two_dirs: bool) -> Self {
@@ -118,15 +169,11 @@ impl Fixture {
 
         let args = Args::for_dirs(worktrees_dir.path().display().to_string(), repos_dirs);
 
-        // The default lookup fails loudly: a PR test that forgot to stub sees an
-        // error message rather than silently reaching out to github.com.
-        let app = App::with_args(
-            args.clone(),
-            Arc::new(|_| Err(color_eyre::eyre::eyre!("no PR lookup was stubbed"))),
-        );
+        let (app, results) = boot(&args);
 
         Self {
             app,
+            results,
             repos_dir,
             worktrees_dir,
             _extra_repos_dir: extra,
@@ -141,10 +188,22 @@ impl Fixture {
     /// test that changes a repository has to ask for a fresh reading — exactly
     /// as restarting shanti would.
     fn reload(&mut self) {
-        self.app = App::with_args(
-            self.args.clone(),
-            Arc::new(|_| Err(color_eyre::eyre::eyre!("no PR lookup was stubbed"))),
-        );
+        let (app, results) = boot(&self.args);
+        self.app = app;
+        self.results = results;
+    }
+
+    /// Applies the next background result, whatever it is.
+    ///
+    /// What a single turn of the real loop does: one result in, one redraw. The
+    /// streaming tests use it to stop *between* scan results, where the list is
+    /// half filled and still has to be usable.
+    fn deliver_one(&mut self) {
+        match self.results.recv_timeout(Duration::from_secs(10)) {
+            Ok(AppEvent::Job(result)) => self.app.handle_job(result),
+            Ok(other) => panic!("expected a job result, got {other:?}"),
+            Err(error) => panic!("no background result arrived: {error}"),
+        }
     }
 
     /// Gives `branch` an upstream that already holds its commits.
@@ -299,6 +358,40 @@ impl Fixture {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Builds an app and runs its startup scan to completion.
+///
+/// Startup is asynchronous: `App::with_args` reads nothing from disk and the
+/// list is filled by scan jobs. A test that wants a populated list therefore has
+/// to pump results the way `run_app` does — which is also what keeps every test
+/// below on the streaming path rather than on a synchronous one nobody ships.
+fn boot(args: &Args) -> (App, Receiver<AppEvent>) {
+    let (mut app, results) = booting(args);
+    while app.is_scanning() {
+        match results.recv_timeout(Duration::from_secs(10)) {
+            Ok(AppEvent::Job(result)) => app.handle_job(result),
+            Ok(other) => panic!("expected a job result, got {other:?}"),
+            Err(error) => panic!("the startup scan never finished: {error}"),
+        }
+    }
+    (app, results)
+}
+
+/// The same app with its scan still in flight — the state the user sees first.
+fn booting(args: &Args) -> (App, Receiver<AppEvent>) {
+    // The default lookup fails loudly: a PR test that forgot to stub sees an
+    // error message rather than silently reaching out to github.com.
+    let mut app = App::with_args(
+        args.clone(),
+        Arc::new(|_| Err(color_eyre::eyre::eyre!("no PR lookup was stubbed"))),
+    );
+    let (sender, results) = mpsc::channel();
+    // One thread, so the scan of the first repos dir finishes before the second
+    // one starts: a test that stops half way through a stream then knows which
+    // half it has.
+    app.attach_worker(Worker::with_threads(sender, 1));
+    (app, results)
+}
 
 fn ch(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
@@ -1347,4 +1440,109 @@ fn escape_unwinds_every_reachable_depth_back_to_the_worktree_list() {
             "{name}: cancelling must not touch the filesystem"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Streaming discovery (shanti-hml.3)
+// ---------------------------------------------------------------------------
+
+/// The whole point of the issue: there is a UI before there is a repository.
+#[test]
+fn the_first_frame_is_drawn_before_any_repository_is_found() {
+    let mut f = Fixture::streaming();
+
+    assert!(f.app.is_scanning(), "the scan should still be running");
+    let screen = f.screen();
+    assert!(screen.contains("Worktrees (0/0)"), "{screen}");
+    assert!(
+        screen.contains("scanning"),
+        "an empty list must say why it is empty: {screen}"
+    );
+    f.assert_at_worktree_list();
+}
+
+/// The spinner counts what has arrived, and stops when the last root lands.
+#[test]
+fn the_spinner_reports_progress_and_then_goes_away() {
+    let mut f = Fixture::streaming();
+
+    f.deliver_one();
+    assert!(f.app.is_scanning(), "one root of two is not the whole scan");
+    let screen = f.screen();
+    assert!(
+        screen.contains("scanning\u{2026} 2 repos"),
+        "the spinner should count the repositories found so far: {screen}"
+    );
+
+    f.deliver_one();
+    assert!(!f.app.is_scanning());
+    assert!(
+        !f.screen().contains("scanning"),
+        "the spinner outlived the scan"
+    );
+}
+
+/// The requirement most easily dropped: the list is navigable while the scan is
+/// still running, over whatever has arrived so far.
+#[test]
+fn the_list_can_be_navigated_during_a_scan() {
+    let mut f = Fixture::streaming();
+    f.deliver_one();
+    assert!(f.app.is_scanning(), "this must be tested mid-scan");
+
+    assert!(
+        f.screen().contains("Worktrees (1/2)"),
+        "the first root's rows should already be selectable"
+    );
+    assert_eq!(f.press_char('j'), CONSUMED);
+    assert!(f.screen().contains("Worktrees (2/2)"), "j did not move");
+    assert_eq!(f.press_char('k'), CONSUMED);
+    assert!(f.screen().contains("Worktrees (1/2)"), "k did not move");
+
+    // And selecting one mid-scan hands back its path, as it would at rest.
+    assert_eq!(f.press(key(KeyCode::Enter)), EXIT);
+    let selected = f.app.selected_path.clone().expect("a path was selected");
+    assert!(
+        selected.ends_with("feature-alpha"),
+        "the row under the cursor was not the one handed back: {selected}"
+    );
+}
+
+/// Filtering works mid-scan, and a batch landing underneath must not throw the
+/// filter away — the regression `set_spaces` exists to prevent.
+#[test]
+fn a_filter_typed_during_a_scan_survives_the_next_batch() {
+    let mut f = Fixture::streaming();
+    f.deliver_one();
+
+    f.press_char('i');
+    f.type_str("feature-alpha");
+    let filtered = f.screen();
+    assert!(
+        filtered.contains("Worktrees (1/1)"),
+        "the filter should narrow the arrived rows: {filtered}"
+    );
+
+    f.deliver_one();
+    assert!(!f.app.is_scanning(), "both roots should have landed");
+
+    let after = f.screen();
+    assert!(
+        after.contains("Worktrees (1/1)"),
+        "the filter was lost when the second batch arrived: {after}"
+    );
+    assert!(
+        after.contains("feature-alpha"),
+        "the typed text is gone from the filter line: {after}"
+    );
+    assert_eq!(f.mode(), Mode::Insert, "focus left the filter");
+
+    // Clearing it brings every row of both roots back.
+    for _ in 0.."feature-alpha".len() {
+        f.press(key(KeyCode::Backspace));
+    }
+    assert!(
+        f.screen().contains("Worktrees (1/4)"),
+        "every row of both roots should be back"
+    );
 }

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use color_eyre::eyre::{self, eyre};
@@ -22,7 +23,29 @@ use super::{
 };
 use crate::keymap::InputMode;
 use crate::theme;
-use crate::vcs::Space;
+use crate::vcs::{Backend, RepoId, Space};
+
+/// The frames of the scan spinner, advanced one per app tick (10fps).
+const SPINNER: [&str; 10] = [
+    "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}",
+    "\u{2807}", "\u{280f}",
+];
+
+/// Identifies the row the user is on, so a rebuild can put them back on it.
+///
+/// The path and the backend, never the name: a colocated repository can hold a
+/// git worktree and a jj workspace of the same name, and only the pair tells
+/// those two rows apart.
+type RowKey = (Backend, PathBuf);
+
+/// A repository scan in flight, as the list shows it.
+struct ScanProgress {
+    /// Repositories the scan has reported so far.
+    found: usize,
+    /// Which spinner frame is on screen. Advanced by [`WorktreesComponent::tick`]
+    /// from the app's existing clock — the list owns no timer of its own.
+    frame: usize,
+}
 
 /// A space, plus the name of the repository it belongs to.
 ///
@@ -116,6 +139,8 @@ pub struct WorktreesComponent {
     state: ListState,
     focus: Focus,
     selected_index: Option<usize>,
+    /// `Some` while repositories are still being discovered.
+    scan: Option<ScanProgress>,
     pub last_error: Option<String>,
 }
 
@@ -128,8 +153,89 @@ impl WorktreesComponent {
             focus: Focus::Filter,
             selected_index,
             spaces,
+            scan: None,
             last_error: None,
         }
+    }
+
+    /// Replaces every row, keeping the user where they were.
+    ///
+    /// The filter text, the cursor in it and the focused pane are all left
+    /// alone, because none of them is about the *data*: rebuilding the whole
+    /// component instead — which is what this replaces — silently threw away a
+    /// filter the user had typed, and could do so at any moment, since the
+    /// rebuild is triggered by a background job rather than by a keystroke.
+    pub fn set_spaces(&mut self, spaces: Vec<SpaceEntry>) {
+        let anchor = self.selected_key();
+        self.spaces = spaces;
+        self.restore_selection(anchor);
+    }
+
+    /// Adds the rows of a batch of repositories, replacing whatever those same
+    /// repositories had contributed before.
+    ///
+    /// Per repository rather than a plain append so the operation is
+    /// idempotent: two repos dirs may overlap, and the same repository arriving
+    /// from a second scan must update its rows, not double them.
+    pub fn extend(&mut self, entries: Vec<SpaceEntry>) {
+        let anchor = self.selected_key();
+        let arriving: HashSet<RepoId> = entries.iter().map(|e| e.space.repo.clone()).collect();
+        self.spaces.retain(|e| !arriving.contains(&e.space.repo));
+        self.spaces.extend(entries);
+        self.restore_selection(anchor);
+    }
+
+    /// Says a scan is running and how many repositories it has found; `None`
+    /// means it is over and the spinner goes away.
+    pub fn set_scan(&mut self, found: Option<usize>) {
+        match (found, &mut self.scan) {
+            (Some(found), Some(scan)) => scan.found = found,
+            (Some(found), slot) => *slot = Some(ScanProgress { found, frame: 0 }),
+            (None, slot) => *slot = None,
+        }
+    }
+
+    /// Advances anything time-dependent by one frame of the app's clock.
+    ///
+    /// Driven by the tick the event loop already emits: a second timer would be
+    /// a second thing to stop, and a spinner that outlived its scan.
+    pub fn tick(&mut self) {
+        if let Some(scan) = &mut self.scan {
+            scan.frame = scan.frame.wrapping_add(1);
+        }
+    }
+
+    /// The row the user is on, as something a rebuilt list can be searched for.
+    fn selected_key(&mut self) -> Option<RowKey> {
+        let index = self.selected_index?;
+        self.filtered_items()
+            .get(index)
+            .map(|entry| (entry.space.backend, entry.space.path.clone()))
+    }
+
+    /// Puts the selection back on `anchor` if that row survived the rebuild.
+    ///
+    /// If it did not, the *position* is kept instead (clamped): rows arriving
+    /// underneath the user must never scroll them somewhere else, and a row
+    /// that was deleted leaves the cursor where the list continues.
+    fn restore_selection(&mut self, anchor: Option<RowKey>) {
+        let rows = self.filtered_items().len();
+        if rows == 0 {
+            self.selected_index = None;
+            self.state.select(None);
+            return;
+        }
+
+        let mut index = None;
+        if let Some(key) = anchor {
+            index = self
+                .filtered_items()
+                .iter()
+                .position(|entry| (entry.space.backend, entry.space.path.clone()) == key);
+        }
+        let index = index.unwrap_or_else(|| self.selected_index.unwrap_or(0).min(rows - 1));
+        self.selected_index = Some(index);
+        self.state.select(Some(index));
     }
 
     pub fn draw(&mut self, f: &mut Frame, rect: Rect, mode: InputMode, is_active: bool) {
@@ -179,6 +285,19 @@ impl WorktreesComponent {
                 spans.push(Span::styled(
                     format!("/{} ", self.filter.value),
                     theme::MUTED,
+                ));
+            }
+            // The one thing on screen that says shanti is still working. The
+            // count is what makes it more than decoration: a scan that has found
+            // nothing for ten seconds looks different from one that is streaming.
+            if let Some(scan) = &self.scan {
+                spans.push(Span::styled(
+                    format!("{} ", SPINNER[scan.frame % SPINNER.len()]),
+                    theme::TITLE,
+                ));
+                spans.push(Span::styled(
+                    format!("scanning\u{2026} {} repos ", scan.found),
+                    theme::SECONDARY,
                 ));
             }
             Line::from(spans)
@@ -248,6 +367,16 @@ impl WorktreesComponent {
             .highlight_style(theme::SELECTED_ROW)
             .direction(ratatui::widgets::ListDirection::TopToBottom);
         StatefulWidget::render(list, list_area, f.buffer_mut(), &mut self.state);
+
+        // An empty pane is exactly what a hung program looks like, and during a
+        // scan the pane *is* empty for a moment. One line says which of the two
+        // this is.
+        if total == 0 {
+            let [line] = Layout::vertical([Constraint::Length(1.min(list_area.height))])
+                .flex(ratatui::layout::Flex::Center)
+                .areas(list_area);
+            f.render_widget(empty_notice(self.scan.is_some(), &self.filter.value), line);
+        }
 
         // Only when there are rows off-screen: a full-height track beside a list
         // that already fits is chrome that says nothing, and on a short terminal
@@ -517,6 +646,23 @@ impl ListComponent<SpaceEntry> for WorktreesComponent {
         self.selected_index = Some(index);
     }
 }
+/// What stands in for the list when there is nothing to show.
+///
+/// Deliberately lower case and unbordered: it is a state of the pane, not a
+/// message the user has to dismiss.
+fn empty_notice(scanning: bool, filter: &str) -> Paragraph<'static> {
+    let text = if scanning {
+        "scanning for repositories\u{2026}"
+    } else if filter.is_empty() {
+        "no spaces yet"
+    } else {
+        "nothing matches the filter"
+    };
+    Paragraph::new(Line::from(Span::styled(text, theme::MUTED)))
+        .centered()
+        .wrap(Wrap { trim: true })
+}
+
 /// The whole interface, when the terminal is below [`MIN_WIDTH`] × [`MIN_HEIGHT`].
 ///
 /// No border and no block: at this size chrome is the problem, not the solution.
@@ -656,5 +802,96 @@ mod tests {
         ];
         let mut component = WorktreesComponent::new(rows);
         assert_eq!(type_filter(&mut component, "shanti"), vec!["shanti"]);
+    }
+
+    /// The wart this replaces: rebuilding the component threw the filter away.
+    /// A background job may rebuild at any moment, so it must cost the user
+    /// nothing they typed.
+    #[test]
+    fn replacing_the_rows_keeps_the_filter_and_the_selected_row() {
+        let mut component = WorktreesComponent::new(vec![
+            entry("alpha", Backend::Git, "feature-one", "/spaces/alpha/one"),
+            entry("beta", Backend::Git, "feature-two", "/spaces/beta/two"),
+        ]);
+        type_filter(&mut component, "feature");
+        component.handle_action(Action::MoveDown);
+        let before = component.selected_space().expect("a row is selected").path;
+
+        component.set_spaces(vec![
+            entry("alpha", Backend::Git, "feature-one", "/spaces/alpha/one"),
+            entry("beta", Backend::Git, "feature-two", "/spaces/beta/two"),
+            entry(
+                "gamma",
+                Backend::Git,
+                "feature-three",
+                "/spaces/gamma/three",
+            ),
+        ]);
+
+        assert_eq!(component.filter.value, "feature", "the filter was lost");
+        assert_eq!(
+            component.filtered_items().len(),
+            3,
+            "the new row is missing"
+        );
+        assert_eq!(
+            component.selected_space().expect("still selected").path,
+            before,
+            "the user was moved off their row"
+        );
+    }
+
+    /// A row that is gone leaves the cursor where the list continues, rather
+    /// than jumping back to the top.
+    #[test]
+    fn a_row_that_vanished_leaves_the_cursor_in_place() {
+        let mut component = WorktreesComponent::new(vec![
+            entry("alpha", Backend::Git, "one", "/spaces/alpha/one"),
+            entry("beta", Backend::Git, "two", "/spaces/beta/two"),
+            entry("gamma", Backend::Git, "three", "/spaces/gamma/three"),
+        ]);
+        component.handle_action(Action::MoveDown);
+
+        component.set_spaces(vec![
+            entry("alpha", Backend::Git, "one", "/spaces/alpha/one"),
+            entry("gamma", Backend::Git, "three", "/spaces/gamma/three"),
+        ]);
+
+        assert_eq!(
+            component.selected_space().expect("still selected").name,
+            "three",
+            "the cursor should hold its position, not reset"
+        );
+    }
+
+    /// Streaming: a batch adds its repositories' rows and replaces only those.
+    #[test]
+    fn a_batch_replaces_the_rows_of_its_own_repositories_only() {
+        let mut component = WorktreesComponent::new(vec![entry(
+            "alpha",
+            Backend::Git,
+            "one",
+            "/spaces/alpha/one",
+        )]);
+
+        component.extend(vec![entry("beta", Backend::Git, "two", "/spaces/beta/two")]);
+        assert_eq!(component.filtered_items().len(), 2);
+
+        // The same repository arriving again — overlapping repos dirs, or a
+        // second scan — updates its rows instead of doubling them.
+        component.extend(vec![
+            entry("alpha", Backend::Git, "one", "/spaces/alpha/one"),
+            entry("alpha", Backend::Git, "three", "/spaces/alpha/three"),
+        ]);
+        let labels: Vec<String> = component
+            .filtered_items()
+            .iter()
+            .map(|entry| entry.label())
+            .collect();
+        assert_eq!(
+            labels,
+            vec!["alpha / one", "alpha / three", "beta / two"],
+            "a repository was listed twice"
+        );
     }
 }

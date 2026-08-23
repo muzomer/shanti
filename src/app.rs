@@ -1,7 +1,4 @@
-use std::{
-    collections::HashSet,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashSet, path::PathBuf};
 
 use color_eyre::eyre::Result;
 use crossterm::event::KeyEvent;
@@ -14,14 +11,14 @@ use tracing::debug;
 use crate::{
     cli,
     components::{
-        worktrees_bindings, Action, AppContext, ConfirmComponent, EventState, HelpComponent, Modal,
-        ModalFlow, PrWorktreeComponent, RepositoriesComponent, RepositoriesModal,
-        WorktreesComponent,
+        spaces_of, worktrees_bindings, Action, AppContext, ConfirmComponent, EventState,
+        HelpComponent, Modal, ModalFlow, PrWorktreeComponent, RepositoriesComponent,
+        RepositoriesModal, SpaceEntry, WorktreesComponent,
     },
     github,
     jobs::{Completion, Job, JobId, JobResult, Worker},
     keymap::{self, InputMode},
-    vcs::{self, Consequence, DeletionRisk, Discovered, Space},
+    vcs::{BoxedVcs, Consequence, DeletionRisk, RepoId, Space},
 };
 
 /// The worktree list plus a stack of modals on top of it.
@@ -52,12 +49,23 @@ pub struct App {
     /// since changed, a PR lookup for a popup they closed — is dropped without
     /// touching state, so a slow answer can never overwrite a newer one.
     outstanding: HashSet<JobId>,
-    /// Repositories to fetch as soon as there is a worker to do it with.
+    /// The repos dirs still to be walked.
     ///
-    /// `--run-fetch` used to happen inside `open_backends`, before the first
-    /// frame: shanti showed nothing at all until every remote had answered. The
-    /// list is built from disk instead, and these run behind it.
-    deferred_fetches: Vec<PathBuf>,
+    /// Held rather than walked in the constructor: discovery is a job now, so
+    /// these are the *inputs* to that job and nothing reads the disk until there
+    /// is a worker to read it on.
+    scan_roots: Vec<PathBuf>,
+    /// Kept out of the walk — the worktrees dir, so the spaces living inside it
+    /// are not rediscovered as repositories in their own right.
+    excluded: Vec<PathBuf>,
+    /// The scan jobs still running; a subset of `outstanding`.
+    ///
+    /// Tracked apart from `outstanding` because the spinner is about the *scan*
+    /// specifically: a fetch still running behind a finished scan must not keep the
+    /// list saying "scanning".
+    scans: HashSet<JobId>,
+    /// How many repositories the current scan has reported — the spinner's count.
+    scan_found: usize,
     /// A job changed what is on disk, so the list is due a re-read.
     spaces_stale: bool,
 }
@@ -80,26 +88,17 @@ impl App {
     /// test can point an `App` at its own temp directories — and at its own PR
     /// lookup — without disturbing any other test running beside it.
     pub fn with_args(args: cli::Args, pr_fetcher: github::PrFetcher) -> App {
-        let found = Self::discover_repositories(&args);
-        // Opening never fetches any more: the network half of `--run-fetch` is a
-        // job, so the first frame is drawn from what is already on disk and the
-        // remotes catch up behind it.
-        let deferred_fetches = if args.run_fetch {
-            found.iter().map(|found| found.path.clone()).collect()
-        } else {
-            Vec::new()
-        };
-        let repositories = RepositoriesComponent::new(vcs::open_backends(&found, false));
-
-        // Spaces are collected through the `Vcs` trait, so a jj repository shows
-        // up here on exactly the same terms as a git one.
-        let (spaces, failed) = repositories.collect_spaces();
-        let mut worktrees_component = WorktreesComponent::new(spaces);
-        worktrees_component.last_error = listing_failure_notice(&failed);
+        // Nothing here touches the disk. Walking the repos dirs, opening every
+        // repository and reading every space all used to happen right here,
+        // before the first frame — which is why a large repos dir opened onto a
+        // blank terminal. All of it is a job now: this builds an empty list, and
+        // the loop draws it immediately.
+        let excluded = vec![PathBuf::from(&args.worktrees_dir)];
+        let scan_roots = args.repos_dirs.iter().map(PathBuf::from).collect();
 
         Self {
-            worktrees_component,
-            repositories_component: repositories,
+            worktrees_component: WorktreesComponent::new(Vec::new()),
+            repositories_component: RepositoriesComponent::new(Vec::new()),
             modals: Vec::new(),
             args,
             pr_fetcher,
@@ -107,7 +106,10 @@ impl App {
             selected_path: None,
             jobs: None,
             outstanding: HashSet::new(),
-            deferred_fetches,
+            scan_roots,
+            excluded,
+            scans: HashSet::new(),
+            scan_found: 0,
             spaces_stale: false,
         }
     }
@@ -120,15 +122,65 @@ impl App {
     /// simply never submits anything.
     pub fn attach_worker(&mut self, worker: Worker) {
         self.jobs = Some(worker);
-        for path in std::mem::take(&mut self.deferred_fetches) {
-            self.submit(Job::FetchRemotes { path });
-        }
+        self.start_scan();
     }
 
     /// Drops the pool, cancelling everything queued.
     pub fn detach_worker(&mut self) {
         self.outstanding.clear();
+        self.scans.clear();
+        self.update_scan_indicator();
         self.jobs = None;
+    }
+
+    /// Whether repositories are still being discovered.
+    ///
+    /// Public because it is the one thing a caller outside the loop — a test
+    /// above all — cannot otherwise tell: while this is true an empty list means
+    /// "not found yet", and once it is false it means "there are none".
+    pub fn is_scanning(&self) -> bool {
+        !self.scans.is_empty()
+    }
+
+    /// Starts discovery: one [`Job::ScanRepositories`] per configured repos dir.
+    ///
+    /// **One job per root, not one job for the whole list.** A job produces
+    /// exactly one result, so the roots are what decide how finely the list can
+    /// stream: with two repos dirs the faster one fills the list while the
+    /// slower is still being walked, instead of both landing together at the
+    /// end. Going finer — a job per repository — would be worse on both counts:
+    /// the walk would have to happen on the render thread to know what to
+    /// submit, and `open_backends`' rayon fan-out (which wants the whole
+    /// machine) would be chopped up into a four-thread pool sized for jobs that
+    /// wait on a network.
+    ///
+    /// Idempotent: any scan already running is abandoned and the list emptied
+    /// first, so a second call can neither leave behind repositories that are no
+    /// longer there nor show anything twice.
+    fn start_scan(&mut self) {
+        for id in std::mem::take(&mut self.scans) {
+            self.abandon(id);
+        }
+        self.repositories_component.replace_backends(Vec::new());
+        self.worktrees_component.set_spaces(Vec::new());
+        self.scan_found = 0;
+
+        for root in std::mem::take(&mut self.scan_roots) {
+            debug!("listing repositories in: {}", root.display());
+            let job = Job::ScanRepositories {
+                roots: vec![root.clone()],
+                excluded: self.excluded.clone(),
+            };
+            match self.submit(job) {
+                Some(id) => {
+                    self.scans.insert(id);
+                }
+                // No worker, so the root was not walked: keep it, and attaching
+                // one later still scans it.
+                None => self.scan_roots.push(root),
+            }
+        }
+        self.update_scan_indicator();
     }
 
     /// Queues `job` and remembers that its answer is wanted.
@@ -145,8 +197,10 @@ impl App {
     ///
     /// Cancelling in the pool as well as forgetting the id is not redundant —
     /// forgetting protects the state, cancelling saves the work.
-    #[allow(dead_code)]
     fn abandon(&mut self, id: JobId) {
+        // A scan nobody is waiting for is also one the spinner must stop
+        // counting, or an abandoned root would leave it turning forever.
+        self.scans.remove(&id);
         if self.outstanding.remove(&id) {
             if let Some(worker) = &self.jobs {
                 worker.cancel(id);
@@ -161,6 +215,10 @@ impl App {
             debug!(id = ?result.id, %kind, "ignoring the result of an abandoned job");
             return;
         }
+        // A scan is over whether it found repositories or failed trying, so this
+        // is taken here rather than in the arms below: a spinner left running by
+        // an error would be a spinner that never stops.
+        self.scans.remove(&result.id);
 
         match result.outcome {
             // Where a background failure becomes visible. It is deliberately the
@@ -174,10 +232,51 @@ impl App {
                 debug!(repo = %path.display(), "fetched");
                 self.spaces_stale = true;
             }
+            // A root finished walking. Its repositories go straight in, so the
+            // list grows under the user while the other roots are still out.
+            Ok(Completion::Repositories(found)) => self.repositories_found(found),
             Ok(completion) => {
                 debug!(?completion, %kind, "no consumer for this result yet");
             }
         }
+        self.update_scan_indicator();
+    }
+
+    /// Takes in one scan result: the repositories, their spaces, and — under
+    /// `--run-fetch` — a fetch queued behind each of them.
+    fn repositories_found(&mut self, found: Vec<BoxedVcs>) {
+        // The rows are built from the batch rather than by re-listing everything
+        // already on screen: a hundred repositories arriving in ten batches
+        // would otherwise cost ten full re-reads of every space's status.
+        let (entries, failed): (Vec<SpaceEntry>, Vec<String>) = spaces_of(&found);
+
+        // One fetch per *repository*, not per backend: a colocated repository is
+        // open twice and has one set of remotes.
+        let mut seen: HashSet<RepoId> = HashSet::new();
+        let fetch: Vec<PathBuf> = found
+            .iter()
+            .filter(|backend| seen.insert(backend.repo().id.clone()))
+            .map(|backend| backend.repo().path.clone())
+            .collect();
+        self.scan_found += seen.len();
+
+        self.repositories_component.add_repositories(found);
+        self.worktrees_component.extend(entries);
+        let previous_error = self.worktrees_component.last_error.take();
+        self.worktrees_component.last_error = listing_failure_notice(&failed).or(previous_error);
+
+        if self.args.run_fetch {
+            for path in fetch {
+                self.submit(Job::FetchRemotes { path });
+            }
+        }
+    }
+
+    /// Keeps the spinner in step with the scan: shown with its count while any
+    /// root is still being walked, gone the moment the last one lands.
+    fn update_scan_indicator(&mut self) {
+        let found = self.is_scanning().then_some(self.scan_found);
+        self.worktrees_component.set_scan(found);
     }
 
     /// Applies whatever background work has landed since the last tick.
@@ -187,47 +286,27 @@ impl App {
     /// same list two hundred times, each rebuild costing every repository a
     /// status read.
     pub fn on_tick(&mut self) {
+        // The spinner's only clock; see `WorktreesComponent::tick`.
+        self.worktrees_component.tick();
         if self.spaces_stale && self.outstanding.is_empty() {
             self.spaces_stale = false;
             self.reload_spaces();
         }
     }
 
-    /// Re-reads every repository's spaces and rebuilds the list.
+    /// Re-reads every repository's spaces and hands the new rows to the list.
     ///
-    /// The selected row is carried across by name, because the rebuild is
-    /// something the *app* decided to do and the user's place in the list is not
-    /// shanti's to lose. The filter text is not carried, which is the one thing
-    /// this cannot do without a way to hand new rows to an existing
-    /// `WorktreesComponent` — see the note in shanti-hml.2.
+    /// The rebuild is something the *app* decided to do, in the middle of a
+    /// session the user is driving, so it costs them nothing: the filter they
+    /// typed, the pane they had focused and the row they were on all survive it
+    /// — see [`WorktreesComponent::set_spaces`].
     fn reload_spaces(&mut self) {
-        let selected = self.worktrees_component.selected_space().map(|s| s.name);
         let previous_error = self.worktrees_component.last_error.take();
-
         let (spaces, failed) = self.repositories_component.collect_spaces();
-        self.worktrees_component = WorktreesComponent::new(spaces);
+        self.worktrees_component.set_spaces(spaces);
         // A listing failure is the newer news; anything else already on screen
         // (a fetch that failed, say) is still true and stays.
         self.worktrees_component.last_error = listing_failure_notice(&failed).or(previous_error);
-
-        if let Some(name) = selected {
-            self.worktrees_component.select_worktree_by_branch(&name);
-        }
-    }
-
-    /// Walk every configured repos dir once, skipping the worktrees dir.
-    ///
-    /// The exclusion is what stops a worktrees dir nested inside a repos dir
-    /// from having its spaces rediscovered as repositories in their own right.
-    fn discover_repositories(args: &cli::Args) -> Vec<Discovered> {
-        let excluded = vec![PathBuf::from(&args.worktrees_dir)];
-        args.repos_dirs
-            .iter()
-            .flat_map(|dir| {
-                debug!("Listing repositories in: {}", dir);
-                vcs::discover(Path::new(dir), &excluded)
-            })
-            .collect()
     }
 
     /// Points the PR flow at a different lookup than the live GitHub one.
@@ -556,10 +635,8 @@ mod tests {
         }
     }
 
-    /// `--run-fetch` must no longer hold the first frame hostage: the app is
-    /// built from disk, and the network work is queued behind it.
-    #[test]
-    fn run_fetch_becomes_a_job_per_repository() {
+    /// Two git repositories in a fresh repos dir, plus the args pointing at it.
+    fn two_repositories() -> (tempfile::TempDir, cli::Args) {
         let repos = tempfile::tempdir().expect("a temp dir");
         for name in ["one", "two"] {
             let path = repos.path().join(name);
@@ -570,22 +647,102 @@ mod tests {
                 .status()
                 .expect("git init");
         }
-
-        let mut args = cli::Args::for_dirs(
+        let args = cli::Args::for_dirs(
             repos.path().join("spaces").display().to_string(),
             vec![repos.path().display().to_string()],
         );
+        (repos, args)
+    }
+
+    /// The freeze this issue is about: construction reads nothing, so the first
+    /// frame does not wait on a repos dir of any size.
+    #[test]
+    fn construction_walks_no_repos_dir() {
+        let (_repos, args) = two_repositories();
+        let fetcher: github::PrFetcher = std::sync::Arc::new(|_| eyre::bail!("unused"));
+        let app = App::with_args(args, fetcher);
+
+        assert!(
+            !app.is_scanning(),
+            "nothing can be scanning without a worker"
+        );
+        assert_eq!(app.scan_roots.len(), 1, "the root was not kept for later");
+        assert_eq!(app.scan_found, 0, "a repository was opened before the loop");
+    }
+
+    /// Discovery is one job per repos dir, and it only starts once there is
+    /// somewhere to run it.
+    #[test]
+    fn attaching_a_worker_starts_one_scan_per_root() {
+        let (repos, mut args) = two_repositories();
+        args.repos_dirs
+            .push(repos.path().join("elsewhere").display().to_string());
+
+        let fetcher: github::PrFetcher = std::sync::Arc::new(|_| eyre::bail!("unused"));
+        let mut app = App::with_args(args, fetcher);
+        let (sender, _results) = mpsc::channel();
+        app.attach_worker(Worker::with_threads(sender, 1));
+
+        assert_eq!(app.scans.len(), 2, "one scan per configured repos dir");
+        assert!(app.is_scanning());
+    }
+
+    /// `--run-fetch` still becomes one fetch per repository — it now hangs off
+    /// the scan result rather than off the constructor, so the network work is
+    /// behind the list rather than in front of the first frame.
+    #[test]
+    fn run_fetch_becomes_a_job_per_repository() {
+        let (_repos, mut args) = two_repositories();
         args.run_fetch = true;
 
         let fetcher: github::PrFetcher = std::sync::Arc::new(|_| eyre::bail!("unused"));
         let mut app = App::with_args(args, fetcher);
-        // Nothing has been fetched yet, and nothing is waiting on a network.
-        assert_eq!(app.deferred_fetches.len(), 2);
-
-        let (sender, _results) = mpsc::channel();
+        let (sender, results) = mpsc::channel();
         app.attach_worker(Worker::with_threads(sender, 1));
+        // Only the scan so far: no remote has been talked to.
+        assert_eq!(app.outstanding.len(), 1);
+
+        app.handle_job(next_result(&results));
+
+        assert!(!app.is_scanning(), "the scan never finished");
         assert_eq!(app.outstanding.len(), 2, "the fetches were never queued");
-        assert!(app.deferred_fetches.is_empty());
+    }
+
+    /// The list fills from the scan, and stops saying "scanning" when it lands.
+    #[test]
+    fn the_list_is_populated_by_the_scan() {
+        let (_repos, args) = two_repositories();
+        let fetcher: github::PrFetcher = std::sync::Arc::new(|_| eyre::bail!("unused"));
+        let mut app = App::with_args(args, fetcher);
+        let (sender, results) = mpsc::channel();
+        app.attach_worker(Worker::with_threads(sender, 1));
+
+        assert!(app.is_scanning(), "the spinner must be running");
+        app.handle_job(next_result(&results));
+
+        assert!(!app.is_scanning());
+        assert_eq!(app.scan_found, 2, "both repositories should have arrived");
+    }
+
+    /// The staleness rule, applied to the scan: the answer to a question the app
+    /// stopped asking must not put repositories on screen.
+    #[test]
+    fn a_scan_the_app_stopped_waiting_for_puts_nothing_on_screen() {
+        let (_repos, args) = two_repositories();
+        let fetcher: github::PrFetcher = std::sync::Arc::new(|_| eyre::bail!("unused"));
+        let mut app = App::with_args(args, fetcher);
+        let (sender, results) = mpsc::channel();
+        app.attach_worker(Worker::with_threads(sender, 1));
+
+        // Abandoned only after the result was produced — the case cancelling
+        // cannot help with, and the one a second scan would create.
+        let result = next_result(&results);
+        let id = result.id;
+        app.abandon(id);
+        app.handle_job(result);
+
+        assert_eq!(app.scan_found, 0, "a stale scan result was applied");
+        assert!(!app.is_scanning());
     }
 
     /// A job the app is still waiting for reports its failure where the user

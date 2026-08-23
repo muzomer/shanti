@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
     Config, Matcher, Utf32Str,
@@ -223,6 +225,79 @@ impl RepositoriesComponent {
         self.repositories.push(repo);
     }
 
+    /// Swaps the whole backend set, keeping the user on the repository they had
+    /// selected if it is still there.
+    ///
+    /// This is what a scan result needs and `add_repository` cannot do: the set
+    /// is *replaced*, so restarting a scan cannot leave repositories behind that
+    /// are no longer on disk.
+    pub fn replace_backends(&mut self, repositories: Vec<BoxedVcs>) {
+        let anchor = self.selected_id();
+        self.repositories = repositories;
+        self.restore_selection(anchor);
+    }
+
+    /// Drops every backend open on `id`, and says how many that was.
+    ///
+    /// Every backend, not one: a colocated repository is open twice under the
+    /// same id, and leaving half of it behind would leave the picker offering a
+    /// repository that can no longer list its spaces.
+    pub fn remove(&mut self, id: &RepoId) -> usize {
+        let anchor = self.selected_id();
+        let before = self.repositories.len();
+        self.repositories.retain(|backend| &backend.repo().id != id);
+        self.restore_selection(anchor);
+        before - self.repositories.len()
+    }
+
+    /// Merges a batch of freshly opened backends into the list.
+    ///
+    /// A repository already in the list is replaced rather than added beside
+    /// itself, so overlapping repos dirs — or a second scan — cannot show the
+    /// same repository twice.
+    pub fn add_repositories(&mut self, repositories: Vec<BoxedVcs>) {
+        let arriving: HashSet<RepoId> = repositories
+            .iter()
+            .map(|backend| backend.repo().id.clone())
+            .collect();
+        for id in &arriving {
+            self.remove(id);
+        }
+        let anchor = self.selected_id();
+        self.repositories.extend(repositories);
+        self.restore_selection(anchor);
+    }
+
+    /// The selected repository's id, as something a rebuilt list can be
+    /// searched for.
+    fn selected_id(&mut self) -> Option<RepoId> {
+        let index = self.selected_index?;
+        self.filtered_items()
+            .get(index)
+            .map(|backend| backend.repo().id.clone())
+    }
+
+    /// Puts the selection back on `anchor`, or keeps the position it had.
+    fn restore_selection(&mut self, anchor: Option<RepoId>) {
+        let rows = self.filtered_items().len();
+        if rows == 0 {
+            self.selected_index = None;
+            self.state.select(None);
+            return;
+        }
+
+        let mut index = None;
+        if let Some(id) = anchor {
+            index = self
+                .filtered_items()
+                .iter()
+                .position(|backend| backend.repo().id == id);
+        }
+        let index = index.unwrap_or_else(|| self.selected_index.unwrap_or(0).min(rows - 1));
+        self.selected_index = Some(index);
+        self.state.select(Some(index));
+    }
+
     pub fn selected_repository(&mut self) -> Option<&dyn Vcs> {
         let index = self.selected_index?;
         // Copy the borrow out of the temporary Vec: its elements already point
@@ -297,25 +372,34 @@ impl RepositoriesComponent {
     /// with no special case of its own. Each space carries the backend that owns
     /// it, which is what keeps the merged list actionable.
     pub fn collect_spaces(&self) -> (Vec<SpaceEntry>, Vec<String>) {
-        let mut spaces = Vec::new();
-        let mut failed = Vec::new();
-        for backend in &self.repositories {
-            let repo_name = &backend.repo().name;
-            let repo_path = &backend.repo().path;
-            match backend.spaces() {
-                Ok(found) => spaces.extend(found.into_iter().map(|space| SpaceEntry {
-                    repo_name: repo_name.clone(),
-                    repo_path: repo_path.clone(),
-                    space,
-                })),
-                Err(error) => {
-                    error!(repo = %repo_name, %error, "could not list the spaces");
-                    failed.push(repo_name.clone());
-                }
+        spaces_of(&self.repositories)
+    }
+}
+
+/// The same listing, over backends nobody owns yet.
+///
+/// Free-standing so a scan result can be turned into rows *before* it is handed
+/// to the list — which is what keeps a streaming update to the cost of the batch
+/// that arrived, rather than re-listing every repository already on screen.
+pub fn spaces_of(backends: &[BoxedVcs]) -> (Vec<SpaceEntry>, Vec<String>) {
+    let mut spaces = Vec::new();
+    let mut failed = Vec::new();
+    for backend in backends {
+        let repo_name = &backend.repo().name;
+        let repo_path = &backend.repo().path;
+        match backend.spaces() {
+            Ok(found) => spaces.extend(found.into_iter().map(|space| SpaceEntry {
+                repo_name: repo_name.clone(),
+                repo_path: repo_path.clone(),
+                space,
+            })),
+            Err(error) => {
+                error!(repo = %repo_name, %error, "could not list the spaces");
+                failed.push(repo_name.clone());
             }
         }
-        (spaces, failed)
     }
+    (spaces, failed)
 }
 
 fn repos_keybinding_hint(width: u16) -> Line<'static> {
@@ -668,5 +752,55 @@ mod tests {
             colocated().backends_of(&RepoId::from_path("/repos/shanti")),
             vec![Backend::Jj, Backend::Git]
         );
+    }
+
+    /// A scan result swaps the whole set; anything no longer on disk goes with it.
+    #[test]
+    fn replacing_the_backends_swaps_the_whole_set() {
+        let mut repos = colocated();
+        repos.replace_backends(vec![
+            StubVcs::new("/repos/eclair", Backend::Git, &["main"]).boxed()
+        ]);
+
+        let listed: Vec<String> = repos
+            .filtered_items()
+            .iter()
+            .map(|r| r.repo().name.clone())
+            .collect();
+        assert_eq!(listed.len(), 1);
+        assert!(repos
+            .backends_of(&RepoId::from_path("/repos/shanti"))
+            .is_empty());
+    }
+
+    /// Removing a colocated repository must take both of its backends: leaving
+    /// one behind leaves the picker offering half a repository.
+    #[test]
+    fn removing_a_repository_drops_every_backend_it_was_open_as() {
+        let mut repos = colocated();
+        assert_eq!(repos.remove(&RepoId::from_path("/repos/shanti")), 2);
+        assert!(repos.filtered_items().is_empty());
+        assert_eq!(repos.remove(&RepoId::from_path("/repos/shanti")), 0);
+    }
+
+    /// The same repository arriving from two overlapping repos dirs is one row,
+    /// not two.
+    #[test]
+    fn a_repository_that_arrives_twice_is_listed_once() {
+        let mut repos = RepositoriesComponent::new(Vec::new());
+        for _ in 0..2 {
+            repos.add_repositories(vec![
+                StubVcs::new("/repos/shanti", Backend::Jj, &["default"]).boxed(),
+                StubVcs::new("/repos/shanti", Backend::Git, &["feature-a"]).boxed(),
+            ]);
+        }
+
+        assert_eq!(repos.filtered_items().len(), 1, "the picker doubled a repo");
+        assert_eq!(
+            repos.backends_of(&RepoId::from_path("/repos/shanti")).len(),
+            2,
+            "each backend should be open exactly once"
+        );
+        assert_eq!(repos.collect_spaces().0.len(), 2, "spaces were doubled");
     }
 }

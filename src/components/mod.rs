@@ -17,8 +17,8 @@ pub use modal::{
     SelectCallback, MIN_HEIGHT, MIN_WIDTH,
 };
 pub use pr_worktree::PrWorktreeComponent;
-pub use repositories::{RepositoriesComponent, RepositoriesModal};
-pub use worktrees::WorktreesComponent;
+pub use repositories::{spaces_of, RepositoriesComponent, RepositoriesModal};
+pub use worktrees::{SpaceEntry, WorktreesComponent};
 
 // Components carry no palette of their own: every colour they draw comes from
 // `crate::theme`, by the meaning it has rather than by its hue.
