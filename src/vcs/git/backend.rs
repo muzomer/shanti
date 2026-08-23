@@ -147,13 +147,10 @@ impl GitBackend {
         Ok(backend)
     }
 
-    /// Borrowed repository name — prefer this over [`GitBackend::name`] in hot paths.
+    /// Borrowed repository name. Allocation-free, so it is safe in the render
+    /// path; there is deliberately no owned counterpart to reach for by mistake.
     pub fn name_str(&self) -> &str {
         &self.repo.name
-    }
-
-    pub fn name(&self) -> String {
-        self.repo.name.clone()
     }
 
     /// Returns a human-readable description of which branch a new space would be
@@ -409,7 +406,7 @@ mod tests {
     fn test_name_of_normal_repository() {
         let temp_dir = tempdir().expect("Could not create temporary directory");
         let repo = open_repo(&temp_dir.path().join("my-repo"));
-        assert_eq!(repo.name(), "my-repo");
+        assert_eq!(repo.name_str(), "my-repo");
         assert_eq!(repo.name_str(), "my-repo");
     }
 
@@ -421,14 +418,14 @@ mod tests {
 
         let with_slash = format!("{}/", path.to_str().unwrap());
         let repo = GitBackend::from_path(&with_slash, false).expect("Could not open");
-        assert_eq!(repo.name(), "my-repo");
+        assert_eq!(repo.name_str(), "my-repo");
     }
 
     #[test]
     fn test_name_keeps_dots_in_the_directory_name() {
         let temp_dir = tempdir().expect("Could not create temporary directory");
         let repo = open_repo(&temp_dir.path().join("my.repo.v2"));
-        assert_eq!(repo.name(), "my.repo.v2");
+        assert_eq!(repo.name_str(), "my.repo.v2");
     }
 
     #[test]
@@ -438,7 +435,7 @@ mod tests {
         git2::Repository::init_bare(&path).expect("Could not init bare repository");
 
         let repo = GitBackend::from_path(path.to_str().unwrap(), false).expect("Could not open");
-        assert_eq!(repo.name(), "bare-repo");
+        assert_eq!(repo.name_str(), "bare-repo");
     }
 
     /// The repo snapshot is what the UI will key on after shanti-12z.6, so its

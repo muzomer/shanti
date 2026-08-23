@@ -33,7 +33,6 @@ pub enum Action {
     GoFirst,
     GoLast,
     Select,
-    Delete,
     DeleteWithConfirmation,
     ForceDelete,
     OpenRepositories,

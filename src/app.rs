@@ -248,7 +248,7 @@ impl App {
             }
             // 'D' skips the *question*, never the guard: a space holding work
             // that exists nowhere else still raises the dialog that says so.
-            Action::Delete | Action::ForceDelete => {
+            Action::ForceDelete => {
                 match self.selected_space_risk() {
                     Some((_, risk)) if risk.is_safe() => self.delete_selected_worktree(),
                     Some((space, risk)) => self.modals.push(Box::new(confirm_delete(&space, risk))),
