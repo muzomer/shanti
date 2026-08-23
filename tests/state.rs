@@ -281,10 +281,11 @@ impl Fixture {
 
     /// Deletes the selected space through the guarded path: open the dialog and
     /// type the space's name.
-    fn delete_deliberately(&mut self, name: &str) {
+    /// Delete past the guard: open the dialog, then give the override key.
+    /// `name` names the row for the reader; the guard no longer asks for it.
+    fn delete_deliberately(&mut self, _name: &str) {
         self.press_char('d');
-        self.type_str(name);
-        self.press(key(KeyCode::Enter));
+        self.press_char('X');
     }
 
     fn worktree_path(&self, repo: &str, branch: &str) -> std::path::PathBuf {
@@ -1057,10 +1058,13 @@ fn enter_cannot_delete_a_worktree_that_was_never_pushed() {
     assert!(f.screen().contains("Worktrees (1/1)"));
 }
 
-/// The override for permanent loss: type the space's own name, which also makes
-/// the user look at which row they are standing on.
+/// The override for permanent loss: one deliberate key that is not Enter.
+///
+/// It was a typed-out space name once. That read as a tax rather than a
+/// safeguard — space names are branch names — so it is the same single key as
+/// recoverable loss now, and the severity lives in the dialog's wording.
 #[test]
-fn typing_the_name_deletes_a_worktree_that_was_never_pushed() {
+fn the_override_deletes_a_worktree_that_was_never_pushed() {
     let mut f = Fixture::new();
     let path = f.worktree_path("alpha", "feature-one");
 
@@ -1071,9 +1075,14 @@ fn typing_the_name_deletes_a_worktree_that_was_never_pushed() {
     assert!(f.screen().contains("Worktrees (0/0)"));
 }
 
-/// A near-miss is not a confirmation.
+/// Stray typing is swallowed, and Enter behind it still decides nothing.
+///
+/// The guard used to ask for the space's name, so this test watched a near-miss.
+/// It watches something better now: a guarded dialog must neither act on loose
+/// keystrokes nor let them reach the list underneath, and the reflex Enter that
+/// follows them must remain inert.
 #[test]
-fn a_wrong_name_does_not_delete_the_worktree() {
+fn stray_typing_then_enter_does_not_delete_the_worktree() {
     let mut f = Fixture::new();
     let path = f.worktree_path("alpha", "feature-one");
 
@@ -1082,7 +1091,7 @@ fn a_wrong_name_does_not_delete_the_worktree() {
     f.press(key(KeyCode::Enter));
 
     assert_eq!(f.modal(), Modal::Confirm);
-    assert!(path.exists(), "a mistyped name must not delete anything");
+    assert!(path.exists(), "loose keystrokes must not delete anything");
 }
 
 /// The dialog has to say what is about to be lost, in git's vocabulary, and that

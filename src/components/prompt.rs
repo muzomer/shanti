@@ -181,7 +181,7 @@ pub type FooterEntry<'a> = (&'a str, &'a str, Style);
 /// The vim-style keybinding footer every popup carries, fitted to `width`.
 ///
 /// Drawn into the bottom border, so it has a hard ceiling and no way to wrap.
-/// Rather than let the border slice a hint in half — `Enter] once typed` is
+/// Rather than let the border slice a hint in half — `Esc] cance` is
 /// worse than no hint at all — entries are dropped until the rest fit. They go
 /// from the left, because the footer is right-aligned and the leftmost entry is
 /// the one the border would have eaten anyway; put the way *out* of the popup

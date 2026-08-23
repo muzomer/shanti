@@ -952,9 +952,16 @@ fn confirm_delete(space: &Space, risk: DeletionRisk) -> ConfirmComponent {
         Consequence::RecoverableLoss => confirm
             .at_risk(risk.losses(), risk.aftermath().map(str::to_string))
             .require_override(),
+        // The same single keypress as recoverable loss, deliberately. Typing the
+        // space's own name was the original guard, and it read as a tax rather
+        // than a safeguard: real space names are long branch names, and a user
+        // who has read a dialog listing what they are about to lose should not
+        // then have to transcribe it. The severity lives in the wording and the
+        // destructive palette; what both guards share is that Enter — the reflex
+        // key that dismisses every other dialog — does nothing here.
         Consequence::PermanentLoss => confirm
             .at_risk(risk.losses(), risk.aftermath().map(str::to_string))
-            .require_phrase(space.name.clone()),
+            .require_override(),
     }
 }
 

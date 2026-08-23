@@ -338,7 +338,7 @@ mod tests {
                 ],
                 Some("Commits already pushed are kept.".into()),
             )
-            .require_phrase("feature-one");
+            .require_override();
             frame_at(size, |frame, full| {
                 let area = confirm.area(full);
                 confirm.draw(frame, area);

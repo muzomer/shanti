@@ -7,8 +7,8 @@ use ratatui::{
 };
 
 use super::{
-    footer_entries, gutter, place_cursor, popup_area, prompt::footer, Action, AppContext,
-    ConfirmCallback, EventState, Extent, HelpEntry, Modal, ModalFlow, KEYS_SECTION,
+    footer_entries, gutter, popup_area, prompt::footer, Action, AppContext, ConfirmCallback,
+    EventState, Extent, HelpEntry, Modal, ModalFlow, KEYS_SECTION,
 };
 use crate::keymap::InputMode;
 use crate::theme;
@@ -25,7 +25,7 @@ pub const OVERRIDE_KEY: char = 'X';
 ///
 /// The ceremony is a property of the *choice*, not of the key that opened it,
 /// which is why it lives on the dialog: the same binding leads to a one-keypress
-/// question or to a typed confirmation depending on what is about to be lost.
+/// question or to a guarded one depending on what is about to be lost.
 ///
 /// Neither guarded variant accepts Enter. Enter is the key the user presses
 /// without reading — it dismisses every other dialog in the program — so a
@@ -33,13 +33,12 @@ pub const OVERRIDE_KEY: char = 'X';
 enum Gate {
     /// Enter is enough. For choices that destroy nothing.
     Enter,
-    /// [`OVERRIDE_KEY`] must be pressed. Deliberate but cheap, for a loss the
-    /// backend can undo.
+    /// [`OVERRIDE_KEY`] must be pressed. One deliberate keystroke, used for
+    /// every loss — what makes it a guard is that it is not Enter, not that it
+    /// is laborious. A typed-name gate lived here once and was removed: space
+    /// names are branch names, so transcribing one taxed the user without
+    /// telling them anything the dialog had not already said.
     Override,
-    /// The exact phrase must be typed first. As deliberate as a terminal gets,
-    /// and reserved for losses nothing can bring back — typing the space's own
-    /// name also forces the user to look at *which* space they are on.
-    Phrase { expected: String, typed: String },
 }
 
 impl Gate {
@@ -49,15 +48,15 @@ impl Gate {
             Gate::Enter => true,
             // Opened by its own key, never by the Enter that reaches this.
             Gate::Override => false,
-            Gate::Phrase { expected, typed } => typed == expected,
         }
     }
 
-    /// The dialog is a typing surface unless Enter alone decides it.
+    /// The guarded gate listens for its own key, which Normal mode would
+    /// otherwise route away as an action.
     fn mode(&self) -> InputMode {
         match self {
             Gate::Enter => InputMode::Normal,
-            _ => InputMode::Insert,
+            Gate::Override => InputMode::Insert,
         }
     }
 }
@@ -110,15 +109,6 @@ impl ConfirmComponent {
     /// demand stay a closed set defined here — a caller cannot invent a fourth.
     pub fn require_override(mut self) -> Self {
         self.gate = Gate::Override;
-        self
-    }
-
-    /// Demands that `expected` be typed out before Enter will do anything.
-    pub fn require_phrase(mut self, expected: impl Into<String>) -> Self {
-        self.gate = Gate::Phrase {
-            expected: expected.into(),
-            typed: String::new(),
-        };
         self
     }
 
@@ -219,17 +209,6 @@ impl ConfirmComponent {
                 ]),
                 0,
             )),
-            Gate::Phrase { expected, typed } => {
-                let prompt = format!("Type {} to confirm: ", expected);
-                let offset = prompt.chars().count() as u16 + typed.chars().count() as u16;
-                Some((
-                    Line::from(vec![
-                        Span::styled(prompt, theme::SECONDARY),
-                        Span::styled(typed.clone(), theme::TEXT.bold()),
-                    ]),
-                    offset,
-                ))
-            }
         }
     }
 
@@ -291,11 +270,8 @@ impl ConfirmComponent {
             .wrap(Wrap { trim: false })
             .render(body_area, frame.buffer_mut());
 
-        if let Some((line, cursor_offset)) = self.gate_line() {
+        if let Some((line, _)) = self.gate_line() {
             Paragraph::new(line).render(gate_area, frame.buffer_mut());
-            if matches!(self.gate, Gate::Phrase { .. }) {
-                place_cursor(frame, gate_area, gate_area.x + cursor_offset, gate_area.y);
-            }
         }
     }
 
@@ -358,22 +334,14 @@ impl Modal for ConfirmComponent {
             // dialog stays up saying what it still wants.
             Action::Select => ModalFlow::Consumed,
             Action::ClosePopup | Action::ExitInsertMode => ModalFlow::Close,
-            Action::InsertChar(c) => match &mut self.gate {
+            Action::InsertChar(c) => match &self.gate {
                 Gate::Override if c == OVERRIDE_KEY => self.confirm(ctx),
-                Gate::Phrase { typed, .. } => {
-                    typed.push(c);
-                    ModalFlow::Consumed
-                }
                 // A guarded dialog swallows stray typing rather than letting it
                 // reach the list underneath.
                 _ => ModalFlow::Consumed,
             },
-            Action::DeleteChar => {
-                if let Gate::Phrase { typed, .. } = &mut self.gate {
-                    typed.pop();
-                }
-                ModalFlow::Consumed
-            }
+            // Swallowed for the same reason: the list must not act on it.
+            Action::DeleteChar => ModalFlow::Consumed,
             _ => self.handle_action(action).into(),
         }
     }
@@ -386,8 +354,6 @@ impl Modal for ConfirmComponent {
         let confirm = match &self.gate {
             Gate::Enter => HelpEntry::bind("Enter", "Confirm").hint("Enter", "confirm"),
             Gate::Override => HelpEntry::bind("X", "Delete anyway").hint("X", "delete anyway"),
-            Gate::Phrase { .. } => HelpEntry::bind("Enter", "Confirm, once the name is typed")
-                .hint("Enter", "once typed"),
         };
         vec![
             HelpEntry::Section(KEYS_SECTION),

@@ -1051,14 +1051,14 @@ fn at_the_floor_a_destructive_dialog_keeps_its_gate_row() {
         "a branch that was never pushed",
         "Deleting also removes:",
         "This cannot be undone.",
-        "Type risky-space to confirm:",
+        "Press X to delete it anyway.",
     ] {
         assert!(roomy.contains(expected), "missing {expected:?}:\n{roomy}");
     }
 
     let floor = f.screen(FLOOR);
     assert!(
-        floor.contains("Type risky-space to confirm:"),
+        floor.contains("Press X to delete it anyway."),
         "the gate row was clipped at the size floor:\n{floor}"
     );
     assert!(
