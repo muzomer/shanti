@@ -47,6 +47,7 @@ pub use repo::{Repo, RepoId};
 pub use space::Space;
 pub use status::{JjLocal, LocalState, RemoteState, SpaceStatus, StatusGlyph, Tone};
 
+use crate::hooks::{HookPlan, HookSettings, HookTarget};
 use git::GitBackend;
 use jj::JjBackend;
 
@@ -163,6 +164,40 @@ pub fn space_dest(worktrees_dir: &str, repo_name: &str, space_name: &str) -> Pat
     PathBuf::from(worktrees_dir)
         .join(repo_name)
         .join(space_name)
+}
+
+/// Create a space and say what should happen to it next.
+///
+/// The one place that ties space creation to post-create hooks, so no caller can
+/// create a space and forget them. It returns the [`HookPlan`] rather than
+/// running it because the two have opposite timing requirements: creation must
+/// finish before the UI can show the space, while a hook may take minutes and
+/// must not be waited on.
+///
+/// The plan is built from the [`Space`] that was actually created rather than
+/// from the arguments, so a hook can only ever be told about a space that
+/// exists.
+///
+/// The caller then does one of two things with the plan:
+///
+/// * `hooks::run_and_log(&plan)` — blocking, for a non-interactive caller;
+/// * hand it to [`crate::jobs`] — what the UI should do, since
+///   [`HookPlan::run`] may take minutes.
+pub fn create_space_with_hooks(
+    vcs: &dyn Vcs,
+    name: &str,
+    dest: &Path,
+    hooks: &HookSettings,
+) -> eyre::Result<(Space, HookPlan)> {
+    let space = vcs.create_space(name, dest)?;
+    let plan = hooks.plan(HookTarget {
+        space_path: space.path.clone(),
+        space_name: space.name.clone(),
+        repo_path: vcs.repo().path.clone(),
+        repo_name: vcs.repo().name.clone(),
+        backend: space.backend,
+    });
+    Ok((space, plan))
 }
 
 /// Open every repository a walk found, in parallel, through every backend that

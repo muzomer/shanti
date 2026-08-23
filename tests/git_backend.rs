@@ -13,8 +13,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use git2::{BranchType, Repository};
+use shanti::config::Config;
+use shanti::hooks::HookSettings;
 use shanti::vcs::git::GitBackend;
-use shanti::vcs::{Consequence, DeletionRisk, RemoteState, Space, Vcs};
+use shanti::vcs::{self, Consequence, DeletionRisk, RemoteState, Space, Vcs};
 use tempfile::{tempdir, TempDir};
 
 // --------------------------------------------------------------------------
@@ -549,4 +551,109 @@ fn a_never_pushed_space_is_not_free_to_delete() {
             "the branch it has checked out"
         ]
     );
+}
+
+// --------------------------------------------------------------------------
+// Post-create hooks
+// --------------------------------------------------------------------------
+
+/// The whole point of the feature, end to end: a space that is *usable* the
+/// moment it appears. An ignored `.env` is carried over from the repository and
+/// a command runs in the new directory, against a real git worktree.
+#[test]
+fn creation_runs_the_configured_hooks_in_the_new_space() {
+    let fixture = Fixture::with_origin(&[]);
+    fs::write(fixture.repo_path.join(".env"), "TOKEN=1").expect("could not write .env");
+
+    let settings = HookSettings::from_config(
+        toml::from_str(
+            r#"
+            [hooks]
+            copy = [".env"]
+
+            [repos.project.hooks]
+            run = ["cp .env .env.local"]
+            "#,
+        )
+        .expect("the test configuration should parse"),
+    );
+
+    let (space, plan) = vcs::create_space_with_hooks(
+        &fixture.backend,
+        "feature",
+        &fixture.dest("feature"),
+        &settings,
+    )
+    .expect("creation should succeed");
+
+    // The values the interface promises, taken from the space that was created.
+    assert_eq!(plan.target.space_path, space.path);
+    assert_eq!(plan.target.space_name, "feature");
+    // By suffix, for the same reason as elsewhere here: git hands back the
+    // canonicalised path, which on macOS is /private/var/… not /var/….
+    assert!(
+        plan.target.repo_path.ends_with("repos/project"),
+        "unexpected repo path {:?}",
+        plan.target.repo_path
+    );
+    assert_eq!(plan.target.repo_name, "project");
+    assert_eq!(plan.target.backend, shanti::vcs::Backend::Git);
+
+    let report = plan.run();
+    assert!(!report.failed(), "{:?}", report.outcomes);
+    assert_eq!(
+        fs::read_to_string(space.path.join(".env")).expect("the copy should have landed"),
+        "TOKEN=1"
+    );
+    assert!(space.path.join(".env.local").is_file());
+}
+
+/// The failure policy, end to end: the worktree git created survives a hook
+/// that fails, stays registered, and the failure is reported rather than lost.
+#[test]
+fn a_failing_hook_leaves_a_real_space_intact() {
+    let fixture = Fixture::with_origin(&[]);
+    let settings = HookSettings::from_config(
+        toml::from_str("[hooks]\nrun = [\"echo nope >&2; exit 2\"]\n")
+            .expect("the test configuration should parse"),
+    );
+
+    let (space, plan) = vcs::create_space_with_hooks(
+        &fixture.backend,
+        "feature",
+        &fixture.dest("feature"),
+        &settings,
+    )
+    .expect("creation should succeed even though the hook will fail");
+
+    let report = plan.run();
+    assert!(report.failed());
+    assert!(report
+        .summary()
+        .expect("a failure has a summary")
+        .contains("intact"));
+
+    // The space is exactly as `create_space` left it: on disk and listed.
+    assert!(space.path.is_dir());
+    assert!(fixture
+        .backend
+        .spaces()
+        .expect("could not list spaces")
+        .iter()
+        .any(|s| s.name == "feature"));
+}
+
+/// Nothing configured must mean nothing spawned — the plan is empty, so a caller
+/// can skip the worker round trip entirely.
+#[test]
+fn creation_without_configured_hooks_plans_nothing() {
+    let fixture = Fixture::with_origin(&[]);
+    let (_space, plan) = vcs::create_space_with_hooks(
+        &fixture.backend,
+        "feature",
+        &fixture.dest("feature"),
+        &HookSettings::from_config(Config::default()),
+    )
+    .expect("creation should succeed");
+    assert!(plan.is_empty());
 }

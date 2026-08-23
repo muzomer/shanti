@@ -21,13 +21,26 @@
 //! run_fetch = true
 //! backend = "jujutsu"
 //! editor = "nvim"
+//!
+//! # Runs after every space, in every repository.
+//! [hooks]
+//! copy = [".envrc"]
+//! run = ["direnv allow"]
+//!
+//! # Runs after those, only for the repository keyed here.
+//! [repos.shanti.hooks]
+//! copy = [".env"]
+//! run = ["cargo fetch"]
 //! ```
 //!
 //! This module only *reads* the file. It is the weakest of the three
 //! configuration layers, so the file's values are handed to [`crate::cli`],
 //! which decides whether they win and then normalises whatever did.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use color_eyre::eyre::{self, Context};
 use serde::{Deserialize, Serialize};
@@ -74,6 +87,57 @@ pub struct Config {
     pub backend: Backend,
     /// Command used to open a worktree in an editor, e.g. `nvim` or `code`.
     pub editor: Option<String>,
+    /// Hooks run after *every* space is created, whatever its repository.
+    pub hooks: Hooks,
+    /// Per-repository settings, keyed by the repository's name or its absolute
+    /// path — see [`RepoConfig`].
+    pub repos: BTreeMap<String, RepoConfig>,
+}
+
+/// Settings that apply to one repository only.
+///
+/// Keyed in the file by the repository's directory name (`[repos.shanti]`) or,
+/// when two checkouts share a name, by its absolute path
+/// (`[repos."/home/me/src/shanti"]`). Both forms may match; the name-keyed entry
+/// is the general one and runs first.
+///
+/// This lives in the *user's own* configuration file on purpose. shanti never
+/// reads a hook out of a repository's working tree, so cloning a hostile
+/// repository can never make shanti run its code — see [`crate::hooks`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct RepoConfig {
+    /// Hooks run after a space of this repository is created.
+    pub hooks: Hooks,
+}
+
+/// What to do once a new space exists on disk.
+///
+/// A fresh space is a bare checkout: everything a project needs but does not
+/// version — `.env`, `.envrc`, editor settings, installed dependencies — is
+/// missing, and putting it there by hand is the manual step this removes.
+///
+/// Two lists, because the two needs are different in kind. `copy` carries
+/// ignored files over from the source repository and cannot fail in an
+/// interesting way; `run` is arbitrary shell, and is the part that can take
+/// minutes and go wrong.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Hooks {
+    /// Files to copy from the repository root into the new space, as paths
+    /// relative to that root. A path that does not exist is skipped, not an
+    /// error: a `.env` no one has written yet is the normal case.
+    pub copy: Vec<PathBuf>,
+    /// Shell commands run in the new space, in order, after the copies.
+    pub run: Vec<String>,
+}
+
+impl Hooks {
+    /// Whether there is nothing to do — so callers can skip the machinery
+    /// entirely rather than submit an empty job.
+    pub fn is_empty(&self) -> bool {
+        self.copy.is_empty() && self.run.is_empty()
+    }
 }
 
 impl Config {
@@ -228,6 +292,56 @@ mod tests {
         let path = Config::path();
         std::env::remove_var("SHANTI_CONFIG");
         assert_eq!(path.unwrap(), dir.path().join(CONFIG_FILE_NAME));
+    }
+
+    #[test]
+    fn config_reads_global_and_per_repository_hooks() {
+        let (_dir, path) = write_config(
+            r#"
+            [hooks]
+            copy = [".envrc"]
+            run = ["direnv allow"]
+
+            [repos.shanti.hooks]
+            copy = [".env"]
+            run = ["cargo fetch", "cargo build"]
+            "#,
+        );
+        let config = Config::load_from(&path).unwrap();
+        assert_eq!(config.hooks.copy, vec![PathBuf::from(".envrc")]);
+        assert_eq!(config.hooks.run, vec!["direnv allow".to_string()]);
+        let repo = config.repos.get("shanti").expect("the repo entry is read");
+        assert_eq!(repo.hooks.copy, vec![PathBuf::from(".env")]);
+        assert_eq!(repo.hooks.run.len(), 2);
+    }
+
+    /// A path-keyed entry is how two checkouts sharing a directory name are
+    /// told apart, so quoting a path as a key has to work.
+    #[test]
+    fn config_repo_entries_may_be_keyed_by_path() {
+        let (_dir, path) = write_config(
+            r#"
+            [repos."/home/me/src/shanti".hooks]
+            run = ["true"]
+            "#,
+        );
+        let config = Config::load_from(&path).unwrap();
+        assert!(config.repos.contains_key("/home/me/src/shanti"));
+    }
+
+    #[test]
+    fn config_without_hooks_has_none() {
+        let (_dir, path) = write_config("run_fetch = true\n");
+        let config = Config::load_from(&path).unwrap();
+        assert!(config.hooks.is_empty());
+        assert!(config.repos.is_empty());
+    }
+
+    #[test]
+    fn config_unknown_hook_key_is_reported() {
+        let (_dir, path) = write_config("[hooks]\ncopyy = [\".env\"]\n");
+        let error = format!("{:?}", Config::load_from(&path).unwrap_err());
+        assert!(error.contains("copyy"), "{error}");
     }
 
     #[test]

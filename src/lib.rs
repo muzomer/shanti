@@ -5,6 +5,7 @@ pub mod config;
 mod dirs;
 pub mod events;
 pub mod github;
+pub mod hooks;
 pub mod jobs;
 pub mod keymap;
 pub mod logs;

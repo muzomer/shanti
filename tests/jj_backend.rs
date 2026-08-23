@@ -25,6 +25,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use shanti::hooks::HookSettings;
 use shanti::vcs::jj::{Base, JjBackend, JjCli};
 use shanti::vcs::{
     backend_at, discover, Backend, Consequence, DeletionRisk, JjLocal, LocalState, RemoteState,
@@ -1029,4 +1030,77 @@ fn a_pushed_jj_space_is_free_to_delete() {
         "a clean, pushed workspace needs no override: {:?}",
         listed.status
     );
+}
+
+// --------------------------------------------------------------------------
+// Post-create hooks
+// --------------------------------------------------------------------------
+
+/// Hooks are backend-neutral, and this is the half that proves it: the same
+/// configuration reaches a jj workspace, runs inside it, and is told `jj` —
+/// which is how a hook that must branch on the backend tells the two apart.
+#[test]
+fn hooks_run_in_a_new_jj_workspace_and_are_told_the_backend() {
+    let Some(fixture) = JjFixture::new("hooked") else {
+        return;
+    };
+    std::fs::write(fixture.root.join(".env"), "TOKEN=1").expect("could not write .env");
+
+    let settings = HookSettings::from_config(
+        toml::from_str(
+            r#"
+            [hooks]
+            copy = [".env"]
+            run = ["printf '%s' \"$SHANTI_BACKEND\" > backend"]
+            "#,
+        )
+        .expect("the test configuration should parse"),
+    );
+
+    let backend = fixture.backend();
+    let (space, plan) = shanti::vcs::create_space_with_hooks(
+        &backend,
+        "feature",
+        &fixture.dest("feature"),
+        &settings,
+    )
+    .expect("creating the workspace should succeed");
+
+    assert_eq!(plan.target.backend, Backend::Jj);
+    let report = plan.run();
+    assert!(!report.failed(), "{:?}", report.outcomes);
+    assert_eq!(
+        std::fs::read_to_string(space.path.join(".env")).expect("the copy should have landed"),
+        "TOKEN=1"
+    );
+    assert_eq!(
+        std::fs::read_to_string(space.path.join("backend")).expect("the command should have run"),
+        "jj"
+    );
+}
+
+/// The failure policy on the jj side: the workspace jj created is still there
+/// and still listed after a hook fails.
+#[test]
+fn a_failing_hook_leaves_a_jj_workspace_intact() {
+    let Some(fixture) = JjFixture::new("hook-fails") else {
+        return;
+    };
+    let settings = HookSettings::from_config(
+        toml::from_str("[hooks]\nrun = [\"exit 7\"]\n").expect("the test configuration parses"),
+    );
+
+    let backend = fixture.backend();
+    let (space, plan) = shanti::vcs::create_space_with_hooks(
+        &backend,
+        "feature",
+        &fixture.dest("feature"),
+        &settings,
+    )
+    .expect("creation should succeed even though the hook will fail");
+
+    assert!(plan.run().failed());
+    assert!(space.path.is_dir());
+    let spaces = fixture.backend().spaces().expect("listing spaces works");
+    assert!(spaces.iter().any(|s| s.name == "feature"));
 }
