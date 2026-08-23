@@ -52,6 +52,7 @@ src/
   cli.rs                         # clap args and the configuration precedence rules
   config.rs                      # the TOML configuration file (~/.config/shanti/config.toml)
   events.rs                      # AppEvent / EventSource: keys, paste, ticks and jobs on one channel
+  jobs/mod.rs                    # Job / JobResult / Worker: the bounded pool that runs slow work
   keymap.rs                      # key → Action resolution; InputMode (Normal/Insert)
   theme.rs                       # the one place a colour is chosen (Tokyo Night) + tone() mapping
   github.rs                      # PR URL parsing, PrFetcher, PR lookup, repository cloning

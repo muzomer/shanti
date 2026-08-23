@@ -5,6 +5,7 @@ pub mod config;
 mod dirs;
 pub mod events;
 pub mod github;
+pub mod jobs;
 pub mod keymap;
 pub mod logs;
 mod theme;
@@ -14,8 +15,8 @@ use color_eyre::eyre::{Result, WrapErr};
 
 use components::EventState;
 use events::{AppEvent, EventSource};
+use jobs::Worker;
 use ratatui::{backend::Backend, Terminal};
-use tracing::debug;
 
 /// How a TUI session ended.
 ///
@@ -49,7 +50,13 @@ where
     // threads and waits for them, so none outlives the session.
     let events = EventSource::new();
 
-    loop {
+    // The pool is attached here rather than built in `App::with_args` because
+    // the channel it reports on belongs to the loop, not to the app: an `App`
+    // driven by a test has no loop, and must therefore have no worker either —
+    // it runs the same code with every job left unsubmitted.
+    app.attach_worker(Worker::new(events.job_sender()));
+
+    let outcome = loop {
         terminal
             .draw(|f| app.draw(f))
             .wrap_err("failed to draw a frame")?;
@@ -57,18 +64,22 @@ where
         match events.next().wrap_err("the event producers stopped")? {
             AppEvent::Key(key) => {
                 if app.handle_key(key) == EventState::Exit {
-                    break Ok(match app.selected_path.take() {
+                    break match app.selected_path.take() {
                         Some(path) => Outcome::Selected(path),
                         None => Outcome::Quit,
-                    });
+                    };
                 }
             }
             AppEvent::Paste(text) => app.handle_paste(&text),
-            // Redrawing is all a tick owes anyone today; animations and timeouts
-            // hang off this arm later.
-            AppEvent::Tick => {}
-            // PLACEHOLDER until shanti-hml.2 adds the workers that send these.
-            AppEvent::Job(result) => debug!(job = %result.name, "a background job finished"),
+            // The tick is also where work that arrived in bursts is applied, so
+            // fifty results landing in a second cost one rebuild, not fifty.
+            AppEvent::Tick => app.on_tick(),
+            AppEvent::Job(result) => app.handle_job(result),
         }
-    }
+    };
+
+    // Stop the pool while the terminal is still ours: whatever is queued is
+    // dropped now rather than after the caller has restored the screen.
+    app.detach_worker();
+    Ok(outcome)
 }

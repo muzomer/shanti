@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use color_eyre::eyre::Result;
 use crossterm::event::KeyEvent;
@@ -16,6 +19,7 @@ use crate::{
         WorktreesComponent,
     },
     github,
+    jobs::{Completion, Job, JobId, JobResult, Worker},
     keymap::{self, InputMode},
     vcs::{self, Consequence, DeletionRisk, Discovered, Space},
 };
@@ -38,6 +42,24 @@ pub struct App {
     /// Input mode of the worktree list, the one layer that is not a modal.
     mode: InputMode,
     pub selected_path: Option<String>,
+    /// The pool slow work is handed to, once a main loop exists to receive its
+    /// results. `None` in a test, where every job is simply never submitted.
+    jobs: Option<Worker>,
+    /// The jobs whose answers still matter.
+    ///
+    /// This is the whole staleness rule: a [`JobResult`] is applied **only** if
+    /// its id is in here. Anything else — a fetch for a repos dir the user has
+    /// since changed, a PR lookup for a popup they closed — is dropped without
+    /// touching state, so a slow answer can never overwrite a newer one.
+    outstanding: HashSet<JobId>,
+    /// Repositories to fetch as soon as there is a worker to do it with.
+    ///
+    /// `--run-fetch` used to happen inside `open_backends`, before the first
+    /// frame: shanti showed nothing at all until every remote had answered. The
+    /// list is built from disk instead, and these run behind it.
+    deferred_fetches: Vec<PathBuf>,
+    /// A job changed what is on disk, so the list is due a re-read.
+    spaces_stale: bool,
 }
 
 impl App {
@@ -59,7 +81,15 @@ impl App {
     /// lookup — without disturbing any other test running beside it.
     pub fn with_args(args: cli::Args, pr_fetcher: github::PrFetcher) -> App {
         let found = Self::discover_repositories(&args);
-        let repositories = RepositoriesComponent::new(vcs::open_backends(&found, args.run_fetch));
+        // Opening never fetches any more: the network half of `--run-fetch` is a
+        // job, so the first frame is drawn from what is already on disk and the
+        // remotes catch up behind it.
+        let deferred_fetches = if args.run_fetch {
+            found.iter().map(|found| found.path.clone()).collect()
+        } else {
+            Vec::new()
+        };
+        let repositories = RepositoriesComponent::new(vcs::open_backends(&found, false));
 
         // Spaces are collected through the `Vcs` trait, so a jj repository shows
         // up here on exactly the same terms as a git one.
@@ -75,6 +105,113 @@ impl App {
             pr_fetcher,
             mode: InputMode::Normal,
             selected_path: None,
+            jobs: None,
+            outstanding: HashSet::new(),
+            deferred_fetches,
+            spaces_stale: false,
+        }
+    }
+
+    /// Gives the app somewhere to put slow work, and starts whatever was waiting
+    /// for one.
+    ///
+    /// Called by [`crate::run_app`] once the event channel exists. An `App`
+    /// without a worker is not broken — it is one nobody is drawing, and it
+    /// simply never submits anything.
+    pub fn attach_worker(&mut self, worker: Worker) {
+        self.jobs = Some(worker);
+        for path in std::mem::take(&mut self.deferred_fetches) {
+            self.submit(Job::FetchRemotes { path });
+        }
+    }
+
+    /// Drops the pool, cancelling everything queued.
+    pub fn detach_worker(&mut self) {
+        self.outstanding.clear();
+        self.jobs = None;
+    }
+
+    /// Queues `job` and remembers that its answer is wanted.
+    ///
+    /// `None` means there is no worker, and therefore that the job did not run —
+    /// callers must treat that as "not now", never as "already done".
+    fn submit(&mut self, job: Job) -> Option<JobId> {
+        let id = self.jobs.as_ref()?.submit(job);
+        self.outstanding.insert(id);
+        Some(id)
+    }
+
+    /// Stops caring about a job: its result, if it ever arrives, is dropped.
+    ///
+    /// Cancelling in the pool as well as forgetting the id is not redundant —
+    /// forgetting protects the state, cancelling saves the work.
+    #[allow(dead_code)]
+    fn abandon(&mut self, id: JobId) {
+        if self.outstanding.remove(&id) {
+            if let Some(worker) = &self.jobs {
+                worker.cancel(id);
+            }
+        }
+    }
+
+    /// Takes in a finished job, or ignores it if the app has moved on.
+    pub fn handle_job(&mut self, result: JobResult) {
+        let kind = result.kind;
+        if !self.outstanding.remove(&result.id) {
+            debug!(id = ?result.id, %kind, "ignoring the result of an abandoned job");
+            return;
+        }
+
+        match result.outcome {
+            // Where a background failure becomes visible. It is deliberately the
+            // same line a failed delete uses: a job that could not run is news
+            // for the user, not for the log file.
+            Err(error) => {
+                self.worktrees_component.last_error = Some(format!("{kind} failed: {error:#}"));
+            }
+            // The refreshed refs are on disk; the list is what has to catch up.
+            Ok(Completion::Fetched { path }) => {
+                debug!(repo = %path.display(), "fetched");
+                self.spaces_stale = true;
+            }
+            Ok(completion) => {
+                debug!(?completion, %kind, "no consumer for this result yet");
+            }
+        }
+    }
+
+    /// Applies whatever background work has landed since the last tick.
+    ///
+    /// Re-reading the spaces is done here, once, rather than per result: two
+    /// hundred repositories finishing their fetches would otherwise rebuild the
+    /// same list two hundred times, each rebuild costing every repository a
+    /// status read.
+    pub fn on_tick(&mut self) {
+        if self.spaces_stale && self.outstanding.is_empty() {
+            self.spaces_stale = false;
+            self.reload_spaces();
+        }
+    }
+
+    /// Re-reads every repository's spaces and rebuilds the list.
+    ///
+    /// The selected row is carried across by name, because the rebuild is
+    /// something the *app* decided to do and the user's place in the list is not
+    /// shanti's to lose. The filter text is not carried, which is the one thing
+    /// this cannot do without a way to hand new rows to an existing
+    /// `WorktreesComponent` — see the note in shanti-hml.2.
+    fn reload_spaces(&mut self) {
+        let selected = self.worktrees_component.selected_space().map(|s| s.name);
+        let previous_error = self.worktrees_component.last_error.take();
+
+        let (spaces, failed) = self.repositories_component.collect_spaces();
+        self.worktrees_component = WorktreesComponent::new(spaces);
+        // A listing failure is the newer news; anything else already on screen
+        // (a fetch that failed, say) is still true and stays.
+        self.worktrees_component.last_error = listing_failure_notice(&failed).or(previous_error);
+
+        if let Some(name) = selected {
+            self.worktrees_component.select_worktree_by_branch(&name);
         }
     }
 
@@ -386,5 +523,135 @@ fn confirm_delete(space: &Space, risk: DeletionRisk) -> ConfirmComponent {
         Consequence::PermanentLoss => confirm
             .at_risk(risk.losses(), risk.aftermath().map(str::to_string))
             .require_phrase(space.name.clone()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{events::AppEvent, github::PrInfo, jobs::Completion};
+    use color_eyre::eyre;
+    use std::sync::mpsc::{self, Receiver};
+
+    fn app_with_worker() -> (App, Receiver<AppEvent>) {
+        let dir = std::env::temp_dir().display().to_string();
+        let args = cli::Args::for_dirs(dir.clone(), vec![]);
+        let fetcher: github::PrFetcher = std::sync::Arc::new(|_| {
+            Ok(PrInfo {
+                branch_name: "unused".into(),
+                is_merged: false,
+            })
+        });
+
+        let (sender, receiver) = mpsc::channel();
+        let mut app = App::with_args(args, fetcher);
+        app.attach_worker(Worker::with_threads(sender, 1));
+        (app, receiver)
+    }
+
+    fn next_result(receiver: &Receiver<AppEvent>) -> JobResult {
+        match receiver.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(AppEvent::Job(result)) => result,
+            other => panic!("expected a job result, got {other:?}"),
+        }
+    }
+
+    /// `--run-fetch` must no longer hold the first frame hostage: the app is
+    /// built from disk, and the network work is queued behind it.
+    #[test]
+    fn run_fetch_becomes_a_job_per_repository() {
+        let repos = tempfile::tempdir().expect("a temp dir");
+        for name in ["one", "two"] {
+            let path = repos.path().join(name);
+            std::fs::create_dir_all(&path).expect("a repo dir");
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(&path)
+                .status()
+                .expect("git init");
+        }
+
+        let mut args = cli::Args::for_dirs(
+            repos.path().join("spaces").display().to_string(),
+            vec![repos.path().display().to_string()],
+        );
+        args.run_fetch = true;
+
+        let fetcher: github::PrFetcher = std::sync::Arc::new(|_| eyre::bail!("unused"));
+        let mut app = App::with_args(args, fetcher);
+        // Nothing has been fetched yet, and nothing is waiting on a network.
+        assert_eq!(app.deferred_fetches.len(), 2);
+
+        let (sender, _results) = mpsc::channel();
+        app.attach_worker(Worker::with_threads(sender, 1));
+        assert_eq!(app.outstanding.len(), 2, "the fetches were never queued");
+        assert!(app.deferred_fetches.is_empty());
+    }
+
+    /// A job the app is still waiting for reports its failure where the user
+    /// will see it, rather than on a worker thread's way out.
+    #[test]
+    fn a_failed_job_becomes_a_message() {
+        let (mut app, results) = app_with_worker();
+        app.submit(Job::Custom(Box::new(|| Err(eyre::eyre!("no such remote")))));
+
+        app.handle_job(next_result(&results));
+
+        let shown = app
+            .worktrees_component
+            .last_error
+            .as_deref()
+            .expect("the failure is on screen");
+        assert!(shown.contains("no such remote"), "{shown}");
+    }
+
+    /// The staleness rule: the user moved on, so the answer is no longer wanted
+    /// and must not touch a thing.
+    #[test]
+    fn a_result_the_app_stopped_waiting_for_is_dropped() {
+        let (mut app, results) = app_with_worker();
+        let id = app
+            .submit(Job::Custom(Box::new(|| Err(eyre::eyre!("far too late")))))
+            .expect("a worker is attached");
+
+        // Abandoned only *after* the result was produced — the case cancelling
+        // cannot help with, and exactly the one the id exists for: the answer is
+        // already on the channel when the user moves on.
+        let result = next_result(&results);
+        app.abandon(id);
+        app.handle_job(result);
+
+        assert!(
+            app.worktrees_component.last_error.is_none(),
+            "a stale result was applied"
+        );
+    }
+
+    /// The list is re-read once every outstanding job has landed, not once per
+    /// result — and never while one is still in flight.
+    #[test]
+    fn the_list_is_rebuilt_only_after_the_last_result() {
+        let (mut app, results) = app_with_worker();
+        app.submit(Job::Custom(Box::new(|| {
+            Ok(Completion::Fetched {
+                path: PathBuf::from("/somewhere"),
+            })
+        })));
+        let second = app
+            .submit(Job::Custom(Box::new(|| {
+                Ok(Completion::Fetched {
+                    path: PathBuf::from("/elsewhere"),
+                })
+            })))
+            .expect("a worker is attached");
+
+        app.handle_job(next_result(&results));
+        app.on_tick();
+        assert!(app.spaces_stale, "rebuilt while a job was still in flight");
+
+        app.handle_job(next_result(&results));
+        app.on_tick();
+        assert!(!app.spaces_stale, "the rebuild never happened");
+        assert!(app.outstanding.is_empty() && !app.outstanding.contains(&second));
     }
 }

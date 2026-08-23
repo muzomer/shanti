@@ -1,6 +1,6 @@
 //! The single stream of things the UI reacts to.
 //!
-//! Terminal input, the clock and (later) background work all reach the main loop
+//! Terminal input, the clock and background work all reach the main loop
 //! through one channel, so the loop never blocks on any one of them. That is what
 //! lets the UI redraw while nothing is typed.
 
@@ -15,6 +15,8 @@ use std::{
 
 use crossterm::event::{self, Event, KeyEvent, KeyEventKind};
 use tracing::debug;
+
+use crate::jobs::JobResult;
 
 /// How often a tick is emitted, and therefore how often the UI redraws with no
 /// input: 10 frames per second. Fast enough for a spinner to look alive, slow
@@ -37,20 +39,9 @@ pub enum AppEvent {
     Paste(String),
     /// The periodic clock. Nothing depends on it yet beyond the redraw.
     Tick,
-    /// A background job finished.
-    ///
-    /// PLACEHOLDER: no worker sends this yet — shanti-hml.2 ("Add a background
-    /// worker for slow operations") defines the real payload and the workers
-    /// that produce it. The variant exists now so the loop already has the shape
-    /// that issue needs.
+    /// A background job finished — whether it succeeded or failed; see
+    /// [`JobResult`](crate::jobs::JobResult).
     Job(JobResult),
-}
-
-/// PLACEHOLDER payload for [`AppEvent::Job`], replaced by shanti-hml.2.
-#[derive(Debug)]
-pub struct JobResult {
-    /// Name of the job that finished, for logging until there is real content.
-    pub name: String,
 }
 
 /// Producer threads plus the receiving end of their shared channel.
@@ -93,9 +84,11 @@ impl EventSource {
         self.receiver.recv()
     }
 
-    /// A handle background workers will use to report results.
+    /// The handle a [`Worker`](crate::jobs::Worker) reports its results on.
     ///
-    /// PLACEHOLDER, see [`AppEvent::Job`]: nothing calls this until shanti-hml.2.
+    /// Handing out a `Sender` rather than owning the pool is what keeps the two
+    /// halves independent: this module knows only that *something* may send job
+    /// results, and `jobs` knows only where to send them.
     pub fn job_sender(&self) -> Sender<AppEvent> {
         self.sender.clone()
     }
@@ -218,6 +211,7 @@ fn spawn_ticker(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jobs::{Job, Worker};
 
     #[test]
     fn ticks_arrive_without_any_input() {
@@ -225,18 +219,21 @@ mod tests {
         assert!(matches!(events.next(), Ok(AppEvent::Tick)));
     }
 
+    /// A worker's results arrive on the same channel as the keyboard, which is
+    /// what lets the main loop wait in exactly one place.
     #[test]
     fn job_results_reach_the_loop() {
         let events = EventSource::with_tick_interval(Duration::from_secs(60));
-        events
-            .job_sender()
-            .send(AppEvent::Job(JobResult {
-                name: "example".to_string(),
-            }))
-            .expect("the receiver is alive");
+        let worker = Worker::with_threads(events.job_sender(), 1);
+        let id = worker.submit(Job::FetchRemotes {
+            path: "/nowhere/at/all".into(),
+        });
 
         match events.next() {
-            Ok(AppEvent::Job(result)) => assert_eq!(result.name, "example"),
+            Ok(AppEvent::Job(result)) => {
+                assert_eq!(result.id, id);
+                assert!(result.outcome.is_err(), "there is no repository there");
+            }
             other => panic!("expected a job event, got {other:?}"),
         }
     }
