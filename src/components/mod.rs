@@ -16,7 +16,7 @@ pub use modal::{
     fits, gutter, place_cursor, popup_area, AppContext, ConfirmCallback, Extent, Modal, ModalFlow,
     SelectCallback, MIN_HEIGHT, MIN_WIDTH,
 };
-pub use pr_worktree::PrWorktreeComponent;
+pub use pr_worktree::{resume_pr_flow, PrCommand, PrRequests, PrStep, PrWorktreeComponent};
 pub use repositories::{spaces_of, RepositoriesComponent, RepositoriesModal};
 pub use worktrees::{SpaceEntry, WorktreesComponent};
 

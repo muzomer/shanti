@@ -1,19 +1,268 @@
+//! The PR flow: a URL in, a space for that pull request out.
+//!
+//! Two of its steps are slow enough to be jobs — asking GitHub about the pull
+//! request, and cloning a repository that is not here yet — and neither may run
+//! on the key handler. So the flow is cut in half at every slow step:
+//!
+//! * the half *before* the job raises a [`PrCommand`] on [`PrRequests`], leaves
+//!   the modal in its waiting state and returns to the loop immediately;
+//! * the half *after* it is [`resume_pr_flow`], which the loop calls once the answer has
+//!   landed, with the same [`AppContext`] a key handler would have had.
+//!
+//! Everything the second half needs travels in the [`PrStep`] handed over with
+//! the job, so nothing about a flow in progress is held by `App` beyond the job
+//! id it must be able to cancel.
+
+use std::{cell::RefCell, path::PathBuf, rc::Rc};
+
+use color_eyre::eyre;
 use ratatui::{layout::Rect, Frame};
 
 use super::{
     create_worktree::CreateWorktreeComponent,
     popup_area,
-    prompt::{confirm_and_cancel, prompt_width, Prompt, PROMPT_HEIGHT},
+    prompt::{confirm_and_cancel, prompt_width, FooterEntry, Prompt, PROMPT_HEIGHT},
     select_directory::SelectDirectoryComponent,
     Action, AppContext, ConfirmCallback, ConfirmComponent, EventState, Extent, HelpEntry, Modal,
     ModalFlow, SelectCallback,
 };
 use crate::theme;
 use crate::{
-    github::{self, PrFetcher},
+    github::{self, PrFetcher, PrInfo, PrUrl},
+    jobs::{Completion, Job},
     keymap::InputMode,
     vcs::{self, Backend},
 };
+
+/// The frames of the wait spinner.
+///
+/// Advanced one per *draw* rather than per tick: the loop redraws on every
+/// event, a tick included, so counting draws is the same 10fps clock the scan
+/// spinner uses — without a modal having to be reachable from the tick handler.
+const SPINNER: [&str; 10] = [
+    "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}",
+    "\u{2807}", "\u{280f}",
+];
+
+// ---------------------------------------------------------------------------
+// The seam between the flow and the loop that owns the worker
+// ---------------------------------------------------------------------------
+
+/// What the PR flow asks the loop to do on its behalf.
+///
+/// A modal cannot reach the worker — [`AppContext`] deliberately lends it UI
+/// state and nothing else — so it says what it wants and the loop does it. This
+/// is the only direction that needs a channel: the answer comes back through
+/// [`resume_pr_flow`], which the loop calls with the step it was handed.
+pub enum PrCommand {
+    /// Run this job; when it finishes, hand the result to [`resume_pr_flow`] with this
+    /// step.
+    Run { job: Job, step: PrStep },
+    /// The modal that was waiting is gone. Whatever is out is no longer wanted.
+    Abandon,
+}
+
+/// The one-slot channel a PR flow raises its commands on.
+///
+/// One slot, not a queue, because the flow has exactly one job out at a time and
+/// a command that supersedes another says so by replacing it. Cloned freely: the
+/// handle travels through the confirm and picker callbacks so that the step
+/// which finally starts the clone can still reach the loop.
+///
+/// A component built without one (see [`PrWorktreeComponent::new`]) raises into
+/// a slot nobody drains, which is only ever the case in a rendering test.
+#[derive(Clone, Default)]
+pub struct PrRequests(Rc<RefCell<Option<PrCommand>>>);
+
+impl PrRequests {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn raise(&self, command: PrCommand) {
+        *self.0.borrow_mut() = Some(command);
+    }
+
+    /// Takes whatever the flow has raised since this was last called.
+    pub fn take(&self) -> Option<PrCommand> {
+        self.0.borrow_mut().take()
+    }
+}
+
+/// The parts of a flow that outlive each of its steps.
+///
+/// Carried rather than looked up again because a step resumes on the far side of
+/// a job: by then the modal that knew the answers is gone.
+#[derive(Clone)]
+struct Flow {
+    /// Whether this is the `P` variant, which clones and creates without asking.
+    auto: bool,
+    /// What the user typed, so a failed lookup can put them back in front of it.
+    typed: String,
+    fetch: PrFetcher,
+    requests: PrRequests,
+}
+
+/// Which slow step a flow is waiting on, and what its answer is about.
+enum Stage {
+    Lookup { url: PrUrl },
+    Clone { url: PrUrl, info: Box<PrInfo> },
+}
+
+/// One suspended PR flow: what is out, and everything needed to carry on.
+pub struct PrStep {
+    stage: Stage,
+    flow: Flow,
+}
+
+/// Carries on a flow whose job has finished, or reports why it cannot.
+///
+/// A failure is handled where it can be acted on: a lookup that failed returns
+/// the user to the prompt with the reason under the field they typed into, while
+/// a clone that failed has no prompt to return to and reports on the list.
+pub fn resume_pr_flow(
+    ctx: &mut AppContext,
+    step: PrStep,
+    outcome: eyre::Result<Completion>,
+) -> ModalFlow {
+    let PrStep { stage, flow } = step;
+    match (stage, outcome) {
+        (Stage::Lookup { .. }, Err(error)) => ModalFlow::Replace(Box::new(
+            PrWorktreeComponent::reopened(flow, format!("{:#}", error)),
+        )),
+        (Stage::Lookup { url }, Ok(Completion::PullRequest(info))) => {
+            after_lookup(ctx, url, *info, flow)
+        }
+        (Stage::Clone { .. }, Err(error)) => {
+            ctx.worktrees.last_error = Some(format!("{:#}", error));
+            ModalFlow::Close
+        }
+        (Stage::Clone { url, info }, Ok(Completion::Cloned { path })) => {
+            after_clone(ctx, &url, *info, path, flow.auto)
+        }
+        // A completion of another shape means a result was routed to the wrong
+        // waiter, which is a bug in the loop rather than something the user did.
+        // It is still said out loud: a flow that stopped without a word would
+        // read as shanti having forgotten the request.
+        (_, Ok(other)) => {
+            ctx.worktrees.last_error = Some(format!("unexpected background result: {other:?}"));
+            ModalFlow::Close
+        }
+    }
+}
+
+/// The PR is known. Either its repository is here, or it has to be cloned first.
+fn after_lookup(ctx: &mut AppContext, url: PrUrl, info: PrInfo, flow: Flow) -> ModalFlow {
+    if ctx.repositories.select_repository_by_name(&url.repo) {
+        return open_worktree_for_pr(ctx, info, flow.auto);
+    }
+
+    if flow.auto {
+        return clone_flow(ctx, url, info, flow);
+    }
+
+    // Names the backend, because this dialog is where the repository's shape
+    // is decided: `github::clone_repository` always clones with git, and a jj
+    // user who is not told here finds out much later. One extra word rather
+    // than a sentence — the picker that follows carries the jj escape hatch.
+    let label = format!(
+        "Repository '{}' not found. Clone from GitHub with git?",
+        url.repo
+    );
+    let remote = format!("git@github.com:{}/{}.git", url.owner, url.repo);
+    let on_confirm: ConfirmCallback = Box::new(move |ctx| clone_flow(ctx, url, info, flow));
+    ModalFlow::Replace(Box::new(ConfirmComponent::new(
+        "Clone Repository".to_string(),
+        label,
+        remote,
+        on_confirm,
+    )))
+}
+
+/// Cloning needs a destination: with several configured repo dirs the user picks
+/// one, otherwise the single dir is used without asking.
+fn clone_flow(ctx: &mut AppContext, url: PrUrl, info: PrInfo, flow: Flow) -> ModalFlow {
+    if ctx.args.repos_dirs.len() > 1 {
+        let on_select: SelectCallback<String> =
+            Box::new(move |_ctx, dir| clone_into(dir, url, info, flow));
+        return ModalFlow::Replace(Box::new(SelectDirectoryComponent::new(
+            ctx.args.repos_dirs.clone(),
+            on_select,
+        )));
+    }
+    let dir = ctx.args.repos_dirs[0].clone();
+    clone_into(dir, url, info, flow)
+}
+
+/// Starts the clone and puts a modal on screen that says so.
+///
+/// The waiting modal is a `PrWorktreeComponent` rather than a popup of its own
+/// because it is still the same question being answered — and because the user
+/// must be able to walk away from a clone the same way they walk away from a
+/// lookup, with Escape.
+fn clone_into(repos_dir: String, url: PrUrl, info: PrInfo, flow: Flow) -> ModalFlow {
+    let message = format!("Cloning {}/{} into {}", url.owner, url.repo, repos_dir);
+    flow.requests.raise(PrCommand::Run {
+        job: Job::CloneRepository {
+            owner: url.owner.clone(),
+            repo: url.repo.clone(),
+            repos_dir,
+        },
+        step: PrStep {
+            stage: Stage::Clone {
+                url,
+                info: Box::new(info),
+            },
+            flow: flow.clone(),
+        },
+    });
+    ModalFlow::Replace(Box::new(PrWorktreeComponent::waiting(flow, message)))
+}
+
+/// The clone landed. Take the repository into the list and carry on.
+fn after_clone(
+    ctx: &mut AppContext,
+    url: &PrUrl,
+    info: PrInfo,
+    path: PathBuf,
+    auto: bool,
+) -> ModalFlow {
+    // Opened by layout rather than as "a git repo we just cloned": the clone may
+    // land somewhere that is already colocated with jj, and one rule for picking
+    // a backend is the whole point of the seam.
+    match vcs::open_at(&path, false) {
+        Ok(backends) => {
+            // One entry per backend that drives the clone; the picker still
+            // shows a colocated one once.
+            for backend in backends {
+                ctx.repositories.add_repository(backend);
+            }
+            ctx.repositories.select_repository_by_name(&url.repo);
+        }
+        Err(e) => {
+            ctx.worktrees.last_error = Some(format!("Cloned but failed to load repo: {:#}", e));
+            return ModalFlow::Close;
+        }
+    }
+
+    open_worktree_for_pr(ctx, info, auto)
+}
+
+// ---------------------------------------------------------------------------
+// The modal
+// ---------------------------------------------------------------------------
+
+/// What the modal is waiting for, while it waits.
+///
+/// The job's id is *not* here: only `App` can mint one and only `App` can cancel
+/// one, so it keeps the id and this keeps the half the user can see. Closing the
+/// modal raises [`PrCommand::Abandon`], which is how the two halves stay in step.
+struct Waiting {
+    /// Said in the status row, so the wait names what it is waiting for.
+    message: String,
+    /// Which spinner frame is next.
+    frame: usize,
+}
 
 pub struct PrWorktreeComponent {
     character_index: usize,
@@ -23,11 +272,17 @@ pub struct PrWorktreeComponent {
     /// Where PR data comes from. Injected so the steps that only exist after a
     /// successful fetch can be exercised without talking to GitHub.
     fetch: PrFetcher,
+    requests: PrRequests,
+    /// `Some` while a job is out: the field is frozen and a spinner turns.
+    waiting: Option<Waiting>,
 }
 
 impl PrWorktreeComponent {
     /// `auto_clone` skips both the "clone this repo?" prompt and the branch-name
     /// prompt, going straight from a PR URL to a created worktree.
+    ///
+    /// The component starts with a detached request slot; [`Self::sending_to`]
+    /// is what connects it to the loop that can actually run its jobs.
     pub fn new(auto_clone: bool, fetch: PrFetcher) -> Self {
         Self {
             character_index: 0,
@@ -35,6 +290,49 @@ impl PrWorktreeComponent {
             error: None,
             auto_clone,
             fetch,
+            requests: PrRequests::new(),
+            waiting: None,
+        }
+    }
+
+    /// Points this prompt's background work at `requests`.
+    pub fn sending_to(mut self, requests: PrRequests) -> Self {
+        self.requests = requests;
+        self
+    }
+
+    /// The prompt as it looked when a lookup was started, plus why it failed.
+    fn reopened(flow: Flow, error: String) -> Self {
+        let mut prompt = Self::from_flow(flow);
+        prompt.error = Some(error);
+        prompt
+    }
+
+    /// A modal that only waits: the URL is still readable, nothing is editable.
+    fn waiting(flow: Flow, message: String) -> Self {
+        let mut prompt = Self::from_flow(flow);
+        prompt.waiting = Some(Waiting { message, frame: 0 });
+        prompt
+    }
+
+    fn from_flow(flow: Flow) -> Self {
+        Self {
+            character_index: flow.typed.chars().count(),
+            input: flow.typed,
+            error: None,
+            auto_clone: flow.auto,
+            fetch: flow.fetch,
+            requests: flow.requests,
+            waiting: None,
+        }
+    }
+
+    fn flow(&self) -> Flow {
+        Flow {
+            auto: self.auto_clone,
+            typed: self.input.clone(),
+            fetch: self.fetch.clone(),
+            requests: self.requests.clone(),
         }
     }
 
@@ -43,14 +341,22 @@ impl PrWorktreeComponent {
     }
 
     pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
-        // The URL shape is the hint until something goes wrong; then the failure
-        // takes the row, because a reminder of the format is no help once the
-        // format was accepted and the lookup itself failed.
+        // Three things can occupy the status row, and they are ranked by how
+        // much the user needs them: what is happening now, why the last attempt
+        // failed, and — with nothing else to say — the shape of a PR URL.
         // Short enough to survive the narrowest popup this can be: the shape is
         // only useful if it can be read whole.
-        let status = match &self.error {
-            Some(err) => Some((err.clone(), theme::DANGER_TEXT)),
-            None => Some(("github.com/owner/repo/pull/123".to_string(), theme::MUTED)),
+        let status = match (&mut self.waiting, &self.error) {
+            (Some(waiting), _) => {
+                let glyph = SPINNER[waiting.frame % SPINNER.len()];
+                // Advanced here so the spinner turns for as long as the frame
+                // keeps being drawn — which is once per tick, and is the only
+                // evidence the user has that a multi-minute clone is alive.
+                waiting.frame = waiting.frame.wrapping_add(1);
+                Some((format!("{glyph} {}…", waiting.message), theme::SECONDARY))
+            }
+            (None, Some(err)) => Some((err.clone(), theme::DANGER_TEXT)),
+            (None, None) => Some(("github.com/owner/repo/pull/123".to_string(), theme::MUTED)),
         };
 
         Prompt {
@@ -67,19 +373,34 @@ impl PrWorktreeComponent {
             // yet, and `submit` is the only thing that can decide.
             valid: self.error.is_none(),
             status,
-            footer: confirm_and_cancel("open").to_vec(),
+            footer: self.footer(),
         }
         .render(frame, area);
     }
 
+    /// Enter means nothing while a job is out, so it is not offered.
+    fn footer(&self) -> Vec<FooterEntry<'static>> {
+        if self.waiting.is_some() {
+            return vec![("Esc", "cancel", theme::KEY_SAFE)];
+        }
+        confirm_and_cancel("open").to_vec()
+    }
+
     pub fn handle_action(&mut self, action: Action) -> EventState {
+        // The field is frozen while a job is out: a URL edited under a lookup
+        // that is already running would describe something else entirely. The
+        // keystroke is still swallowed — nothing below this modal may act on it.
         match action {
             Action::InsertChar(c) => {
-                self.enter_char(c);
+                if self.waiting.is_none() {
+                    self.enter_char(c);
+                }
                 EventState::Consumed
             }
             Action::DeleteChar => {
-                self.delete_char();
+                if self.waiting.is_none() {
+                    self.delete_char();
+                }
                 EventState::Consumed
             }
             _ => EventState::NotConsumed,
@@ -121,6 +442,42 @@ impl PrWorktreeComponent {
         let moved = self.character_index.saturating_sub(1);
         self.character_index = moved.clamp(0, self.input.chars().count());
     }
+
+    /// Starts the lookup and hands the flow to the loop.
+    ///
+    /// A rejected URL keeps the prompt open with an error so it can be
+    /// corrected; an accepted one freezes the field and starts spinning. Enter
+    /// pressed a second time is ignored rather than starting a second lookup:
+    /// the first one is what this modal describes, and two answers to one
+    /// question would race for the same screen.
+    fn submit(&mut self) -> ModalFlow {
+        if self.waiting.is_some() {
+            return ModalFlow::Consumed;
+        }
+
+        let url = match github::parse_pr_url(&self.input) {
+            Ok(url) => url,
+            Err(e) => {
+                self.set_error(format!("{:#}", e));
+                return ModalFlow::Consumed;
+            }
+        };
+
+        let message = format!("Looking up {}/{} #{}", url.owner, url.repo, url.number);
+        self.requests.raise(PrCommand::Run {
+            job: Job::FetchPullRequest {
+                fetcher: self.fetch.clone(),
+                url: url.clone(),
+            },
+            step: PrStep {
+                stage: Stage::Lookup { url },
+                flow: self.flow(),
+            },
+        });
+        self.error = None;
+        self.waiting = Some(Waiting { message, frame: 0 });
+        ModalFlow::Consumed
+    }
 }
 
 impl Modal for PrWorktreeComponent {
@@ -139,19 +496,36 @@ impl Modal for PrWorktreeComponent {
         PrWorktreeComponent::draw(self, frame, area);
     }
 
+    /// Insert even while waiting, where nothing can be typed: Normal mode would
+    /// make every letter a list command — 'q' would quit in the middle of a
+    /// clone — and the keys that matter here, Escape and Ctrl+C, work in both.
     fn mode(&self) -> InputMode {
         InputMode::Insert
     }
 
-    fn handle(&mut self, action: Action, ctx: &mut AppContext) -> ModalFlow {
+    fn handle(&mut self, action: Action, _ctx: &mut AppContext) -> ModalFlow {
         match action {
-            Action::Select => self.submit(ctx),
-            Action::ClosePopup | Action::ExitInsertMode => ModalFlow::Close,
+            Action::Select => self.submit(),
+            Action::ClosePopup | Action::ExitInsertMode => {
+                // Leaving is what cancels: the loop cannot see that this modal
+                // is gone, so it is told before it goes.
+                if self.waiting.is_some() {
+                    self.requests.raise(PrCommand::Abandon);
+                }
+                ModalFlow::Close
+            }
             _ => self.handle_action(action).into(),
         }
     }
 
     fn help(&self) -> Vec<HelpEntry> {
+        if self.waiting.is_some() {
+            return vec![
+                HelpEntry::Section("Keybindings"),
+                HelpEntry::Binding("Esc", "Stop waiting and cancel"),
+                HelpEntry::Binding("Ctrl+C", "Quit"),
+            ];
+        }
         vec![
             HelpEntry::Section("Keybindings"),
             HelpEntry::Binding("Enter", "Fetch PR and open worktree"),
@@ -160,108 +534,6 @@ impl Modal for PrWorktreeComponent {
             HelpEntry::Binding("Ctrl+C", "Quit"),
         ]
     }
-}
-
-impl PrWorktreeComponent {
-    /// A rejected URL keeps the prompt open with an error so it can be corrected.
-    fn submit(&mut self, ctx: &mut AppContext) -> ModalFlow {
-        let pr_url = match github::parse_pr_url(&self.input) {
-            Ok(url) => url,
-            Err(e) => {
-                self.set_error(format!("{:#}", e));
-                return ModalFlow::Consumed;
-            }
-        };
-
-        let pr_info = match (self.fetch)(&pr_url) {
-            Ok(info) => info,
-            Err(e) => {
-                self.set_error(format!("{:#}", e));
-                return ModalFlow::Consumed;
-            }
-        };
-
-        let auto = self.auto_clone;
-        if ctx.repositories.select_repository_by_name(&pr_url.repo) {
-            return open_worktree_for_pr(ctx, pr_info, auto);
-        }
-
-        if auto {
-            return clone_flow(ctx, pr_url, pr_info, true);
-        }
-
-        // Names the backend, because this dialog is where the repository's shape
-        // is decided: `github::clone_repository` always clones with git, and a jj
-        // user who is not told here finds out much later. One extra word rather
-        // than a sentence — the picker that follows carries the jj escape hatch.
-        let label = format!(
-            "Repository '{}' not found. Clone from GitHub with git?",
-            pr_url.repo
-        );
-        let remote = format!("git@github.com:{}/{}.git", pr_url.owner, pr_url.repo);
-        let on_confirm: ConfirmCallback =
-            Box::new(move |ctx| clone_flow(ctx, pr_url, pr_info, false));
-        ModalFlow::Replace(Box::new(ConfirmComponent::new(
-            "Clone Repository".to_string(),
-            label,
-            remote,
-            on_confirm,
-        )))
-    }
-}
-
-/// Cloning needs a destination: with several configured repo dirs the user picks
-/// one, otherwise the single dir is used without asking.
-fn clone_flow(
-    ctx: &mut AppContext,
-    pr_url: github::PrUrl,
-    pr_info: github::PrInfo,
-    auto: bool,
-) -> ModalFlow {
-    if ctx.args.repos_dirs.len() > 1 {
-        let on_select: SelectCallback<String> =
-            Box::new(move |ctx, dir| clone_into(ctx, dir, pr_url, pr_info, auto));
-        return ModalFlow::Replace(Box::new(SelectDirectoryComponent::new(
-            ctx.args.repos_dirs.clone(),
-            on_select,
-        )));
-    }
-    let dir = ctx.args.repos_dirs[0].clone();
-    clone_into(ctx, dir, pr_url, pr_info, auto)
-}
-
-fn clone_into(
-    ctx: &mut AppContext,
-    repos_dir: String,
-    pr_url: github::PrUrl,
-    pr_info: github::PrInfo,
-    auto: bool,
-) -> ModalFlow {
-    if let Err(e) = github::clone_repository(&pr_url.owner, &pr_url.repo, &repos_dir) {
-        ctx.worktrees.last_error = Some(format!("{:#}", e));
-        return ModalFlow::Close;
-    }
-
-    let repo_path = std::path::PathBuf::from(&repos_dir).join(&pr_url.repo);
-    // Opened by layout rather than as "a git repo we just cloned": the clone may
-    // land somewhere that is already colocated with jj, and one rule for picking
-    // a backend is the whole point of the seam.
-    match vcs::open_at(&repo_path, false) {
-        Ok(backends) => {
-            // One entry per backend that drives the clone; the picker still
-            // shows a colocated one once.
-            for backend in backends {
-                ctx.repositories.add_repository(backend);
-            }
-            ctx.repositories.select_repository_by_name(&pr_url.repo);
-        }
-        Err(e) => {
-            ctx.worktrees.last_error = Some(format!("Cloned but failed to load repo: {:#}", e));
-            return ModalFlow::Close;
-        }
-    }
-
-    open_worktree_for_pr(ctx, pr_info, auto)
 }
 
 /// Final step of the PR flow: select the existing worktree, create one outright
@@ -319,4 +591,128 @@ fn open_worktree_for_pr(ctx: &mut AppContext, pr_info: github::PrInfo, auto: boo
     );
     prompt.base_branch_hint = base_branch_hint;
     ModalFlow::Replace(Box::new(prompt))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use ratatui::{backend::TestBackend, Terminal};
+
+    use super::*;
+    use crate::components::{RepositoriesComponent, WorktreesComponent};
+    use crate::jobs::JobKind;
+
+    fn a_flow(requests: &PrRequests) -> Flow {
+        Flow {
+            auto: false,
+            typed: "https://github.com/acme/widget/pull/7".to_string(),
+            fetch: Arc::new(|_| unreachable!("no lookup in these tests")),
+            requests: requests.clone(),
+        }
+    }
+
+    fn a_url() -> PrUrl {
+        PrUrl {
+            owner: "acme".to_string(),
+            repo: "widget".to_string(),
+            number: 7,
+        }
+    }
+
+    fn an_info() -> PrInfo {
+        PrInfo {
+            branch_name: "feature-from-pr".to_string(),
+            is_merged: false,
+        }
+    }
+
+    fn an_args() -> crate::cli::Args {
+        crate::cli::Args::for_dirs("/tmp/spaces", vec!["/tmp/repos".to_string()])
+    }
+
+    /// Renders a modal at a comfortable size and returns the screen as text.
+    fn screen_of(modal: &mut dyn Modal) -> String {
+        let mut worktrees = WorktreesComponent::new(Vec::new());
+        let mut repositories = RepositoriesComponent::new(Vec::new());
+        let args = an_args();
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).expect("terminal init");
+        terminal
+            .draw(|frame| {
+                let area = modal.area(frame.area());
+                let mut ctx = AppContext {
+                    worktrees: &mut worktrees,
+                    repositories: &mut repositories,
+                    args: &args,
+                };
+                modal.draw(frame, area, &mut ctx);
+            })
+            .expect("draw failed");
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The clone is the worst wait in the app, and the one the key handler must
+    /// never take: choosing a destination only *starts* it.
+    ///
+    /// Driven here rather than through the key handler because the step after
+    /// this one shells out to `git clone`, which the suite has no business doing.
+    #[test]
+    fn choosing_a_destination_starts_a_clone_job_and_says_so() {
+        let requests = PrRequests::new();
+        let next = clone_into(
+            "/tmp/repos".to_string(),
+            a_url(),
+            an_info(),
+            a_flow(&requests),
+        );
+
+        let raised = requests.take().expect("the clone must have been raised");
+        let PrCommand::Run { job, .. } = raised else {
+            panic!("cloning should raise a job, not an abandon");
+        };
+        assert_eq!(job.kind(), JobKind::CloneRepository);
+
+        let ModalFlow::Replace(mut modal) = next else {
+            panic!("the picker should be replaced by something that waits");
+        };
+        let screen = screen_of(modal.as_mut());
+        assert!(
+            screen.contains("Cloning acme/widget into /tmp/repos"),
+            "the wait must name the clone it is waiting on:\n{screen}"
+        );
+        // Minutes of clone are unreadable without something moving.
+        assert_ne!(screen, screen_of(modal.as_mut()), "the spinner must turn");
+    }
+
+    /// Escape during a clone is the only way out, so it has to reach the loop:
+    /// closing the modal alone would leave the job running with nobody waiting.
+    #[test]
+    fn escaping_a_wait_asks_the_loop_to_abandon_the_job() {
+        let requests = PrRequests::new();
+        let mut modal =
+            PrWorktreeComponent::waiting(a_flow(&requests), "Cloning acme/widget".to_string());
+
+        let mut worktrees = WorktreesComponent::new(Vec::new());
+        let mut repositories = RepositoriesComponent::new(Vec::new());
+        let args = an_args();
+        let mut ctx = AppContext {
+            worktrees: &mut worktrees,
+            repositories: &mut repositories,
+            args: &args,
+        };
+
+        assert!(matches!(
+            modal.handle(Action::ClosePopup, &mut ctx),
+            ModalFlow::Close
+        ));
+        assert!(matches!(requests.take(), Some(PrCommand::Abandon)));
+    }
 }

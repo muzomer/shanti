@@ -11,9 +11,10 @@ use tracing::debug;
 use crate::{
     cli,
     components::{
-        spaces_of, worktrees_bindings, Action, AppContext, ConfirmComponent, EventState,
-        HelpComponent, Modal, ModalFlow, PrWorktreeComponent, RepositoriesComponent,
-        RepositoriesModal, SpaceEntry, WorktreesComponent,
+        resume_pr_flow, spaces_of, worktrees_bindings, Action, AppContext, ConfirmComponent,
+        EventState, HelpComponent, Modal, ModalFlow, PrCommand, PrRequests, PrStep,
+        PrWorktreeComponent, RepositoriesComponent, RepositoriesModal, SpaceEntry,
+        WorktreesComponent,
     },
     github,
     jobs::{Completion, Job, JobId, JobResult, Worker},
@@ -68,6 +69,26 @@ pub struct App {
     scan_found: usize,
     /// A job changed what is on disk, so the list is due a re-read.
     spaces_stale: bool,
+    /// Where the PR flow raises the work it cannot run itself.
+    ///
+    /// One handle for the whole session, cloned into every PR prompt: only one
+    /// PR flow can be on screen at a time, so one slot is one flow's worth.
+    pr_requests: PrRequests,
+    /// The PR flow's job, while one is out. See [`PrFlow`].
+    pr_flow: Option<PrFlow>,
+}
+
+/// A PR flow suspended on a background job.
+///
+/// The id is here rather than in the modal because minting and cancelling one
+/// are both `App`'s to do; the modal keeps the half the user can see. `depth` is
+/// how tall the stack was when the job started, which is what lets the answer
+/// land on the modal that asked for it even if the help popup was opened over it
+/// in the meantime.
+struct PrFlow {
+    id: JobId,
+    step: PrStep,
+    depth: usize,
 }
 
 impl App {
@@ -111,6 +132,8 @@ impl App {
             scans: HashSet::new(),
             scan_found: 0,
             spaces_stale: false,
+            pr_requests: PrRequests::new(),
+            pr_flow: None,
         }
     }
 
@@ -129,6 +152,10 @@ impl App {
     pub fn detach_worker(&mut self) {
         self.outstanding.clear();
         self.scans.clear();
+        // Nothing can answer the PR flow any more, so it is not left holding a
+        // step for a job that will never come back. It is only ever detached on
+        // the way out, so there is no modal left to tell.
+        self.pr_flow = None;
         self.update_scan_indicator();
         self.jobs = None;
     }
@@ -219,6 +246,20 @@ impl App {
         // is taken here rather than in the arms below: a spinner left running by
         // an error would be a spinner that never stops.
         self.scans.remove(&result.id);
+
+        // The PR flow's own job goes to the flow, not to the arms below: only it
+        // knows what its answer means, and only it can put the next step on
+        // screen. Failure included — a lookup that failed is news for the prompt
+        // the user is still looking at, not for the list behind it.
+        if self
+            .pr_flow
+            .as_ref()
+            .is_some_and(|flow| flow.id == result.id)
+        {
+            let flow = self.pr_flow.take().expect("just checked");
+            self.resume_pr(flow, result.outcome);
+            return;
+        }
 
         match result.outcome {
             // Where a background failure becomes visible. It is deliberately the
@@ -427,19 +468,91 @@ impl App {
             }
         };
 
+        let state = self.apply_flow(flow);
+        // Right after the stack settled, so a modal that raised work is the one
+        // the depth below is measured against.
+        self.pump_pr();
+        state
+    }
+
+    /// Does what a modal asked of the stack.
+    fn apply_flow(&mut self, flow: ModalFlow) -> EventState {
         match flow {
             ModalFlow::Consumed => EventState::Consumed,
             ModalFlow::Ignored => EventState::NotConsumed,
             ModalFlow::Close => {
-                modals.pop();
+                self.modals.pop();
                 EventState::Consumed
             }
             ModalFlow::Replace(next) => {
-                modals.pop();
-                modals.push(next);
+                self.modals.pop();
+                self.modals.push(next);
                 EventState::Consumed
             }
         }
+    }
+
+    /// Runs whatever the PR flow raised while it had the keyboard.
+    ///
+    /// The flow cannot reach the worker itself, so this is where its requests
+    /// become jobs. Any job already out is abandoned first: a new request
+    /// supersedes it, and a closed modal wants nothing at all. That is the same
+    /// rule the rest of `App` follows — [`App::abandon`] both forgets the id and
+    /// cancels the work, so a late answer can never arrive for a flow that is no
+    /// longer on screen.
+    fn pump_pr(&mut self) {
+        let Some(command) = self.pr_requests.take() else {
+            return;
+        };
+        if let Some(flow) = self.pr_flow.take() {
+            self.abandon(flow.id);
+        }
+        let PrCommand::Run { job, step } = command else {
+            return;
+        };
+        match self.submit(job) {
+            Some(id) => {
+                self.pr_flow = Some(PrFlow {
+                    id,
+                    step,
+                    depth: self.modals.len(),
+                })
+            }
+            // No worker, so nothing was started and nothing will ever answer:
+            // the modal that is waiting has to be taken off the screen here, or
+            // it would spin for a job that does not exist.
+            None => {
+                self.modals.pop();
+                self.worktrees_component.last_error =
+                    Some("no background worker is running".to_string());
+            }
+        }
+    }
+
+    /// Hands a finished job back to the PR flow that asked for it.
+    fn resume_pr(&mut self, flow: PrFlow, outcome: Result<Completion>) {
+        // Anything opened *over* the waiting modal — the help popup is the only
+        // one that can be — goes with it: the next step replaces the modal that
+        // was waiting, and a popup left on top would hide the replacement.
+        self.modals.truncate(flow.depth);
+
+        let Self {
+            worktrees_component,
+            repositories_component,
+            args,
+            ..
+        } = self;
+        let next = {
+            let mut ctx = AppContext {
+                worktrees: worktrees_component,
+                repositories: repositories_component,
+                args,
+            };
+            resume_pr_flow(&mut ctx, flow.step, outcome)
+        };
+        self.apply_flow(next);
+        // The step may itself have raised the next job — a confirmed clone does.
+        self.pump_pr();
     }
 
     fn handle_worktrees_action(&mut self, action: Action) -> EventState {
@@ -449,17 +562,17 @@ impl App {
                 EventState::Consumed
             }
             Action::OpenPrWorktree => {
-                self.modals.push(Box::new(PrWorktreeComponent::new(
-                    false,
-                    self.pr_fetcher.clone(),
-                )));
+                self.modals.push(Box::new(
+                    PrWorktreeComponent::new(false, self.pr_fetcher.clone())
+                        .sending_to(self.pr_requests.clone()),
+                ));
                 EventState::Consumed
             }
             Action::OpenPrWorktreeAutoClone => {
-                self.modals.push(Box::new(PrWorktreeComponent::new(
-                    true,
-                    self.pr_fetcher.clone(),
-                )));
+                self.modals.push(Box::new(
+                    PrWorktreeComponent::new(true, self.pr_fetcher.clone())
+                        .sending_to(self.pr_requests.clone()),
+                ));
                 EventState::Consumed
             }
             // 'D' skips the *question*, never the guard: a space holding work

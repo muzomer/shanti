@@ -206,6 +206,17 @@ impl Fixture {
         }
     }
 
+    /// Applies a background result if one turns up shortly, and shrugs if not.
+    ///
+    /// For the cancellation tests, where whether a result exists at all depends
+    /// on whether the worker had picked the job up before it was cancelled — a
+    /// race the app is built to tolerate, so the test tolerates it too.
+    fn deliver_any(&mut self) {
+        if let Ok(AppEvent::Job(result)) = self.results.recv_timeout(Duration::from_millis(500)) {
+            self.app.handle_job(result);
+        }
+    }
+
     /// Gives `branch` an upstream that already holds its commits.
     ///
     /// This is the only state the delete guard considers safe — clean and
@@ -1198,10 +1209,105 @@ fn pr_prompt_ctrl_c_exits() {
 // every test stops at or before that point, so nothing here touches the network.
 // ---------------------------------------------------------------------------
 
-/// Types a PR URL into the prompt and submits it.
+/// Types a PR URL into the prompt, submits it, and waits for the lookup.
+///
+/// The lookup is a job now: Enter only *starts* it, so every test that used to
+/// see the next step appear on the same keystroke has to pump the result the way
+/// the real loop does. That is the point of the issue — the keystroke returns
+/// immediately, whatever GitHub is doing.
 fn submit_pr(f: &mut Fixture, url: &str) -> String {
     f.type_str(url);
-    f.press(key(KeyCode::Enter))
+    let state = f.press(key(KeyCode::Enter));
+    f.deliver_one();
+    state
+}
+
+#[test]
+fn a_submitted_pr_url_leaves_the_prompt_up_and_spinning() {
+    let mut f = Fixture::new();
+    f.stub_pr_branch("feature-from-pr", false);
+
+    f.press_char('p');
+    f.type_str("https://github.com/acme/alpha/pull/7");
+    // Enter returns without the answer: nothing has been pumped yet.
+    assert_eq!(f.press(key(KeyCode::Enter)), CONSUMED);
+
+    assert_eq!(f.modal(), Modal::PrWorktree, "the prompt must stay up");
+    let screen = f.screen();
+    assert!(
+        screen.contains("Looking up acme/alpha #7"),
+        "the wait must name what it is waiting for:\n{screen}"
+    );
+    // A frozen frame is exactly what this issue is about, so the indicator has
+    // to move: two consecutive frames must not be identical.
+    assert_ne!(f.screen(), screen, "the spinner should be turning");
+
+    // And the answer still lands when it arrives.
+    f.deliver_one();
+    assert_eq!(f.modal(), Modal::CreateWorktree);
+}
+
+#[test]
+fn escaping_a_pending_lookup_abandons_it() {
+    let mut f = Fixture::new();
+    f.stub_pr_branch("feature-from-pr", false);
+
+    f.press_char('p');
+    f.type_str("https://github.com/acme/alpha/pull/7");
+    f.press(key(KeyCode::Enter));
+
+    assert_eq!(f.press(key(KeyCode::Esc)), CONSUMED);
+    f.assert_at_worktree_list();
+
+    // Two things can have happened to the job, and the flow must survive both:
+    // it never started, so no result is ever sent; or it was already running,
+    // and its answer arrives to be dropped on the floor rather than reopening a
+    // flow the user walked away from.
+    f.deliver_any();
+    f.assert_at_worktree_list();
+}
+
+#[test]
+fn a_second_enter_during_a_lookup_does_not_start_a_second_one() {
+    let mut f = Fixture::new();
+    f.stub_pr_branch("feature-from-pr", false);
+
+    f.press_char('p');
+    f.type_str("https://github.com/acme/alpha/pull/7");
+    f.press(key(KeyCode::Enter));
+    assert_eq!(f.press(key(KeyCode::Enter)), CONSUMED);
+    // Typing is refused too: the URL on screen has to keep describing the lookup
+    // that is actually out.
+    f.type_str("xyz");
+    assert!(!f.screen().contains("pull/7xyz"));
+
+    f.deliver_one();
+    assert_eq!(f.modal(), Modal::CreateWorktree);
+    assert!(
+        f.results.try_recv().is_err(),
+        "one submission must produce exactly one job"
+    );
+}
+
+#[test]
+fn keys_pressed_during_a_lookup_do_not_disturb_it() {
+    let mut f = Fixture::new();
+    f.stub_pr_branch("feature-from-pr", false);
+
+    f.press_char('p');
+    f.type_str("https://github.com/acme/alpha/pull/7");
+    f.press(key(KeyCode::Enter));
+
+    // Everything but Escape and Ctrl+C is swallowed by the waiting prompt: the
+    // field is a text field, so these are characters rather than commands, and
+    // none of them may reach the list underneath.
+    for k in ['?', 'q', 'd', 'j'] {
+        assert_eq!(f.press_char(k), CONSUMED);
+    }
+    assert_eq!(f.modal(), Modal::PrWorktree);
+
+    f.deliver_one();
+    assert_eq!(f.modal(), Modal::CreateWorktree);
 }
 
 #[test]
