@@ -30,8 +30,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::TestBackend, Terminal};
 use shanti::app::App;
 use shanti::cli::Args;
+use shanti::config::{Config, Hooks};
 use shanti::events::AppEvent;
 use shanti::github::PrInfo;
+use shanti::hooks::HookSettings;
 use shanti::jobs::Worker;
 use tempfile::{tempdir, TempDir};
 
@@ -180,6 +182,21 @@ impl Fixture {
             _remote_dir: None,
             args,
         }
+    }
+
+    /// The standard fixture, plus post-create hooks.
+    ///
+    /// Hooks ride on `Args`, so a test hands them in exactly the way it hands
+    /// in its temp directories — no configuration file, no environment.
+    fn with_hooks(hooks: Hooks) -> Self {
+        let mut f = Self::build(false);
+        let config = Config {
+            hooks,
+            ..Config::default()
+        };
+        f.args = f.args.clone().with_hooks(HookSettings::from_config(config));
+        f.reload();
+        f
     }
 
     /// Rebuilds the app from the same configuration, re-probing every status.
@@ -871,6 +888,96 @@ fn create_worktree_confirms_and_returns_to_the_worktree_list() {
     assert!(
         f.repo_path("alpha").exists(),
         "the source repository should be untouched"
+    );
+}
+
+/// The whole point of the feature: a space that is usable the moment it appears.
+#[test]
+fn creating_a_space_copies_the_files_and_runs_the_commands() {
+    let mut f = Fixture::with_hooks(Hooks {
+        copy: vec![std::path::PathBuf::from(".env")],
+        run: vec!["printf '%s' \"$SHANTI_SPACE_NAME\" > .hook-ran".to_string()],
+    });
+    // An ignored file, which is exactly what a fresh checkout cannot have.
+    std::fs::write(f.repo_path("alpha").join(".env"), "SECRET=1\n").expect("could not write .env");
+
+    f.press_char('n');
+    f.press_char('g');
+    f.press(key(KeyCode::Enter));
+    f.type_str("feature-two");
+    f.press(key(KeyCode::Enter));
+
+    // Nothing has run yet: the hooks are a job, and the key handler returned.
+    let space = f.worktree_path("alpha", "feature-two");
+    assert!(space.is_dir(), "the space itself is created synchronously");
+    assert!(
+        !space.join(".hook-ran").exists(),
+        "hooks must not run on the render thread"
+    );
+
+    f.deliver_one();
+
+    assert_eq!(
+        std::fs::read_to_string(space.join(".env")).expect("the copy hook did not run"),
+        "SECRET=1\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(space.join(".hook-ran")).expect("the command hook did not run"),
+        "feature-two",
+        "the command runs in the space and is told its name"
+    );
+    // Success is silent.
+    assert!(
+        !f.screen().contains("Hook failed"),
+        "a hook that worked must say nothing:\n{}",
+        f.screen()
+    );
+}
+
+/// A broken hook is news, but never a reason to lose the space.
+#[test]
+fn a_failing_hook_reports_and_leaves_the_space_intact() {
+    let mut f = Fixture::with_hooks(Hooks {
+        copy: Vec::new(),
+        run: vec!["exit 3".to_string()],
+    });
+
+    f.press_char('n');
+    f.press_char('g');
+    f.press(key(KeyCode::Enter));
+    f.type_str("feature-two");
+    f.press(key(KeyCode::Enter));
+    f.deliver_one();
+
+    let screen = f.screen();
+    assert!(
+        screen.contains("Hook failed for feature-two"),
+        "the failure must reach the status line:\n{screen}"
+    );
+    assert!(
+        f.worktree_path("alpha", "feature-two").is_dir(),
+        "the space must survive its hooks"
+    );
+    assert!(
+        screen.contains("feature-two"),
+        "and must still be listed:\n{screen}"
+    );
+}
+
+/// No hooks configured, no job — the default user pays nothing for the feature.
+#[test]
+fn creating_a_space_without_hooks_queues_nothing() {
+    let mut f = Fixture::new();
+
+    f.press_char('n');
+    f.press_char('g');
+    f.press(key(KeyCode::Enter));
+    f.type_str("feature-two");
+    f.press(key(KeyCode::Enter));
+
+    assert!(
+        f.results.recv_timeout(Duration::from_millis(200)).is_err(),
+        "an empty plan must not become a job"
     );
 }
 

@@ -12,7 +12,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::{cli, keymap::InputMode, vcs};
+use crate::{cli, hooks::HookPlan, keymap::InputMode, vcs};
 
 use super::{
     worktrees::SpaceEntry, Action, EventState, HelpEntry, RepositoriesComponent, WorktreesComponent,
@@ -26,6 +26,13 @@ pub struct AppContext<'a> {
     pub worktrees: &'a mut WorktreesComponent,
     pub repositories: &'a mut RepositoriesComponent,
     pub args: &'a cli::Args,
+    /// Where a created space leaves the setup work it cannot do itself.
+    ///
+    /// The same seam the PR flow uses for its jobs, in its smallest form: a
+    /// modal must not reach the worker — running `npm install` on the key
+    /// handler is exactly the freeze the job pool exists to prevent — so it
+    /// leaves the plan here and `App` submits it as soon as the stack settles.
+    pub pending_hooks: &'a mut Vec<HookPlan>,
 }
 
 impl AppContext<'_> {
@@ -43,7 +50,15 @@ impl AppContext<'_> {
         let repo_name = repo.repo().name.clone();
         let repo_path = repo.repo().path.clone();
         let dest = vcs::space_dest(&self.args.worktrees_dir, &repo_name, name);
-        let space = repo.create_space(name, &dest)?;
+        // Creating and planning happen together so no caller can create a space
+        // and forget its setup. Planning is pure and cheap; only `HookPlan::run`
+        // blocks, and that happens on a worker.
+        let (space, plan) = vcs::create_space_with_hooks(repo, name, &dest, &self.args.hooks)?;
+        // A user with no hooks configured pays nothing: no job, no id to track,
+        // no spinner.
+        if !plan.is_empty() {
+            self.pending_hooks.push(plan);
+        }
 
         self.worktrees.add(SpaceEntry {
             repo_name,

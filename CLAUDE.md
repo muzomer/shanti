@@ -56,6 +56,7 @@ src/
   keymap.rs                      # key → Action resolution; InputMode (Normal/Insert)
   theme.rs                       # the one place a colour is chosen (Tokyo Night) + tone() mapping
   github.rs                      # PR URL parsing, PrFetcher, PR lookup, repository cloning
+  hooks.rs                       # post-create hooks: HookSettings -> HookPlan -> HookReport
   logs.rs                        # tracing setup
   dirs.rs                        # data/config directory resolution
   components/
@@ -128,6 +129,22 @@ tests/
   human-facing output — add a template in `vcs/jj/template.rs` instead.
 - Likewise, `vcs/git/` is the only place allowed to name a `git2` type.
 
+### Post-create hooks
+
+- **`hooks.rs`** is the whole feature: `HookSettings` (the configured hooks, from
+  `cli::Args`) → `HookSettings::plan(target)` (pure, cheap, safe on the render
+  thread) → `HookPlan::run()` (**blocking** — only ever on a worker) →
+  `HookReport`. `HookReport::summary()` is `None` when nothing failed, because a
+  hook that works must be invisible.
+- `vcs::create_space_with_hooks` is the only way a space is created in the app:
+  creating and planning happen together so no flow can create a space and forget
+  its setup. `AppContext::create_space` leaves the plan in `pending_hooks`, and
+  `App::pump_hooks` submits it as `Job::RunHooks` once the modal stack settles —
+  an empty plan is never submitted, so a user with no hooks pays nothing.
+- A failing hook never destroys or rolls back the space, and hooks are only ever
+  read from the user's own configuration file — never from a repository's
+  working tree.
+
 ### The UI
 
 - **Modal stack** (`app.rs` + `components/modal.rs`): there is no `Focus` enum.
@@ -177,10 +194,12 @@ where each value came from (`--show-config` prints the winner and its origin).
 | `SHANTI_JJ_BIN`        | —                 | Path to the `jj` binary when it is not on `PATH`                 |
 | `SHANTI_DATA`          | —                 | Directory for shanti's log file                                  |
 | `SHANTI_LOGLEVEL`      | —                 | Log level, e.g. `debug` (`RUST_LOG` takes precedence)            |
+| `SHANTI_NO_HOOKS`      | `--no-hooks`      | Skip every post-create hook for this run (any non-empty value)   |
 | `GITHUB_TOKEN`         | —                 | Read-only token for the GitHub PR flow                           |
 
 The file keys `backend` and `editor` are parsed and reported but nothing acts on
-them yet: the backend is decided from the repository on disk.
+them yet: the backend is decided from the repository on disk. The `[hooks]` and
+`[repos.<name>.hooks]` tables *do* act — see **Post-create hooks** above.
 
 ## Conventions
 

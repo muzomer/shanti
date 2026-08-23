@@ -50,6 +50,7 @@ use tracing::debug;
 use crate::{
     events::AppEvent,
     github::{self, PrFetcher, PrInfo, PrUrl},
+    hooks::{self, HookPlan, HookReport},
     vcs::{self, BoxedVcs, Space},
 };
 
@@ -92,6 +93,7 @@ pub enum JobKind {
     FetchPullRequest,
     CloneRepository,
     SpaceStatus,
+    RunHooks,
     #[cfg(test)]
     Custom,
 }
@@ -104,6 +106,7 @@ impl std::fmt::Display for JobKind {
             JobKind::FetchPullRequest => "pull request lookup",
             JobKind::CloneRepository => "clone",
             JobKind::SpaceStatus => "status",
+            JobKind::RunHooks => "post-create hooks",
             #[cfg(test)]
             JobKind::Custom => "custom",
         };
@@ -146,6 +149,21 @@ pub enum Job {
     },
     /// Recompute one repository's spaces, including their status.
     SpaceStatus { path: PathBuf },
+    /// Set a freshly created space up: copy the ignored files over and run the
+    /// configured commands in it.
+    ///
+    /// The plan is already resolved and owned — [`HookSettings::plan`] is pure
+    /// and runs on the render thread — so this job carries everything it needs
+    /// and touches nothing the UI holds. It is the one job that cannot fail as
+    /// a whole: a hook that breaks is an *outcome* inside the report, because
+    /// the space it was setting up exists either way.
+    ///
+    /// Boxed like `Completion::PullRequest`, and for the same reason: a plan is
+    /// wide (two paths, two names and two lists) and an enum is as big as its
+    /// widest arm — including the `PrCommand` this job travels inside.
+    ///
+    /// [`HookSettings::plan`]: crate::hooks::HookSettings::plan
+    RunHooks(Box<HookPlan>),
     /// Test-only body, so the pool can be exercised without a repository, a
     /// network or a clock.
     #[cfg(test)]
@@ -160,6 +178,7 @@ impl Job {
             Job::FetchPullRequest { .. } => JobKind::FetchPullRequest,
             Job::CloneRepository { .. } => JobKind::CloneRepository,
             Job::SpaceStatus { .. } => JobKind::SpaceStatus,
+            Job::RunHooks(_) => JobKind::RunHooks,
             #[cfg(test)]
             Job::Custom(_) => JobKind::Custom,
         }
@@ -203,6 +222,10 @@ impl Job {
                 }
                 Ok(Completion::Spaces { path, spaces })
             }
+            // `run_and_log` rather than `plan.run()`: the log is the floor of
+            // the failure policy, and it holds the detail the one-line status
+            // message cannot.
+            Job::RunHooks(plan) => Ok(Completion::Hooks(Box::new(hooks::run_and_log(&plan)))),
             #[cfg(test)]
             Job::Custom(body) => body(),
         }
@@ -236,6 +259,10 @@ pub enum Completion {
     /// removed behind shanti's back — and an empty list names no repository.
     /// Without the path that answer would be indistinguishable from no answer.
     Spaces { path: PathBuf, spaces: Vec<Space> },
+    /// What the post-create hooks of one space did. Boxed for the same reason
+    /// as `PullRequest`: a report carries its target and every outcome, and an
+    /// enum is as wide as its widest arm.
+    Hooks(Box<HookReport>),
 }
 
 impl std::fmt::Debug for Completion {
@@ -247,6 +274,14 @@ impl std::fmt::Debug for Completion {
             Completion::Cloned { path } => write!(f, "Cloned({})", path.display()),
             Completion::Spaces { path, spaces } => {
                 write!(f, "Spaces({}, {})", path.display(), spaces.len())
+            }
+            Completion::Hooks(report) => {
+                write!(
+                    f,
+                    "Hooks({}, {})",
+                    report.target.space_name,
+                    report.outcomes.len()
+                )
             }
         }
     }

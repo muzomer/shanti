@@ -56,6 +56,16 @@ pub enum Activity {
     Refreshing,
     /// Talking to a repository's remotes. The count is repositories still out.
     Fetching,
+    /// Setting freshly created spaces up — copying their ignored files and
+    /// running their configured commands. The count is spaces still out.
+    ///
+    /// It belongs in this vocabulary and not beside it for the reason the
+    /// vocabulary exists: it is the same wait, on the same spinner, and a user
+    /// asking "is shanti busy?" must not have two places to look. It is also
+    /// the one activity the user is *waiting on* — `npm install` decides
+    /// whether the space they are about to open is ready — so it outranks the
+    /// others rather than hiding behind them.
+    SettingUp,
 }
 
 impl Activity {
@@ -65,6 +75,7 @@ impl Activity {
             Activity::Scanning => ("scanning", "repos"),
             Activity::Refreshing => ("refreshing", "repos left"),
             Activity::Fetching => ("fetching", "repos left"),
+            Activity::SettingUp => ("setting up", "spaces left"),
         }
     }
 }

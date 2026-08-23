@@ -652,6 +652,7 @@ mod tests {
                     worktrees: &mut worktrees,
                     repositories: &mut repositories,
                     args: &args,
+                    pending_hooks: &mut Vec::new(),
                 };
                 modal.draw(frame, area, &mut ctx);
             })
@@ -715,6 +716,7 @@ mod tests {
             worktrees: &mut worktrees,
             repositories: &mut repositories,
             args: &args,
+            pending_hooks: &mut Vec::new(),
         };
 
         assert!(matches!(

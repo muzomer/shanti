@@ -144,6 +144,7 @@ Run `cd $(shanti)` in `bash`/`zsh` or `cd (shanti)` in `fish` shell from any dir
   looking at, when you want it.
 - `--config <FILE>`: read this configuration file instead of the default one.
 - `--show-config`: print the effective configuration, and where each value came from, then exit.
+- `--no-hooks`: skip the [post-create hooks](#post-create-hooks) for this run (or set `SHANTI_NO_HOOKS` to any non-empty value).
 
 ## Keybindings
 
@@ -186,6 +187,7 @@ repos_dirs     = /home/you/src  (command line)
 run_fetch      = false  (built-in default)
 backend        = git  (built-in default)
 editor         = <unset>  (built-in default)
+hooks          = 1 file(s) copied, 2 command(s), 1 repo(s) with their own  (config file)
 ```
 
 ## Configuration file
@@ -202,6 +204,29 @@ run_fetch = true
 
 Two further keys, `backend` (`"git"` / `"jujutsu"`) and `editor`, are accepted by the file and shown by `--show-config`, but nothing acts on them yet: the backend is decided from the repository on disk, and there is no editor integration.
 
+## Post-create hooks
+
+A new space is a fresh checkout, so everything your project needs but does not version — an ignored `.env`, an `.envrc` `direnv` has to allow, `node_modules` — is missing. Describe that setup once and `shanti` does it every time it creates a space:
+
+```toml
+# Runs after every space, in every repository.
+[hooks]
+copy = [".env", ".envrc"]          # carried over from the repository
+run = ["direnv allow"]             # run in the new space, in order, after the copies
+
+# Runs after a space of this repository only, on top of the global hooks above.
+[repos.my-app.hooks]
+run = ["npm ci"]
+```
+
+- **`copy`** lists paths relative to the repository root. A path that is not there is skipped, not an error: a `.env` nobody has written yet is the normal case. Directories are refused — copy hooks carry files.
+- **`run`** lists shell command *lines*, run with the new space as the working directory. Nothing is interpolated into them; every value arrives as an environment variable instead: `SHANTI_SPACE_PATH`, `SHANTI_SPACE_NAME`, `SHANTI_REPO_PATH`, `SHANTI_REPO_NAME` and `SHANTI_BACKEND` (`git` or `jj`).
+- Global hooks run first, then the repository's own, so a general rule is stated once and specialised. A repository is keyed by its directory name, or by its absolute path (`[repos."/home/you/src/my-app".hooks]`) when two checkouts share a name.
+
+Hooks run **in the background**: the list stays usable and shows `setting up` while they work. A hook that fails never costs you the space — it is already created and listed — and says so on the status line, naming the step that broke; the command's output goes to the log file. Success is silent.
+
+Hooks are only ever read from **your own** configuration file. `shanti` never runs a hook shipped inside a repository, so cloning a repository is not a code-execution path. `--no-hooks` (or `SHANTI_NO_HOOKS=1`) skips them all for one run.
+
 ## Environment variables
 
 | Variable               | CLI flag          | Description                                                       |
@@ -213,6 +238,7 @@ Two further keys, `backend` (`"git"` / `"jujutsu"`) and `editor`, are accepted b
 | `SHANTI_JJ_BIN`        | —                 | Path to the `jj` binary, when it is not on `PATH`                  |
 | `SHANTI_DATA`          | —                 | Directory for shanti's log file (default `~/.local/state/shanti`)  |
 | `SHANTI_LOGLEVEL`      | —                 | Log level, e.g. `debug` (`RUST_LOG` takes precedence)              |
+| `SHANTI_NO_HOOKS`      | `--no-hooks`      | Skip every post-create hook for this run (any non-empty value)     |
 | `GITHUB_TOKEN`         | —                 | Read-only token for the GitHub PR flow                             |
 
 # GitHub PR spaces

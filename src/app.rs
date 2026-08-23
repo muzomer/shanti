@@ -9,7 +9,7 @@ use ratatui::{
     layout::{Constraint, Layout},
     Frame,
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::{
     cli,
@@ -20,6 +20,7 @@ use crate::{
         WorktreesComponent,
     },
     github,
+    hooks::{self, HookOutcome, HookPlan, HookReport},
     jobs::{Completion, Job, JobId, JobResult, Worker},
     keymap::{self, InputMode},
     vcs::{BoxedVcs, Consequence, DeletionRisk, RepoId, Space},
@@ -89,6 +90,16 @@ pub struct App {
     pr_requests: PrRequests,
     /// The PR flow's job, while one is out. See [`PrFlow`].
     pr_flow: Option<PrFlow>,
+    /// Setup work left behind by a space that was just created, waiting to be
+    /// submitted. Drained by [`App::pump_hooks`] the moment the stack settles,
+    /// so it is only ever non-empty inside one key press.
+    pending_hooks: Vec<HookPlan>,
+    /// The hook jobs still running; a subset of `outstanding`.
+    ///
+    /// Counted for the indicator: `npm install` runs for minutes, and a user
+    /// about to `cd` into a space that is still being set up should be able to
+    /// see that from the list.
+    hook_jobs: HashSet<JobId>,
 }
 
 /// A PR flow suspended on a background job.
@@ -148,6 +159,8 @@ impl App {
             fetches: HashMap::new(),
             pr_requests: PrRequests::new(),
             pr_flow: None,
+            pending_hooks: Vec::new(),
+            hook_jobs: HashSet::new(),
         }
     }
 
@@ -168,6 +181,7 @@ impl App {
         self.scans.clear();
         self.refreshes.clear();
         self.fetches.clear();
+        self.hook_jobs.clear();
         // Nothing can answer the PR flow any more, so it is not left holding a
         // step for a job that will never come back. It is only ever detached on
         // the way out, so there is no modal left to tell.
@@ -333,6 +347,7 @@ impl App {
         self.scans.remove(&id);
         self.refreshes.remove(&id);
         self.fetches.remove(&id);
+        self.hook_jobs.remove(&id);
         if self.outstanding.remove(&id) {
             if let Some(worker) = &self.jobs {
                 worker.cancel(id);
@@ -353,6 +368,7 @@ impl App {
         self.scans.remove(&result.id);
         self.refreshes.remove(&result.id);
         self.fetches.remove(&result.id);
+        self.hook_jobs.remove(&result.id);
 
         // The PR flow's own job goes to the flow, not to the arms below: only it
         // knows what its answer means, and only it can put the next step on
@@ -389,6 +405,10 @@ impl App {
             // A root finished walking. Its repositories go straight in, so the
             // list grows under the user while the other roots are still out.
             Ok(Completion::Repositories(found)) => self.repositories_found(found),
+            // Success is silent on purpose: a hook the user configured once and
+            // never thinks about again should not announce itself on every
+            // space. `summary()` is `None` unless something actually broke.
+            Ok(Completion::Hooks(report)) => self.hooks_finished(*report),
             Ok(completion) => {
                 debug!(?completion, %kind, "no consumer for this result yet");
             }
@@ -464,7 +484,12 @@ impl App {
     fn update_scan_indicator(&mut self) {
         self.worktrees_component
             .set_scan(self.scan_found, self.is_scanning());
-        let busy = if !self.refreshes.is_empty() {
+        // Hooks come first: they are the only work the user asked for by name
+        // and are waiting on, and the only work whose result changes a
+        // directory they are about to open.
+        let busy = if !self.hook_jobs.is_empty() {
+            Some((Activity::SettingUp, self.hook_jobs.len()))
+        } else if !self.refreshes.is_empty() {
             Some((Activity::Refreshing, self.refreshes.len()))
         } else if !self.fetches.is_empty() {
             Some((Activity::Fetching, self.fetches.len()))
@@ -507,6 +532,7 @@ impl App {
             repositories_component,
             modals,
             args,
+            pending_hooks,
             ..
         } = self;
 
@@ -516,6 +542,9 @@ impl App {
             worktrees: worktrees_component,
             repositories: repositories_component,
             args,
+            // Drawing creates nothing, so nothing is ever left here by a draw;
+            // the field is part of the context, not of this call.
+            pending_hooks,
         };
         // Bottom-to-top: each modal clears its own area, so the one on top wins.
         for modal in modals.iter_mut() {
@@ -589,6 +618,7 @@ impl App {
             repositories_component,
             modals,
             args,
+            pending_hooks,
             ..
         } = self;
 
@@ -597,6 +627,7 @@ impl App {
                 worktrees: worktrees_component,
                 repositories: repositories_component,
                 args,
+                pending_hooks,
             };
             match modals.last_mut() {
                 Some(modal) => modal.handle(action, &mut ctx),
@@ -608,6 +639,7 @@ impl App {
         // Right after the stack settled, so a modal that raised work is the one
         // the depth below is measured against.
         self.pump_pr();
+        self.pump_hooks();
         state
     }
 
@@ -676,6 +708,7 @@ impl App {
             worktrees_component,
             repositories_component,
             args,
+            pending_hooks,
             ..
         } = self;
         let next = {
@@ -683,12 +716,16 @@ impl App {
                 worktrees: worktrees_component,
                 repositories: repositories_component,
                 args,
+                pending_hooks,
             };
             resume_pr_flow(&mut ctx, flow.step, outcome)
         };
         self.apply_flow(next);
         // The step may itself have raised the next job — a confirmed clone does.
         self.pump_pr();
+        // ...and the last step of the PR flow creates a space, which is the
+        // other place hooks are left behind.
+        self.pump_hooks();
     }
 
     fn handle_worktrees_action(&mut self, action: Action) -> EventState {
@@ -782,6 +819,61 @@ impl App {
             .and_then(|vcs| vcs.uncommitted_files(&space));
         let risk = DeletionRisk::of(&space).counting_files(files);
         Some((space, risk))
+    }
+
+    /// Submits the setup work of whatever spaces were just created.
+    ///
+    /// Called wherever a modal can have created one, right after the stack
+    /// settles. Nothing is cancelled here and nothing supersedes anything: two
+    /// spaces created in a row are two independent pieces of work, and unlike a
+    /// PR lookup a hook's result is not about a modal that may have closed — it
+    /// is about a directory that exists.
+    ///
+    /// With no worker there is nothing to run the plan on. Rather than silently
+    /// dropping it — a space that quietly never gets its `.env` — the plan is
+    /// run **blocking**, which is exactly the case that never has a UI to
+    /// freeze: no worker means nobody is drawing.
+    fn pump_hooks(&mut self) {
+        // Asked once, before the loop, because the answer is the same for every
+        // plan and the alternative is handing a plan to `submit` and needing it
+        // back when there was nowhere to put it.
+        let has_worker = self.jobs.is_some();
+        for plan in std::mem::take(&mut self.pending_hooks) {
+            debug!(space = %plan.target.space_name, "post-create hooks");
+            if !has_worker {
+                let report = hooks::run_and_log(&plan);
+                self.hooks_finished(report);
+                continue;
+            }
+            if let Some(id) = self.submit(Job::RunHooks(Box::new(plan))) {
+                self.hook_jobs.insert(id);
+            }
+        }
+        self.update_scan_indicator();
+    }
+
+    /// Reports what the hooks of one space did.
+    ///
+    /// Silent on success, by design: the point of a hook is that the user stops
+    /// thinking about the setup. A failure says which step broke and, above all,
+    /// that the space itself is intact — the sentence that stops a user from
+    /// reaching for the delete key. The captured output is too big for a
+    /// one-line status bar, so it goes to the log and the line says where.
+    fn hooks_finished(&mut self, report: HookReport) {
+        let Some(summary) = report.summary() else {
+            return;
+        };
+        for failure in report.failures() {
+            if let HookOutcome::Failed {
+                command,
+                status,
+                output,
+            } = failure
+            {
+                warn!(command, %status, "post-create hook output:\n{output}");
+            }
+        }
+        self.worktrees_component.last_error = Some(format!("{summary}; see the log for details"));
     }
 
     fn delete_selected_worktree(&mut self) {

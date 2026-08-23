@@ -149,10 +149,10 @@ pub struct HookSettings {
 impl HookSettings {
     /// Read the hooks from shanti's configuration file, honouring [`SKIP_ENV`].
     ///
-    /// Reading the file again here rather than threading it through `cli::Args`
-    /// keeps hooks out of the four-layer precedence machinery, where they do not
-    /// belong: unlike a directory, a hook list has no meaningful environment or
-    /// command-line form to be overridden by.
+    /// For a caller that has no resolved configuration in hand. The TUI is not
+    /// one of them: it takes its hooks off [`crate::cli::Args`] with every other
+    /// setting, because `--no-hooks` gives them a command-line layer and that is
+    /// what the precedence machinery is for.
     pub fn load() -> eyre::Result<Self> {
         Ok(Self::from_config(Config::load()?))
     }
@@ -164,6 +164,40 @@ impl HookSettings {
             debug!("{SKIP_ENV} is set, post-create hooks are skipped");
         }
         Self { config, enabled }
+    }
+
+    /// Whether hooks will run at all — false under [`SKIP_ENV`] or `--no-hooks`.
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// How much is configured, for `--show-config`.
+    ///
+    /// Counts rather than the lists themselves: the question `--show-config`
+    /// answers is "is shanti going to run something I forgot about?", and a
+    /// number answers it without printing a shell script into a report.
+    pub fn counts(&self) -> HookCounts {
+        HookCounts {
+            copies: self.config.hooks.copy.len(),
+            commands: self.config.hooks.run.len(),
+            repos: self
+                .config
+                .repos
+                .values()
+                .filter(|repo| !repo.hooks.is_empty())
+                .count(),
+        }
+    }
+
+    /// The same configuration, with nothing allowed to run.
+    ///
+    /// What `--no-hooks` produces. The lists are kept rather than thrown away
+    /// so `--show-config` can report what *would* have run: "disabled" and
+    /// "nothing configured" are different answers, and a user turning hooks off
+    /// to debug them needs to see which one they are looking at.
+    pub fn switched_off(mut self) -> Self {
+        self.enabled = false;
+        self
     }
 
     /// Settings that run nothing, for callers that have opted out explicitly.
@@ -213,6 +247,25 @@ impl HookSettings {
             }
         }
         applicable
+    }
+}
+
+/// What is configured, without saying what it is. See [`HookSettings::counts`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HookCounts {
+    /// Files the global `[hooks]` table carries over.
+    pub copies: usize,
+    /// Commands the global `[hooks]` table runs.
+    pub commands: usize,
+    /// Repositories with hooks of their own.
+    pub repos: usize,
+}
+
+impl HookCounts {
+    /// Whether nothing at all is configured, so a report can say so in words
+    /// rather than as three zeroes.
+    pub fn is_empty(&self) -> bool {
+        self.copies == 0 && self.commands == 0 && self.repos == 0
     }
 }
 

@@ -34,6 +34,7 @@ use color_eyre::eyre::{eyre, Result, WrapErr};
 use tracing::{debug, warn};
 
 use crate::config::{Backend, Config};
+use crate::hooks::HookSettings;
 
 /// The raw command line, before any merging or path resolution.
 ///
@@ -75,6 +76,17 @@ struct Cli {
     /// Print the effective configuration, with the origin of each value, and exit
     #[arg(long = "show-config")]
     show_config: bool,
+
+    /// Skip every post-create hook for this run
+    ///
+    /// The flag half of `SHANTI_NO_HOOKS`. Deliberately *not* wired to clap's
+    /// `env`: the variable is a switch that any non-empty value sets — which is
+    /// what a user typing `SHANTI_NO_HOOKS=1` means — while clap would insist
+    /// on `true` or `false` and reject the rest. `HookSettings::from_config`
+    /// reads it instead, so the two spellings mean the same thing and the
+    /// variable has exactly one reader.
+    #[arg(long = "no-hooks")]
+    no_hooks: bool,
 }
 
 /// Where a setting's final value came from.
@@ -114,6 +126,10 @@ pub struct Origins {
     pub run_fetch: Origin,
     pub backend: Origin,
     pub editor: Origin,
+    /// Where the *on/off* of hooks came from: the command line or the
+    /// environment when they were switched off, the file otherwise. The lists
+    /// themselves have only ever one source, and it is the file.
+    pub hooks: Origin,
 }
 
 /// Which layer clap took each of its own values from.
@@ -170,6 +186,16 @@ pub struct Args {
     pub config_path: PathBuf,
     /// The user asked for the configuration to be printed instead of the UI.
     pub show_config: bool,
+    /// What to run after a space is created, already resolved.
+    ///
+    /// Hooks ride on `Args` rather than being loaded again inside `App` because
+    /// they are a *setting*, and this is the one place a setting is resolved:
+    /// `--no-hooks` is a command line layer over `SHANTI_NO_HOOKS` over the
+    /// configuration file, which is exactly the precedence machinery here. It
+    /// also keeps `App::with_args` honest — construction still reads neither
+    /// argv, the environment nor the configuration file, so a test points an
+    /// `App` at its own hooks the same way it points it at its own directories.
+    pub hooks: HookSettings,
 }
 
 impl Args {
@@ -208,10 +234,25 @@ impl Args {
                 run_fetch: Origin::Default,
                 backend: Origin::Default,
                 editor: Origin::Default,
+                hooks: Origin::Default,
             },
             config_path: PathBuf::new(),
             show_config: false,
+            // No configuration layer was consulted, so there is nothing to run.
+            // `disabled()` rather than `from_config(Config::default())`: the
+            // latter would read `SHANTI_NO_HOOKS`, and this seam exists
+            // precisely so that nothing process-global is touched.
+            hooks: HookSettings::disabled(),
         }
+    }
+
+    /// The same configuration with hooks of the caller's choosing.
+    ///
+    /// The companion to [`Args::for_dirs`]: a test that wants to prove a hook
+    /// ran needs to hand one in without a configuration file on disk.
+    pub fn with_hooks(mut self, hooks: HookSettings) -> Self {
+        self.hooks = hooks;
+        self
     }
 
     /// Loads the configuration file named by the parsed command line and merges
@@ -269,7 +310,28 @@ impl Args {
             self.editor.as_deref().unwrap_or("<unset>"),
             origins.editor,
         ));
+        // Counts, not the commands themselves: the report answers "is anything
+        // going to run?", and a user who wants to know *what* has the file open.
+        out.push_str(&setting("hooks", &self.hooks_summary(), origins.hooks));
         out
+    }
+
+    /// The one-line answer to "what will run after a space is created?".
+    fn hooks_summary(&self) -> String {
+        let counts = self.hooks.counts();
+        let configured = if counts.is_empty() {
+            "none configured".to_string()
+        } else {
+            format!(
+                "{} file(s) copied, {} command(s), {} repo(s) with their own",
+                counts.copies, counts.commands, counts.repos
+            )
+        };
+        if self.hooks.enabled() {
+            configured
+        } else {
+            format!("disabled ({configured})")
+        }
     }
 }
 
@@ -292,6 +354,27 @@ fn resolve(cli: Cli, sources: Sources, config: Config, config_path: PathBuf) -> 
         .into_iter()
         .filter(|dir| !dir.trim().is_empty())
         .collect();
+
+    // --- hooks -------------------------------------------------------------
+    // Resolved from the whole configuration rather than field by field: what
+    // runs after a space is created is the `[hooks]` table *and* every
+    // `[repos.<name>.hooks]` table, and which of them applies is not known
+    // until there is a repository in hand. `--no-hooks` (and the
+    // `SHANTI_NO_HOOKS` clap reads into it) short-circuits all of it.
+    let hooks = HookSettings::from_config(config.clone());
+    let hooks = if cli.no_hooks {
+        hooks.switched_off()
+    } else {
+        hooks
+    };
+    // Which layer turned them off, or the file that listed them. `from_config`
+    // is the only reader of `SHANTI_NO_HOOKS`, so "off without the flag" is
+    // precisely "off by the environment".
+    let hooks_origin = match (cli.no_hooks, hooks.enabled()) {
+        (true, _) => Origin::CommandLine,
+        (false, false) => Origin::Environment,
+        (false, true) => Origin::ConfigFile,
+    };
 
     // --- worktrees_dir -----------------------------------------------------
     let (worktrees_dir, worktrees_origin) = match (sources.worktrees_dir, cli_worktrees_dir) {
@@ -356,6 +439,7 @@ fn resolve(cli: Cli, sources: Sources, config: Config, config_path: PathBuf) -> 
         run_fetch: fetch_origin,
         backend: backend_origin,
         editor: editor_origin,
+        hooks: hooks_origin,
     };
     debug!(?origins, "Resolved the configuration sources");
 
@@ -384,6 +468,7 @@ fn resolve(cli: Cli, sources: Sources, config: Config, config_path: PathBuf) -> 
         origins,
         config_path,
         show_config: cli.show_config,
+        hooks,
     })
 }
 
