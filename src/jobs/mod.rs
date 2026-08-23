@@ -195,10 +195,13 @@ impl Job {
             }),
             Job::SpaceStatus { path } => {
                 let mut spaces = Vec::new();
+                // Opened here rather than reusing the backend the list already
+                // holds: a worktree created in another terminal exists only on
+                // disk, and only a fresh open goes and looks.
                 for backend in vcs::open_at(&path, false)? {
                     spaces.extend(backend.spaces()?);
                 }
-                Ok(Completion::Spaces(spaces))
+                Ok(Completion::Spaces { path, spaces })
             }
             #[cfg(test)]
             Job::Custom(body) => body(),
@@ -227,7 +230,12 @@ pub enum Completion {
     /// which is what lets [`discard`] remove it again when nobody wants it.
     Cloned { path: PathBuf },
     /// One repository's spaces, freshly read.
-    Spaces(Vec<Space>),
+    ///
+    /// The path travels back with them because the answer a refresh most needs
+    /// to deliver is an *empty* list — a repository whose spaces were all
+    /// removed behind shanti's back — and an empty list names no repository.
+    /// Without the path that answer would be indistinguishable from no answer.
+    Spaces { path: PathBuf, spaces: Vec<Space> },
 }
 
 impl std::fmt::Debug for Completion {
@@ -237,7 +245,9 @@ impl std::fmt::Debug for Completion {
             Completion::Fetched { path } => write!(f, "Fetched({})", path.display()),
             Completion::PullRequest(_) => f.write_str("PullRequest"),
             Completion::Cloned { path } => write!(f, "Cloned({})", path.display()),
-            Completion::Spaces(spaces) => write!(f, "Spaces({})", spaces.len()),
+            Completion::Spaces { path, spaces } => {
+                write!(f, "Spaces({}, {})", path.display(), spaces.len())
+            }
         }
     }
 }
@@ -525,12 +535,20 @@ mod tests {
         Job::Custom(Box::new(move || {
             let _ = started.send(());
             gate.wait();
-            Ok(Completion::Spaces(Vec::new()))
+            Ok(nothing())
         }))
     }
 
+    /// The smallest valid completion, for tests that only care that a job ran.
+    fn nothing() -> Completion {
+        Completion::Spaces {
+            path: PathBuf::new(),
+            spaces: Vec::new(),
+        }
+    }
+
     fn ok_job() -> Job {
-        Job::Custom(Box::new(|| Ok(Completion::Spaces(Vec::new()))))
+        Job::Custom(Box::new(|| Ok(nothing())))
     }
 
     fn recv(rx: &mpsc::Receiver<AppEvent>) -> JobResult {
@@ -569,7 +587,7 @@ mod tests {
                 peak.fetch_max(now, Ordering::SeqCst);
                 thread::sleep(Duration::from_millis(1));
                 running.fetch_sub(1, Ordering::SeqCst);
-                Ok(Completion::Spaces(Vec::new()))
+                Ok(nothing())
             })));
         }
 
@@ -596,7 +614,7 @@ mod tests {
             let ran = Arc::clone(&ran);
             worker.submit(Job::Custom(Box::new(move || {
                 ran.fetch_add(1, Ordering::SeqCst);
-                Ok(Completion::Spaces(Vec::new()))
+                Ok(nothing())
             })))
         };
 

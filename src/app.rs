@@ -1,4 +1,7 @@
-use std::{collections::HashSet, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 
 use color_eyre::eyre::Result;
 use crossterm::event::KeyEvent;
@@ -11,9 +14,9 @@ use tracing::debug;
 use crate::{
     cli,
     components::{
-        resume_pr_flow, spaces_of, worktrees_bindings, Action, AppContext, ConfirmComponent,
-        EventState, HelpComponent, Modal, ModalFlow, PrCommand, PrRequests, PrStep,
-        PrWorktreeComponent, RepositoriesComponent, RepositoriesModal, SpaceEntry,
+        resume_pr_flow, spaces_of, worktrees_bindings, Action, Activity, AppContext,
+        ConfirmComponent, EventState, HelpComponent, Modal, ModalFlow, PrCommand, PrRequests,
+        PrStep, PrWorktreeComponent, RepositoriesComponent, RepositoriesModal, SpaceEntry,
         WorktreesComponent,
     },
     github,
@@ -67,8 +70,18 @@ pub struct App {
     scans: HashSet<JobId>,
     /// How many repositories the current scan has reported — the spinner's count.
     scan_found: usize,
-    /// A job changed what is on disk, so the list is due a re-read.
-    spaces_stale: bool,
+    /// The re-reads still out; a subset of `outstanding`.
+    ///
+    /// One per repository, so the indicator can count down and a second press of
+    /// `r` can abandon exactly the previous round without touching a fetch or a
+    /// clone that is also in flight.
+    refreshes: HashSet<JobId>,
+    /// The fetches still out, each remembering *which* repository it is for.
+    ///
+    /// The path is the half a set could not carry, and it is needed twice: to
+    /// refuse a second fetch of a repository already being fetched, and to
+    /// re-read that one repository when the fetch lands.
+    fetches: HashMap<JobId, PathBuf>,
     /// Where the PR flow raises the work it cannot run itself.
     ///
     /// One handle for the whole session, cloned into every PR prompt: only one
@@ -131,7 +144,8 @@ impl App {
             excluded,
             scans: HashSet::new(),
             scan_found: 0,
-            spaces_stale: false,
+            refreshes: HashSet::new(),
+            fetches: HashMap::new(),
             pr_requests: PrRequests::new(),
             pr_flow: None,
         }
@@ -152,6 +166,8 @@ impl App {
     pub fn detach_worker(&mut self) {
         self.outstanding.clear();
         self.scans.clear();
+        self.refreshes.clear();
+        self.fetches.clear();
         // Nothing can answer the PR flow any more, so it is not left holding a
         // step for a job that will never come back. It is only ever detached on
         // the way out, so there is no modal left to tell.
@@ -188,24 +204,111 @@ impl App {
         for id in std::mem::take(&mut self.scans) {
             self.abandon(id);
         }
+        // A rescan re-reads everything a refresh would have, so any refresh
+        // still out is answering a question that no longer needs asking — and
+        // would answer it about repositories the scan is about to replace.
+        for id in std::mem::take(&mut self.refreshes) {
+            self.abandon(id);
+        }
         self.repositories_component.replace_backends(Vec::new());
         self.worktrees_component.set_spaces(Vec::new());
         self.scan_found = 0;
 
-        for root in std::mem::take(&mut self.scan_roots) {
+        // The roots are *kept*, not consumed: `R` runs this again, and a list of
+        // repos dirs that emptied itself on first use would make every rescan
+        // after the first one walk nothing at all.
+        for root in self.scan_roots.clone() {
             debug!("listing repositories in: {}", root.display());
             let job = Job::ScanRepositories {
                 roots: vec![root.clone()],
                 excluded: self.excluded.clone(),
             };
-            match self.submit(job) {
-                Some(id) => {
-                    self.scans.insert(id);
-                }
-                // No worker, so the root was not walked: keep it, and attaching
-                // one later still scans it.
-                None => self.scan_roots.push(root),
+            // `None` means there is no worker, so the root was simply not
+            // walked; it stays in `scan_roots` and attaching one later scans it.
+            if let Some(id) = self.submit(job) {
+                self.scans.insert(id);
             }
+        }
+        self.update_scan_indicator();
+    }
+
+    /// Re-reads the spaces and status of every repository already discovered.
+    ///
+    /// This is what `r` means, and what it deliberately does *not* mean. It
+    /// re-opens each known repository on a worker and asks it for its spaces
+    /// again, which is how a worktree created in another terminal — or removed
+    /// with plain `git` — reaches the list. It walks no repos dir and talks to
+    /// no remote: a repository that did not exist at launch is `R`'s business,
+    /// and a remote that has moved on is `f`'s.
+    ///
+    /// One job per repository, for the same reason discovery is one job per
+    /// root: the list is repaired repository by repository as the answers land,
+    /// rather than in one jump at the end.
+    ///
+    /// Idempotent, twice over. A second press abandons the round still out and
+    /// starts another, so the two can never interleave. And while a scan is
+    /// running this does nothing at all: the scan is already re-reading every
+    /// repository from disk, and refreshing the half of the list it has
+    /// delivered so far would be doing the same work twice to reach the same
+    /// place.
+    fn start_refresh(&mut self) {
+        if self.is_scanning() {
+            debug!("a scan is already re-reading everything; ignoring the refresh");
+            return;
+        }
+        for id in std::mem::take(&mut self.refreshes) {
+            self.abandon(id);
+        }
+        for path in self.repositories_component.repository_paths() {
+            self.refresh_repository(path);
+        }
+        self.update_scan_indicator();
+    }
+
+    /// Queues a re-read of one repository's spaces.
+    ///
+    /// Used both by `r`, which asks for all of them, and by a landed fetch,
+    /// which changed exactly one repository's remotes and so has exactly one
+    /// repository's rows to correct.
+    fn refresh_repository(&mut self, path: PathBuf) {
+        if let Some(id) = self.submit(Job::SpaceStatus { path }) {
+            self.refreshes.insert(id);
+        }
+    }
+
+    /// Fetches the remotes of the repository the selected space belongs to.
+    ///
+    /// Per repository rather than globally, because that is what the interactive
+    /// case actually is: the user is looking at one space and wants to know
+    /// whether *its* branch has moved. Fetching all of them is still available —
+    /// it is what `--run-fetch` does — but as a decision made once at startup by
+    /// a script, not as a key that makes the whole session wait on the slowest
+    /// remote of two hundred.
+    ///
+    /// Pressing it twice on the same repository is a no-op: the fetch is already
+    /// out, and a second one would only ask the same remote the same question.
+    /// Pressing it on a *different* repository queues that one alongside — they
+    /// are independent, and the pool bounds how many run at once.
+    fn fetch_selected(&mut self) {
+        let Some(space) = self.worktrees_component.selected_space() else {
+            return;
+        };
+        let Some(path) = self
+            .repositories_component
+            .backend_for(&space)
+            .map(|backend| backend.repo().path.clone())
+        else {
+            self.worktrees_component.last_error =
+                Some(format!("no open repository owns {}", space.path.display()));
+            return;
+        };
+
+        if self.fetches.values().any(|fetching| fetching == &path) {
+            debug!(repo = %path.display(), "already fetching");
+            return;
+        }
+        if let Some(id) = self.submit(Job::FetchRemotes { path: path.clone() }) {
+            self.fetches.insert(id, path);
         }
         self.update_scan_indicator();
     }
@@ -225,9 +328,11 @@ impl App {
     /// Cancelling in the pool as well as forgetting the id is not redundant —
     /// forgetting protects the state, cancelling saves the work.
     fn abandon(&mut self, id: JobId) {
-        // A scan nobody is waiting for is also one the spinner must stop
+        // A job nobody is waiting for is also one the indicator must stop
         // counting, or an abandoned root would leave it turning forever.
         self.scans.remove(&id);
+        self.refreshes.remove(&id);
+        self.fetches.remove(&id);
         if self.outstanding.remove(&id) {
             if let Some(worker) = &self.jobs {
                 worker.cancel(id);
@@ -242,10 +347,12 @@ impl App {
             debug!(id = ?result.id, %kind, "ignoring the result of an abandoned job");
             return;
         }
-        // A scan is over whether it found repositories or failed trying, so this
-        // is taken here rather than in the arms below: a spinner left running by
-        // an error would be a spinner that never stops.
+        // A job is over whether it succeeded or failed trying, so these are
+        // taken here rather than in the arms below: a spinner left running by an
+        // error would be a spinner that never stops.
         self.scans.remove(&result.id);
+        self.refreshes.remove(&result.id);
+        self.fetches.remove(&result.id);
 
         // The PR flow's own job goes to the flow, not to the arms below: only it
         // knows what its answer means, and only it can put the next step on
@@ -269,10 +376,16 @@ impl App {
                 self.worktrees_component.last_error = Some(format!("{kind} failed: {error:#}"));
             }
             // The refreshed refs are on disk; the list is what has to catch up.
+            // Only *this* repository's rows can have changed, so it re-reads
+            // that one on a worker rather than rebuilding every row here — which
+            // is what it used to do, on the render thread, once per fetch.
             Ok(Completion::Fetched { path }) => {
                 debug!(repo = %path.display(), "fetched");
-                self.spaces_stale = true;
+                self.refresh_repository(path);
             }
+            // A repository re-read itself. This is `r`'s answer, and a fetch's
+            // second half.
+            Ok(Completion::Spaces { path, spaces }) => self.spaces_refreshed(path, spaces),
             // A root finished walking. Its repositories go straight in, so the
             // list grows under the user while the other roots are still out.
             Ok(Completion::Repositories(found)) => self.repositories_found(found),
@@ -308,46 +421,69 @@ impl App {
 
         if self.args.run_fetch {
             for path in fetch {
-                self.submit(Job::FetchRemotes { path });
+                if let Some(id) = self.submit(Job::FetchRemotes { path: path.clone() }) {
+                    self.fetches.insert(id, path);
+                }
             }
         }
     }
 
-    /// Keeps the spinner in step with the scan: shown with its count while any
-    /// root is still being walked, gone the moment the last one lands.
+    /// Puts one repository's freshly read spaces back into the list.
+    ///
+    /// Addressed by repository rather than appended, so this handles the answer
+    /// that matters most to a refresh: a repository whose spaces are all gone
+    /// comes back with an empty list, and its rows have to go with them.
+    ///
+    /// A repository that has since left the list — a rescan replaced it, or a
+    /// delete removed it — is not put back: the id no longer names anything on
+    /// screen, and inventing a row for it would resurrect what the user removed.
+    fn spaces_refreshed(&mut self, path: PathBuf, spaces: Vec<Space>) {
+        let id = RepoId::from_path(&path);
+        let Some(repo) = self.repositories_component.repository(&id).cloned() else {
+            debug!(repo = %path.display(), "no longer listed; dropping its spaces");
+            return;
+        };
+        let entries = spaces
+            .into_iter()
+            .map(|space| SpaceEntry {
+                repo_name: repo.name.clone(),
+                repo_path: repo.path.clone(),
+                space,
+            })
+            .collect();
+        self.worktrees_component.replace_spaces_of(&id, entries);
+    }
+
+    /// Keeps the indicator in step with whatever is running.
+    ///
+    /// One indicator for three kinds of work, and a strict precedence between
+    /// them: a scan is already re-reading everything, so it speaks for any
+    /// refresh underneath it, and a refresh is the visible half of a fetch that
+    /// has landed. Saying two of them at once would be saying the same wait
+    /// twice.
     fn update_scan_indicator(&mut self) {
         self.worktrees_component
             .set_scan(self.scan_found, self.is_scanning());
+        let busy = if !self.refreshes.is_empty() {
+            Some((Activity::Refreshing, self.refreshes.len()))
+        } else if !self.fetches.is_empty() {
+            Some((Activity::Fetching, self.fetches.len()))
+        } else {
+            None
+        };
+        self.worktrees_component.set_busy(busy);
     }
 
-    /// Applies whatever background work has landed since the last tick.
+    /// Advances everything the clock drives.
     ///
-    /// Re-reading the spaces is done here, once, rather than per result: two
-    /// hundred repositories finishing their fetches would otherwise rebuild the
-    /// same list two hundred times, each rebuild costing every repository a
-    /// status read.
+    /// Nothing is re-read here any more. A fetch used to mark the whole list
+    /// stale and have the next idle tick rebuild it — every repository's status,
+    /// on the render thread, for a fetch that touched one of them. The fetch now
+    /// queues a re-read of its own repository instead, so this is the spinner's
+    /// clock and nothing else.
     pub fn on_tick(&mut self) {
         // The spinner's only clock; see `WorktreesComponent::tick`.
         self.worktrees_component.tick();
-        if self.spaces_stale && self.outstanding.is_empty() {
-            self.spaces_stale = false;
-            self.reload_spaces();
-        }
-    }
-
-    /// Re-reads every repository's spaces and hands the new rows to the list.
-    ///
-    /// The rebuild is something the *app* decided to do, in the middle of a
-    /// session the user is driving, so it costs them nothing: the filter they
-    /// typed, the pane they had focused and the row they were on all survive it
-    /// — see [`WorktreesComponent::set_spaces`].
-    fn reload_spaces(&mut self) {
-        let previous_error = self.worktrees_component.last_error.take();
-        let (spaces, failed) = self.repositories_component.collect_spaces();
-        self.worktrees_component.set_spaces(spaces);
-        // A listing failure is the newer news; anything else already on screen
-        // (a fetch that failed, say) is still true and stays.
-        self.worktrees_component.last_error = listing_failure_notice(&failed).or(previous_error);
     }
 
     /// Points the PR flow at a different lookup than the live GitHub one.
@@ -591,6 +727,18 @@ impl App {
                 }
                 EventState::Consumed
             }
+            Action::Refresh => {
+                self.start_refresh();
+                EventState::Consumed
+            }
+            Action::Rescan => {
+                self.start_scan();
+                EventState::Consumed
+            }
+            Action::FetchSelected => {
+                self.fetch_selected();
+                EventState::Consumed
+            }
             Action::EnterInsertMode => {
                 self.mode = InputMode::Insert;
                 self.worktrees_component.focus_filter();
@@ -739,6 +887,26 @@ mod tests {
         let mut app = App::with_args(args, fetcher);
         app.attach_worker(Worker::with_threads(sender, 1));
         (app, receiver)
+    }
+
+    fn ch(c: char) -> KeyEvent {
+        KeyEvent::new(
+            crossterm::event::KeyCode::Char(c),
+            crossterm::event::KeyModifiers::NONE,
+        )
+    }
+
+    /// An app whose startup scan has run to completion — what every refresh
+    /// test starts from, and what `run_app` reaches after its first few results.
+    fn scanned(args: cli::Args) -> (App, Receiver<AppEvent>) {
+        let fetcher: github::PrFetcher = std::sync::Arc::new(|_| eyre::bail!("unused"));
+        let mut app = App::with_args(args, fetcher);
+        let (sender, results) = mpsc::channel();
+        app.attach_worker(Worker::with_threads(sender, 1));
+        while app.is_scanning() {
+            app.handle_job(next_result(&results));
+        }
+        (app, results)
     }
 
     fn next_result(receiver: &Receiver<AppEvent>) -> JobResult {
@@ -897,31 +1065,142 @@ mod tests {
         );
     }
 
-    /// The list is re-read once every outstanding job has landed, not once per
-    /// result — and never while one is still in flight.
+    /// A fetch that lands re-reads *its own* repository, and does it on a
+    /// worker.
+    ///
+    /// This replaces the rule it used to follow — mark the whole list stale and
+    /// have the next idle tick rebuild every repository's status on the render
+    /// thread. One fetch changed one repository's refs; correcting two hundred
+    /// rows to show it, in the middle of a frame, was the wrong shape of answer.
     #[test]
-    fn the_list_is_rebuilt_only_after_the_last_result() {
-        let (mut app, results) = app_with_worker();
-        app.submit(Job::Custom(Box::new(|| {
-            Ok(Completion::Fetched {
-                path: PathBuf::from("/somewhere"),
-            })
+    fn a_landed_fetch_re_reads_the_repository_it_fetched() {
+        let (repos, args) = two_repositories();
+        let (mut app, results) = scanned(args);
+        let one = repos.path().join("one");
+
+        let path = one.clone();
+        app.submit(Job::Custom(Box::new(move || {
+            Ok(Completion::Fetched { path })
         })));
-        let second = app
-            .submit(Job::Custom(Box::new(|| {
-                Ok(Completion::Fetched {
-                    path: PathBuf::from("/elsewhere"),
-                })
-            })))
-            .expect("a worker is attached");
-
         app.handle_job(next_result(&results));
-        app.on_tick();
-        assert!(app.spaces_stale, "rebuilt while a job was still in flight");
 
-        app.handle_job(next_result(&results));
+        assert_eq!(
+            app.refreshes.len(),
+            1,
+            "the fetch queued no re-read of its repository"
+        );
         app.on_tick();
-        assert!(!app.spaces_stale, "the rebuild never happened");
-        assert!(app.outstanding.is_empty() && !app.outstanding.contains(&second));
+        assert_eq!(app.refreshes.len(), 1, "a tick re-read the list itself");
+
+        // And the re-read itself lands without disturbing anything else.
+        app.handle_job(next_result(&results));
+        assert!(app.refreshes.is_empty() && app.outstanding.is_empty());
+        assert!(app.worktrees_component.last_error.is_none());
+    }
+
+    /// `r` is one job per repository, so the list is repaired repository by
+    /// repository rather than in one jump at the end.
+    #[test]
+    fn refreshing_asks_every_known_repository_again() {
+        let (_repos, args) = two_repositories();
+        let (mut app, _results) = scanned(args);
+
+        app.handle_key(ch('r'));
+
+        assert_eq!(app.refreshes.len(), 2, "one re-read per repository");
+        assert!(!app.is_scanning(), "a refresh must not claim to be a scan");
+    }
+
+    /// The idempotence rule, applied to `r`: the second press supersedes the
+    /// first, so two rounds can never interleave.
+    #[test]
+    fn a_second_refresh_abandons_the_first() {
+        let (_repos, args) = two_repositories();
+        let (mut app, _results) = scanned(args);
+
+        app.handle_key(ch('r'));
+        let first: Vec<JobId> = app.refreshes.iter().copied().collect();
+        app.handle_key(ch('r'));
+
+        assert_eq!(app.refreshes.len(), 2, "the second round never started");
+        for id in first {
+            assert!(!app.refreshes.contains(&id), "the first round survived");
+            assert!(!app.outstanding.contains(&id), "its answer is still wanted");
+        }
+    }
+
+    /// A scan is already re-reading every repository from disk, so `r` under one
+    /// would be the same work twice to reach the same place.
+    #[test]
+    fn refreshing_during_a_scan_does_nothing() {
+        let (_repos, args) = two_repositories();
+        let fetcher: github::PrFetcher = std::sync::Arc::new(|_| eyre::bail!("unused"));
+        let mut app = App::with_args(args, fetcher);
+        let (sender, _results) = mpsc::channel();
+        app.attach_worker(Worker::with_threads(sender, 1));
+
+        assert!(app.is_scanning(), "this must be tested mid-scan");
+        app.handle_key(ch('r'));
+
+        assert!(app.refreshes.is_empty(), "a refresh raced the scan");
+    }
+
+    /// `R` walks the repos dirs again. The roots therefore have to survive the
+    /// first scan — they used to be consumed by it, which made every rescan
+    /// after the first one walk nothing at all.
+    #[test]
+    fn rescanning_walks_the_repos_dirs_again() {
+        let (_repos, args) = two_repositories();
+        let (mut app, _results) = scanned(args);
+        assert!(!app.is_scanning());
+
+        app.handle_key(ch('R'));
+
+        assert_eq!(app.scans.len(), 1, "the repos dir was not walked again");
+        assert!(app.is_scanning(), "the spinner must say so");
+        assert_eq!(app.scan_found, 0, "a rescan counts from zero");
+    }
+
+    /// Fetch is per repository, and pressing it again while that repository's
+    /// fetch is still out asks the same remote the same question.
+    #[test]
+    fn fetching_the_same_repository_twice_queues_one_job() {
+        let (_repos, args) = two_repositories();
+        let (mut app, _results) = scanned(args);
+        // The fixture's repositories have no spaces, so a row is added by hand:
+        // `f` fetches the repository behind the *selected* space.
+        let Some(entry) = app
+            .repositories_component
+            .repository_paths()
+            .first()
+            .cloned()
+        else {
+            panic!("the scan found no repository");
+        };
+        let repo = app
+            .repositories_component
+            .repository(&RepoId::from_path(&entry))
+            .expect("the repository is listed")
+            .clone();
+        app.worktrees_component.add(SpaceEntry {
+            repo_name: repo.name.clone(),
+            repo_path: repo.path.clone(),
+            space: Space::new(
+                repo.id.clone(),
+                repo.backend,
+                "feature",
+                repo.path.join("feature"),
+                crate::vcs::SpaceStatus::unknown(repo.backend),
+            ),
+        });
+
+        app.handle_key(ch('f'));
+        assert_eq!(app.fetches.len(), 1, "the fetch was never queued");
+        app.handle_key(ch('f'));
+        assert_eq!(
+            app.fetches.len(),
+            1,
+            "the same repository was fetched twice"
+        );
     }
 }

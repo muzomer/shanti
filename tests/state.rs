@@ -206,6 +206,16 @@ impl Fixture {
         }
     }
 
+    /// Applies both halves of a refresh of the fixture's two repositories.
+    ///
+    /// `r` is one job per repository, so the count is not a guess: two
+    /// repositories, two results, and waiting for exactly those is what keeps
+    /// the test deterministic rather than timing-dependent.
+    fn deliver_refresh(&mut self) {
+        self.deliver_one();
+        self.deliver_one();
+    }
+
     /// Applies a background result if one turns up shortly, and shrugs if not.
     ///
     /// For the cancellation tests, where whether a result exists at all depends
@@ -1769,4 +1779,186 @@ fn the_repository_picker_keeps_its_footer_in_filter_mode() {
         screen.contains("[Esc] list"),
         "the picker's footer should follow it into filter mode:\n{screen}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Refresh and on-demand fetch (shanti-hml.5)
+// ---------------------------------------------------------------------------
+
+/// The reason the issue exists: shanti used to read the world once and never
+/// look again, so a worktree made in another terminal stayed invisible until the
+/// user quit and relaunched.
+#[test]
+fn refresh_picks_up_a_worktree_created_externally() {
+    let mut f = Fixture::new();
+    assert!(
+        !f.screen().contains("feature-two"),
+        "the fixture must not already have the space this test creates"
+    );
+
+    // Created behind shanti's back, exactly as another terminal would.
+    add_worktree(
+        f.repos_dir.path(),
+        "alpha",
+        f.worktrees_dir.path(),
+        "feature-two",
+    );
+
+    assert_eq!(f.press_char('r'), CONSUMED);
+    f.deliver_refresh();
+
+    let screen = f.screen();
+    assert!(
+        screen.contains("feature-two"),
+        "the externally created worktree never reached the list:\n{screen}"
+    );
+    assert!(
+        screen.contains("feature-one"),
+        "the space that was already there was lost:\n{screen}"
+    );
+    assert!(
+        !screen.contains("refreshing"),
+        "the indicator outlived the refresh:\n{screen}"
+    );
+}
+
+/// The other half, and the one an append cannot do: a space removed with plain
+/// `git` has to leave the list, which means a refresh has to be able to deliver
+/// *no* spaces for a repository and be understood.
+#[test]
+fn refresh_drops_a_worktree_removed_externally() {
+    let mut f = Fixture::new();
+    let path = f.worktree_path("alpha", "feature-one");
+    std::fs::remove_dir_all(&path).expect("could not remove the worktree");
+    git(&f.repo_path("alpha"), &["worktree", "prune"]);
+
+    assert_eq!(f.press_char('r'), CONSUMED);
+    f.deliver_refresh();
+
+    let screen = f.screen();
+    assert!(
+        !screen.contains("feature-one"),
+        "a worktree removed outside shanti is still listed:\n{screen}"
+    );
+}
+
+/// A refresh says so in the same place a scan does, counts down, and survives
+/// being asked for twice — the second press supersedes the first rather than
+/// doubling the work.
+#[test]
+fn a_refresh_reports_progress_and_a_second_press_does_not_double_it() {
+    let mut f = Fixture::new();
+    f.press_char('r');
+
+    let screen = f.screen();
+    assert!(
+        screen.contains("refreshing\u{2026} 2 repos left"),
+        "a refresh must say it is running, in the spinner's own words:\n{screen}"
+    );
+
+    f.press_char('r');
+    let again = f.screen();
+    assert!(
+        again.contains("refreshing\u{2026} 2 repos left"),
+        "a second press should replace the round, not add to it:\n{again}"
+    );
+
+    // Draining is deliberately not asserted here: the abandoned round may or
+    // may not have produced a result before it was cancelled — a race the app
+    // tolerates by design — so how many results are on the channel is not a
+    // number a test may depend on. The indicator's disappearance is asserted
+    // where the count *is* knowable, above.
+}
+
+/// A fetch is one repository's, and it is two steps: talk to the remote, then
+/// re-read that one repository. Both are visible, and neither blocks — the list
+/// is navigable throughout.
+#[test]
+fn fetching_reports_its_two_steps_and_then_goes_quiet() {
+    let mut f = Fixture::new();
+    f.push("alpha", "feature-one");
+
+    assert_eq!(f.press_char('f'), CONSUMED);
+    let fetching = f.screen();
+    assert!(
+        fetching.contains("fetching\u{2026} 1 repos left"),
+        "the fetch must say it is running:\n{fetching}"
+    );
+    // Still the list, still usable: nothing waited on the remote.
+    f.assert_at_worktree_list();
+
+    // A second press while that repository's fetch is out asks the same remote
+    // the same question, so it is refused rather than queued.
+    f.press_char('f');
+    assert!(
+        f.screen().contains("fetching\u{2026} 1 repos left"),
+        "the same repository was fetched twice"
+    );
+
+    f.deliver_one(); // the fetch itself
+    let refreshing = f.screen();
+    assert!(
+        refreshing.contains("refreshing\u{2026} 1 repos left"),
+        "a landed fetch must re-read its own repository:\n{refreshing}"
+    );
+
+    f.deliver_one(); // the re-read it queued
+    let idle = f.screen();
+    assert!(
+        !idle.contains("fetching") && !idle.contains("refreshing"),
+        "the indicator outlived the work:\n{idle}"
+    );
+    assert!(
+        idle.contains("feature-one"),
+        "the row is gone after its own repository was re-read:\n{idle}"
+    );
+}
+
+/// `R` goes back to the repos dirs, which is the only way a repository that did
+/// not exist at launch can appear. The roots have to survive the first scan for
+/// this to work at all.
+#[test]
+fn rescanning_finds_a_repository_cloned_since_launch() {
+    let mut f = Fixture::new();
+    init_repo(f.repos_dir.path(), "gamma");
+    add_worktree(
+        f.repos_dir.path(),
+        "gamma",
+        f.worktrees_dir.path(),
+        "feature-gamma",
+    );
+
+    assert_eq!(f.press_char('R'), CONSUMED);
+    assert!(
+        f.screen().contains("scanning"),
+        "a rescan reuses the scan's own indicator"
+    );
+    f.deliver_one();
+
+    let screen = f.screen();
+    assert!(
+        screen.contains("feature-gamma"),
+        "the repository added since launch was never found:\n{screen}"
+    );
+    assert!(
+        screen.contains("feature-one"),
+        "the rescan lost what was already there:\n{screen}"
+    );
+}
+
+/// Both bindings are in the help, which is the only place a user can learn they
+/// exist.
+#[test]
+fn the_help_lists_refresh_and_fetch() {
+    let mut f = Fixture::new();
+    f.press_char('?');
+
+    let screen = f.screen();
+    for expected in [
+        "Refresh spaces & status",
+        "Rescan the repos dirs",
+        "Fetch the selected repository",
+    ] {
+        assert!(screen.contains(expected), "missing {expected:?}:\n{screen}");
+    }
 }

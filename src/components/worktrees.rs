@@ -39,13 +39,34 @@ const SPINNER: [&str; 10] = [
 /// those two rows apart.
 type RowKey = (Backend, PathBuf);
 
-/// A repository scan in flight, as the list shows it.
-struct ScanProgress {
-    /// Repositories the scan has reported so far.
-    found: usize,
-    /// Which spinner frame is on screen. Advanced by [`WorktreesComponent::tick`]
-    /// from the app's existing clock — the list owns no timer of its own.
-    frame: usize,
+/// What the list is currently waiting on, in the words it says it.
+///
+/// One vocabulary for every kind of background work, because there is one
+/// indicator: a scan, a refresh and a fetch all turn the same spinner and differ
+/// only in the verb and in what the number counts. A second idiom — a second
+/// spinner, a status line of its own — would make "is shanti busy?" a question
+/// with two places to look.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activity {
+    /// Walking the repos dirs. The count is repositories found so far, and it
+    /// only ever grows.
+    Scanning,
+    /// Re-reading known repositories' spaces. The count is repositories still
+    /// out, and it only ever shrinks.
+    Refreshing,
+    /// Talking to a repository's remotes. The count is repositories still out.
+    Fetching,
+}
+
+impl Activity {
+    /// The verb and the noun the count is in, as the title spells them.
+    fn wording(self) -> (&'static str, &'static str) {
+        match self {
+            Activity::Scanning => ("scanning", "repos"),
+            Activity::Refreshing => ("refreshing", "repos left"),
+            Activity::Fetching => ("fetching", "repos left"),
+        }
+    }
 }
 
 /// A space, plus the name of the repository it belongs to.
@@ -274,8 +295,23 @@ pub struct WorktreesComponent {
     state: ListState,
     focus: Focus,
     selected_index: Option<usize>,
-    /// `Some` while repositories are still being discovered.
-    scan: Option<ScanProgress>,
+    /// `Some(found)` while repositories are still being discovered.
+    ///
+    /// Kept apart from `busy` rather than folded into it because the scan is the
+    /// one activity the *empty state* also reads: a list with no rows means
+    /// something different while the repos dirs are still being walked.
+    scan: Option<usize>,
+    /// Any other background work in flight, and how much of it is left.
+    ///
+    /// Only shown when no scan is running — a rescan re-reads everything a
+    /// refresh would have, so saying both at once would be saying it twice.
+    busy: Option<(Activity, usize)>,
+    /// Which spinner frame is on screen. Advanced by [`WorktreesComponent::tick`]
+    /// from the app's existing clock — the list owns no timer of its own.
+    ///
+    /// Never reset: a spinner's phase carries no information, and restarting it
+    /// whenever the activity changed would make one long wait look like several.
+    frame: usize,
     /// Whether a scan has ever reported to this list.
     ///
     /// Without it an empty list at startup is indistinguishable from an empty
@@ -303,6 +339,8 @@ impl WorktreesComponent {
             selected_index,
             spaces,
             scan: None,
+            busy: None,
+            frame: 0,
             scanned: false,
             repos_seen: 0,
             last_error: None,
@@ -336,6 +374,20 @@ impl WorktreesComponent {
         self.restore_selection(anchor);
     }
 
+    /// Replaces the rows of exactly one repository, named rather than inferred.
+    ///
+    /// [`WorktreesComponent::extend`] reads the repositories it is replacing off
+    /// the entries, which cannot work for the answer a refresh most needs to
+    /// deliver: a repository whose last space was deleted behind shanti's back
+    /// reports *no* entries, and an empty batch names nobody. Naming the
+    /// repository is what lets its rows disappear.
+    pub fn replace_spaces_of(&mut self, repo: &RepoId, entries: Vec<SpaceEntry>) {
+        let anchor = self.selected_key();
+        self.spaces.retain(|e| &e.space.repo != repo);
+        self.spaces.extend(entries);
+        self.restore_selection(anchor);
+    }
+
     /// Says a scan is running and how many repositories it has found; `None`
     /// means it is over and the spinner goes away.
     /// Reports how many repositories a scan has found, and whether it is still
@@ -354,10 +406,22 @@ impl WorktreesComponent {
     pub fn set_scan(&mut self, found: usize, scanning: bool) {
         self.scanned = true;
         self.repos_seen = found;
-        match (scanning, &mut self.scan) {
-            (true, Some(scan)) => scan.found = found,
-            (true, slot) => *slot = Some(ScanProgress { found, frame: 0 }),
-            (false, slot) => *slot = None,
+        self.scan = scanning.then_some(found);
+    }
+
+    /// Says what else is running, and how many repositories of it are left;
+    /// `None` means nothing is.
+    ///
+    /// Shown only when no scan is running — see the `busy` field.
+    pub fn set_busy(&mut self, busy: Option<(Activity, usize)>) {
+        self.busy = busy;
+    }
+
+    /// What the indicator says, or `None` when the list is idle.
+    fn progress(&self) -> Option<(Activity, usize)> {
+        match self.scan {
+            Some(found) => Some((Activity::Scanning, found)),
+            None => self.busy,
         }
     }
 
@@ -366,9 +430,7 @@ impl WorktreesComponent {
     /// Driven by the tick the event loop already emits: a second timer would be
     /// a second thing to stop, and a spinner that outlived its scan.
     pub fn tick(&mut self) {
-        if let Some(scan) = &mut self.scan {
-            scan.frame = scan.frame.wrapping_add(1);
-        }
+        self.frame = self.frame.wrapping_add(1);
     }
 
     /// Why the pane is empty, in the order the answers become knowable: a scan
@@ -485,13 +547,14 @@ impl WorktreesComponent {
             // The one thing on screen that says shanti is still working. The
             // count is what makes it more than decoration: a scan that has found
             // nothing for ten seconds looks different from one that is streaming.
-            if let Some(scan) = &self.scan {
+            if let Some((activity, count)) = self.progress() {
+                let (verb, noun) = activity.wording();
                 spans.push(Span::styled(
-                    format!("{} ", SPINNER[scan.frame % SPINNER.len()]),
+                    format!("{} ", SPINNER[self.frame % SPINNER.len()]),
                     theme::TITLE,
                 ));
                 spans.push(Span::styled(
-                    format!("scanning\u{2026} {} repos ", scan.found),
+                    format!("{verb}\u{2026} {count} {noun} "),
                     theme::SECONDARY,
                 ));
             }
@@ -1046,6 +1109,62 @@ mod tests {
                 SpaceStatus::unknown(backend),
             ),
         }
+    }
+
+    /// The answer a refresh most needs to deliver, and the one `extend` cannot:
+    /// a repository whose spaces are all gone reports an empty batch, which
+    /// names nobody. `replace_spaces_of` is told who it is about.
+    #[test]
+    fn a_repository_with_no_spaces_left_loses_its_rows() {
+        let mut component = WorktreesComponent::new(vec![
+            entry("alpha", Backend::Git, "one", "/s/alpha/one"),
+            entry("beta", Backend::Git, "two", "/s/beta/two"),
+        ]);
+        let alpha = RepoId::from_path("/repos/alpha");
+
+        component.replace_spaces_of(&alpha, Vec::new());
+
+        let left: Vec<&str> = component
+            .spaces
+            .iter()
+            .map(|e| e.repo_name.as_str())
+            .collect();
+        assert_eq!(left, ["beta"], "the emptied repository kept its rows");
+
+        // And a repository that came back with spaces replaces its own rows
+        // rather than adding to them.
+        component.replace_spaces_of(
+            &alpha,
+            vec![entry("alpha", Backend::Git, "three", "/s/alpha/three")],
+        );
+        assert_eq!(component.spaces.len(), 2, "the rows were doubled");
+    }
+
+    /// One indicator, one thing said at a time: a scan already re-reads every
+    /// repository, so it speaks for any refresh underneath it.
+    #[test]
+    fn a_scan_speaks_over_the_work_running_beneath_it() {
+        let mut component = WorktreesComponent::new(Vec::new());
+        component.set_busy(Some((Activity::Refreshing, 3)));
+        assert_eq!(component.progress(), Some((Activity::Refreshing, 3)));
+
+        component.set_scan(1, true);
+        assert_eq!(
+            component.progress(),
+            Some((Activity::Scanning, 1)),
+            "the scan must win while it is running"
+        );
+
+        // And the refresh underneath is still there when the scan lands.
+        component.set_scan(1, false);
+        assert_eq!(component.progress(), Some((Activity::Refreshing, 3)));
+
+        component.set_busy(None);
+        assert_eq!(
+            component.progress(),
+            None,
+            "the indicator outlived the work"
+        );
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
@@ -7,7 +8,7 @@ use nucleo_matcher::{
 
 use super::list::ItemOrder;
 use crate::theme;
-use crate::vcs::{Backend, BoxedVcs, RepoId, Space, Vcs};
+use crate::vcs::{Backend, BoxedVcs, Repo, RepoId, Space, Vcs};
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     text::{Line, Span},
@@ -324,6 +325,34 @@ impl RepositoriesComponent {
             .map(|backend| backend.as_ref())
     }
 
+    /// The snapshot of the repository `id`, from whichever backend owns it.
+    ///
+    /// The name and root a row is labelled with, recovered from an id alone —
+    /// which is all a background result carries back. Any backend will do: a
+    /// colocated repository is open twice and both copies describe the same
+    /// directory.
+    pub fn repository(&self, id: &RepoId) -> Option<&Repo> {
+        self.repositories
+            .iter()
+            .map(|backend| backend.repo())
+            .find(|repo| &repo.id == id)
+    }
+
+    /// Every repository on screen, once each, as something a job can be given.
+    ///
+    /// Deduplicated by id rather than listed per backend: a colocated
+    /// repository is open twice and has one directory, and re-reading it twice
+    /// would cost twice as much to produce the same rows.
+    pub fn repository_paths(&self) -> Vec<PathBuf> {
+        let mut seen: HashSet<&RepoId> = HashSet::new();
+        self.repositories
+            .iter()
+            .map(|backend| backend.repo())
+            .filter(|repo| seen.insert(&repo.id))
+            .map(|repo| repo.path.clone())
+            .collect()
+    }
+
     /// Every backend open on the repository `id`, in the order they were opened
     /// — the owner first.
     ///
@@ -373,7 +402,13 @@ impl RepositoriesComponent {
     /// its jj workspaces both land here — merged by iterating the backend list,
     /// with no special case of its own. Each space carries the backend that owns
     /// it, which is what keeps the merged list actionable.
-    pub fn collect_spaces(&self) -> (Vec<SpaceEntry>, Vec<String>) {
+    ///
+    /// Test-only now that nothing re-reads the whole list on the render thread:
+    /// a refresh asks the *worker* for one repository at a time. Kept because it
+    /// is still the clearest way to state, in a test, what the whole list should
+    /// contain.
+    #[cfg(test)]
+    fn collect_spaces(&self) -> (Vec<SpaceEntry>, Vec<String>) {
         spaces_of(&self.repositories)
     }
 }

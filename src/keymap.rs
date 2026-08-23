@@ -42,6 +42,17 @@ fn resolve_normal(key: KeyEvent) -> Option<Action> {
         (KeyCode::Char('P'), KeyModifiers::NONE) | (KeyCode::Char('P'), KeyModifiers::SHIFT) => {
             Some(Action::OpenPrWorktreeAutoClone)
         }
+        // Two keys rather than one, because the two cost wildly different
+        // amounts: 'r' re-reads what shanti already knows about (disk only,
+        // proportional to the repositories on screen), while 'R' walks the
+        // repos dirs again from scratch — the startup cost, paid again. Putting
+        // both behind one key would either make the common case slow or make
+        // the rare one unreachable.
+        (KeyCode::Char('r'), KeyModifiers::NONE) => Some(Action::Refresh),
+        (KeyCode::Char('R'), KeyModifiers::NONE) | (KeyCode::Char('R'), KeyModifiers::SHIFT) => {
+            Some(Action::Rescan)
+        }
+        (KeyCode::Char('f'), KeyModifiers::NONE) => Some(Action::FetchSelected),
         (KeyCode::Esc, KeyModifiers::NONE) => Some(Action::ClosePopup),
         (KeyCode::Char('/'), KeyModifiers::NONE) | (KeyCode::Char('i'), KeyModifiers::NONE) => {
             Some(Action::EnterInsertMode)
@@ -102,6 +113,45 @@ mod tests {
             resolve(InputMode::Insert, key(KeyCode::F(1))),
             Some(Action::ShowHelp)
         );
+    }
+
+    /// The cheap refresh and the expensive rescan are one shifted key apart, and
+    /// must not resolve to the same action however the terminal reports the
+    /// shift.
+    #[test]
+    fn refresh_and_rescan_are_different_keys() {
+        assert_eq!(
+            resolve(InputMode::Normal, key(KeyCode::Char('r'))),
+            Some(Action::Refresh)
+        );
+        assert_eq!(
+            resolve(InputMode::Normal, key(KeyCode::Char('R'))),
+            Some(Action::Rescan)
+        );
+        assert_eq!(
+            resolve(
+                InputMode::Normal,
+                KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT)
+            ),
+            Some(Action::Rescan),
+            "a terminal that reports the shift must not lose the binding"
+        );
+        assert_eq!(
+            resolve(InputMode::Normal, key(KeyCode::Char('f'))),
+            Some(Action::FetchSelected)
+        );
+    }
+
+    /// None of the three may steal a character from a filter being typed.
+    #[test]
+    fn refresh_and_fetch_stay_literal_in_insert_mode() {
+        for c in ['r', 'R', 'f'] {
+            assert_eq!(
+                resolve(InputMode::Insert, key(KeyCode::Char(c))),
+                Some(Action::InsertChar(c)),
+                "{c} was stolen from the filter"
+            );
+        }
     }
 
     /// Why Insert mode needs a help key of its own: `?` belongs to the text

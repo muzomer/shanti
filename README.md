@@ -140,6 +140,8 @@ Run `cd $(shanti)` in `bash`/`zsh` or `cd (shanti)` in `fish` shell from any dir
 - `-r`, `--repos-dir`: one or more directories where repositories are stored, colon-separated (or set `SHANTI_REPOS_DIR`, e.g. `/path/a:/path/b`). Can be repeated: `--repos-dir /a --repos-dir /b`. An entry that does not exist is skipped with a warning; only an empty list is an error.
 - `-d`, `--worktrees-dir`: the directory where the spaces will be stored (or set `SHANTI_WORKTREES_DIR`). It is created if it is missing.
 - `-f`, `--run-fetch`: fetch every repository at startup (or set `SHANTI_RUN_FETCH`).
+  Meant for scripted use; interactively, `f` fetches just the repository you are
+  looking at, when you want it.
 - `--config <FILE>`: read this configuration file instead of the default one.
 - `--show-config`: print the effective configuration, and where each value came from, then exit.
 
@@ -156,6 +158,9 @@ Run `cd $(shanti)` in `bash`/`zsh` or `cd (shanti)` in `fish` shell from any dir
 | `n` | new space (pick a repository) |
 | `p` | new space from a GitHub PR URL |
 | `P` | same, cloning the repository if it is missing |
+| `r` | refresh: re-read every known repository's spaces and status (no network) |
+| `R` | rescan the repos dirs, picking up repositories added or removed since launch |
+| `f` | fetch the remotes of the selected space's repository, and only that one |
 | `d` / `D` | delete with confirmation / force delete |
 | `Enter` | print the path of the selected space and exit |
 | `?` | help |

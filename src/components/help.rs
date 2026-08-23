@@ -432,6 +432,16 @@ pub fn worktrees_bindings() -> Vec<HelpEntry> {
         // a key, and the footer is not the place to learn a flow exists.
         HelpEntry::bind("p", "New worktree from PR URL"),
         HelpEntry::bind("P", "New worktree from PR URL (auto-clone)"),
+        // The two halves of "the list is wrong, fix it", kept apart because
+        // they cost differently: `r` re-reads the repositories already on
+        // screen, `R` goes back to the repos dirs. Only `r` earns a footer
+        // hint, and only as an aside — it is the one of the three a user
+        // reaches for often enough to want reminding of.
+        HelpEntry::bind("r", "Refresh spaces & status (no network)")
+            .hint("r", "refresh")
+            .aside(),
+        HelpEntry::bind("R", "Rescan the repos dirs for new repositories"),
+        HelpEntry::bind("f", "Fetch the selected repository's remotes"),
         HelpEntry::bind("d", "Delete with confirmation")
             .hint("d", "delete")
             .destructive(),

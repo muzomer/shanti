@@ -20,7 +20,7 @@ pub use modal::{
 };
 pub use pr_worktree::{resume_pr_flow, PrCommand, PrRequests, PrStep, PrWorktreeComponent};
 pub use repositories::{spaces_of, RepositoriesComponent, RepositoriesModal};
-pub use worktrees::{SpaceEntry, WorktreesComponent};
+pub use worktrees::{Activity, SpaceEntry, WorktreesComponent};
 
 // Components carry no palette of their own: every colour they draw comes from
 // `crate::theme`, by the meaning it has rather than by its hue.
@@ -45,6 +45,16 @@ pub enum Action {
     OpenPrWorktree,
     OpenPrWorktreeAutoClone,
     ClosePopup,
+    /// Re-read what is already known: every discovered repository's spaces and
+    /// their status. Disk only — no repos dir is walked and no remote is
+    /// contacted.
+    Refresh,
+    /// Walk the repos dirs again, from scratch. The only thing that can notice a
+    /// repository that appeared or vanished since launch, and the expensive one.
+    Rescan,
+    /// Fetch the remotes of the repository owning the selected space, and only
+    /// that repository.
+    FetchSelected,
     EnterInsertMode,
     ExitInsertMode,
     InsertChar(char),
