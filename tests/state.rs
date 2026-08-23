@@ -524,6 +524,21 @@ fn worktrees_normal_enters_and_leaves_insert_mode() {
     assert_eq!(f.mode(), Mode::Insert);
 }
 
+/// The component's starting focus must agree with `App`'s starting mode.
+///
+/// Regression test for shanti-gmf.8: the component was built focused on the
+/// filter while `App` started in Normal, so the first Tab toggled focus to the
+/// list and left the mode Normal — a keystroke that changed nothing the user
+/// could see, and two Tabs to reach the filter.
+#[test]
+fn one_tab_from_startup_reaches_the_filter() {
+    let mut f = Fixture::new();
+    assert_eq!(f.mode(), Mode::Normal);
+
+    assert_eq!(f.press(key(KeyCode::Tab)), CONSUMED);
+    assert_eq!(f.mode(), Mode::Insert, "one Tab should reach the filter");
+}
+
 #[test]
 fn worktrees_insert_mode_tab_moves_focus_to_the_list_and_back_to_normal() {
     let mut f = Fixture::new();

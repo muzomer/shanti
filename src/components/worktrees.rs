@@ -295,7 +295,11 @@ impl WorktreesComponent {
         Self {
             filter: FilterComponent::new(),
             state: ListState::default().with_selected(selected_index),
-            focus: Focus::Filter,
+            // List, not Filter: App starts in Normal mode, and the two must agree
+            // or the first Tab toggles focus to List while leaving the mode
+            // Normal — a keystroke that changes nothing the user can see, and
+            // two Tabs to reach the filter.
+            focus: Focus::List,
             selected_index,
             spaces,
             scan: None,
