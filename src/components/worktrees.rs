@@ -11,13 +11,15 @@ use ratatui::{
     text::{Line, Span},
     widgets::{
         Block, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
-        ScrollbarState, StatefulWidget,
+        ScrollbarState, StatefulWidget, Wrap,
     },
     Frame,
 };
 
 use super::list::{Focus, ItemOrder, ListComponent};
-use super::{filter::FilterComponent, Action, EventState, RepositoriesComponent};
+use super::{
+    filter::FilterComponent, Action, EventState, RepositoriesComponent, MIN_HEIGHT, MIN_WIDTH,
+};
 use crate::keymap::InputMode;
 use crate::theme;
 use crate::vcs::Space;
@@ -131,6 +133,15 @@ impl WorktreesComponent {
     }
 
     pub fn draw(&mut self, f: &mut Frame, rect: Rect, mode: InputMode, is_active: bool) {
+        // Below the supported floor there is no honest layout left: the border
+        // alone would eat most of a row and a truncated space name is worse than
+        // no space name. One sentence, and the popups above stay closed
+        // (`popup_area` gives them an empty rect), so this is what is on screen.
+        if !super::fits(rect) {
+            draw_too_small(f, rect);
+            return;
+        }
+
         // Collect display data — ends the filtered_items() borrow before we need &self again.
         let display_data: Vec<(Space, RowLabel)> = {
             let filtered = self.filtered_items();
@@ -198,11 +209,13 @@ impl WorktreesComponent {
             is_active && matches!(mode, InputMode::Insert) && matches!(self.focus, Focus::Filter);
 
         let list_area = if in_filter {
-            // Split: filter line / separator / list
+            // Split: filter line / separator / list. `Min(1)` on the list states
+            // the floor the whole pane is built around — the list is the point
+            // of the screen, so it is the last thing allowed to reach zero.
             let [filter_line, sep_line, list_area] = Layout::vertical([
                 Constraint::Length(1),
                 Constraint::Length(1),
-                Constraint::Fill(1),
+                Constraint::Min(1),
             ])
             .areas(inner_area);
 
@@ -213,11 +226,14 @@ impl WorktreesComponent {
                 ])),
                 filter_line,
             );
-            // " / " prefix is 3 chars wide
-            f.set_cursor_position((
+            // " / " prefix is 3 chars wide. Clamped: a filter longer than the
+            // pane is wide would otherwise park the caret off the edge.
+            super::place_cursor(
+                f,
+                filter_line,
                 filter_line.x + 3 + self.filter.cursor_pos() as u16,
                 filter_line.y,
-            ));
+            );
             f.render_widget(
                 Paragraph::new("─".repeat(sep_line.width as usize)).style(theme::RULE),
                 sep_line,
@@ -233,11 +249,20 @@ impl WorktreesComponent {
             .direction(ratatui::widgets::ListDirection::TopToBottom);
         StatefulWidget::render(list, list_area, f.buffer_mut(), &mut self.state);
 
-        let mut scroll_state = ScrollbarState::new(total).position(self.state.offset());
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(None)
-            .end_symbol(None);
-        f.render_stateful_widget(scrollbar, list_area, &mut scroll_state);
+        // Only when there are rows off-screen: a full-height track beside a list
+        // that already fits is chrome that says nothing, and on a short terminal
+        // it is a whole column spent saying it.
+        if total > list_area.height as usize {
+            let mut scroll_state = ScrollbarState::new(total)
+                .position(self.state.offset())
+                .viewport_content_length(list_area.height as usize);
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .thumb_style(theme::RULE)
+                .track_style(theme::RULE);
+            f.render_stateful_widget(scrollbar, list_area, &mut scroll_state);
+        }
     }
 
     pub fn handle_action(&mut self, action: Action) -> EventState {
@@ -491,6 +516,33 @@ impl ListComponent<SpaceEntry> for WorktreesComponent {
     fn update_selected_index(&mut self, index: usize) {
         self.selected_index = Some(index);
     }
+}
+/// The whole interface, when the terminal is below [`MIN_WIDTH`] × [`MIN_HEIGHT`].
+///
+/// No border and no block: at this size chrome is the problem, not the solution.
+/// It says the number it wants, because "too small" without a target leaves the
+/// user dragging the corner and guessing.
+fn draw_too_small(f: &mut Frame, rect: Rect) {
+    f.render_widget(Paragraph::new("").style(theme::CANVAS), rect);
+    let message = Paragraph::new(vec![
+        Line::from(Span::styled("Terminal too small", theme::WARNING_TEXT)),
+        Line::from(Span::styled(
+            format!("Need {}x{}", MIN_WIDTH, MIN_HEIGHT),
+            theme::MUTED,
+        )),
+        Line::from(Span::styled(
+            format!("Have {}x{}", rect.width, rect.height),
+            theme::MUTED,
+        )),
+    ])
+    .wrap(Wrap { trim: true })
+    .centered();
+    // Centre what fits; on a two-row terminal the first line is the one that
+    // survives, and it is the one that matters.
+    let [area] = Layout::vertical([Constraint::Length(3.min(rect.height))])
+        .flex(ratatui::layout::Flex::Center)
+        .areas(rect);
+    f.render_widget(message, area);
 }
 
 #[cfg(test)]

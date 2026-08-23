@@ -1,15 +1,12 @@
-use ratatui::{
-    layout::{Constraint, Layout, Rect},
-    style::Style,
-    text::{Line, Span},
-    widgets::{Block, BorderType, Clear, Padding, Paragraph, Widget},
-    Frame,
-};
+use ratatui::{layout::Rect, Frame};
 
 use super::{
-    centered, create_worktree::CreateWorktreeComponent, select_directory::SelectDirectoryComponent,
-    Action, AppContext, ConfirmCallback, ConfirmComponent, EventState, HelpEntry, Modal, ModalFlow,
-    SelectCallback,
+    create_worktree::CreateWorktreeComponent,
+    popup_area,
+    prompt::{confirm_and_cancel, prompt_width, Prompt, PROMPT_HEIGHT},
+    select_directory::SelectDirectoryComponent,
+    Action, AppContext, ConfirmCallback, ConfirmComponent, EventState, Extent, HelpEntry, Modal,
+    ModalFlow, SelectCallback,
 };
 use crate::theme;
 use crate::{
@@ -46,51 +43,33 @@ impl PrWorktreeComponent {
     }
 
     pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
-        frame.render_widget(Clear, area);
+        // The URL shape is the hint until something goes wrong; then the failure
+        // takes the row, because a reminder of the format is no help once the
+        // format was accepted and the lookup itself failed.
+        // Short enough to survive the narrowest popup this can be: the shape is
+        // only useful if it can be read whole.
+        let status = match &self.error {
+            Some(err) => Some((err.clone(), theme::DANGER_TEXT)),
+            None => Some(("github.com/owner/repo/pull/123".to_string(), theme::MUTED)),
+        };
 
-        let outer_block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(theme::BORDER_FOCUSED)
-            .style(theme::POPUP_SURFACE)
-            .title(Line::from(" Worktree from PR ").style(theme::TITLE))
-            .title_bottom(keybinding_hint());
-
-        let inner_area = outer_block.inner(area);
-        outer_block.render(area, frame.buffer_mut());
-
-        let [_, label_area, input_area, status_area] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(3),
-            Constraint::Length(1),
-        ])
-        .horizontal_margin(4)
-        .areas(inner_area);
-
-        Paragraph::new("GitHub PR URL:")
-            .style(theme::SECONDARY)
-            .render(label_area, frame.buffer_mut());
-
-        Paragraph::new(self.input.as_str())
-            .block(
-                Block::bordered()
-                    .border_type(BorderType::Rounded)
-                    .border_style(theme::BORDER_INPUT_FOCUSED)
-                    .padding(Padding::horizontal(1)),
-            )
-            .render(input_area, frame.buffer_mut());
-
-        if let Some(err) = &self.error {
-            Paragraph::new(err.as_str())
-                .style(Style::new().fg(theme::DANGER))
-                .render(status_area, frame.buffer_mut());
+        Prompt {
+            title: "Worktree from PR",
+            // The auto-clone variant does more than the plain one, and that
+            // difference is invisible once the popup is open unless it is said.
+            context: self.auto_clone.then(|| "auto-clone".to_string()),
+            label: "GitHub PR URL",
+            aside: None,
+            value: &self.input,
+            placeholder: "paste a PR URL…",
+            cursor: self.character_index,
+            // Only a rejected URL reddens the box; an unfinished one is not wrong
+            // yet, and `submit` is the only thing that can decide.
+            valid: self.error.is_none(),
+            status,
+            footer: confirm_and_cancel("open").to_vec(),
         }
-
-        // input_area: border(1) + padding(1) = offset 2; y+1 skips top border row
-        frame.set_cursor_position((
-            input_area.x + 2 + self.character_index as u16,
-            input_area.y + 1,
-        ));
+        .render(frame, area);
     }
 
     pub fn handle_action(&mut self, action: Action) -> EventState {
@@ -146,7 +125,14 @@ impl PrWorktreeComponent {
 
 impl Modal for PrWorktreeComponent {
     fn area(&self, full: Rect) -> Rect {
-        centered(full, Constraint::Percentage(70), Constraint::Length(9))
+        // Wider than the name prompt: a pull request URL is roughly 45 columns
+        // before anyone's repository is named, and an input the user cannot read
+        // back is an input they cannot correct.
+        popup_area(
+            full,
+            prompt_width(70, 38, 110),
+            Extent::fixed(PROMPT_HEIGHT),
+        )
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, _ctx: &mut AppContext) {
@@ -326,14 +312,4 @@ fn open_worktree_for_pr(ctx: &mut AppContext, pr_info: github::PrInfo, auto: boo
     );
     prompt.base_branch_hint = base_branch_hint;
     ModalFlow::Replace(Box::new(prompt))
-}
-
-fn keybinding_hint() -> Line<'static> {
-    Line::from(vec![
-        Span::styled("[Enter] ", theme::KEY),
-        Span::styled("open", theme::MUTED),
-        Span::styled("  [Esc] ", theme::KEY_DESTRUCTIVE),
-        Span::styled("cancel ", theme::MUTED),
-    ])
-    .right_aligned()
 }

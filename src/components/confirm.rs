@@ -2,12 +2,13 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::Style,
     text::{Line, Span},
-    widgets::{Block, BorderType, Clear, Paragraph, Widget},
+    widgets::{Block, BorderType, Clear, Paragraph, Widget, Wrap},
     Frame,
 };
 
 use super::{
-    centered, Action, AppContext, ConfirmCallback, EventState, HelpEntry, Modal, ModalFlow,
+    gutter, place_cursor, popup_area, prompt::footer, Action, AppContext, ConfirmCallback,
+    EventState, Extent, HelpEntry, Modal, ModalFlow,
 };
 use crate::keymap::InputMode;
 use crate::theme;
@@ -232,17 +233,31 @@ impl ConfirmComponent {
         }
     }
 
-    /// How tall the popup has to be: two borders, a row of padding above the
-    /// body, the body itself, and the gate row below it.
+    /// How tall the popup has to be at `content_width` columns: two borders, a
+    /// row of padding above the body, the body itself, and the gate row below.
     ///
     /// The gate row is reserved even when there is no gate line, where it reads
     /// as bottom padding — one layout for every dialog, so a body line can never
     /// be clipped by a variant nobody re-measured.
-    fn height(&self) -> u16 {
-        self.body().len() as u16 + 4
+    ///
+    /// It is measured *at a width* because the body wraps: on a narrow terminal
+    /// a single loss becomes two rows, and a height counted in unwrapped lines
+    /// would push the last of them under the border.
+    fn height(&self, content_width: u16) -> u16 {
+        let rows: u16 = self
+            .body()
+            .iter()
+            .map(|line| wrapped_rows(line, content_width))
+            .sum();
+        rows.saturating_add(4)
     }
 
     pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
+        // Empty below the size floor; the base pane's message stands instead of
+        // a dialog with no room to say what it would destroy.
+        if area.is_empty() {
+            return;
+        }
         frame.render_widget(Clear, area);
 
         let title = Line::from(vec![
@@ -256,26 +271,30 @@ impl ConfirmComponent {
             .border_style(theme::BORDER_DESTRUCTIVE)
             .style(theme::POPUP_SURFACE)
             .title(title)
-            .title_bottom(self.keybinding_hint());
+            .title_bottom(self.keybinding_hint(area.width));
 
         let inner_area = outer_block.inner(area);
         outer_block.render(area, frame.buffer_mut());
 
         // One blank row of padding above the body; the border supplies the rest.
+        // The body takes the slack, so a short frame eats into the explanation
+        // and never into the row that says how to get past the gate.
         let [_, body_area, gate_area] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Fill(1),
             Constraint::Length(1),
         ])
-        .horizontal_margin(4)
+        .horizontal_margin(gutter(inner_area.width))
         .areas(inner_area);
 
-        Paragraph::new(self.body()).render(body_area, frame.buffer_mut());
+        Paragraph::new(self.body())
+            .wrap(Wrap { trim: false })
+            .render(body_area, frame.buffer_mut());
 
         if let Some((line, cursor_offset)) = self.gate_line() {
             Paragraph::new(line).render(gate_area, frame.buffer_mut());
             if matches!(self.gate, Gate::Phrase { .. }) {
-                frame.set_cursor_position((gate_area.x + cursor_offset, gate_area.y));
+                place_cursor(frame, gate_area, gate_area.x + cursor_offset, gate_area.y);
             }
         }
     }
@@ -293,36 +312,48 @@ impl ConfirmComponent {
         }
     }
 
-    fn keybinding_hint(&self) -> Line<'static> {
+    /// The dialog's own footer, fitted to `width`.
+    ///
+    /// The confirming key is coloured as destructive and the escape as safe, so
+    /// which of the two ends badly is legible before either word is read. Cancel
+    /// goes last because [`footer`] drops from the left: on the narrowest dialog
+    /// the way *out* is the hint worth keeping.
+    fn keybinding_hint(&self, width: u16) -> Line<'static> {
         let confirm = match &self.gate {
-            Gate::Enter => vec![
-                Span::styled("[Enter] ", theme::KEY_DESTRUCTIVE),
-                Span::styled("confirm", theme::MUTED),
-            ],
-            Gate::Override => vec![
-                Span::styled(format!("[{}] ", OVERRIDE_KEY), theme::KEY_DESTRUCTIVE),
-                Span::styled("delete anyway", theme::MUTED),
-            ],
-            Gate::Phrase { .. } => vec![
-                Span::styled("[Enter] ", theme::KEY_DESTRUCTIVE),
-                Span::styled("once typed", theme::MUTED),
-            ],
+            Gate::Enter => ("Enter", "confirm"),
+            Gate::Override => ("X", "delete anyway"),
+            Gate::Phrase { .. } => ("Enter", "once typed"),
         };
-        let mut spans = confirm;
-        spans.push(Span::styled("  [Esc] ", theme::KEY_SAFE));
-        spans.push(Span::styled("cancel ", theme::MUTED));
-        Line::from(spans).right_aligned()
+        footer(
+            &[
+                (confirm.0, confirm.1, theme::KEY_DESTRUCTIVE),
+                ("Esc", "cancel", theme::KEY_SAFE),
+            ],
+            width,
+        )
     }
 }
 
 impl Modal for ConfirmComponent {
     fn area(&self, full: Rect) -> Rect {
-        centered(
+        // Wide enough that a remote URL or a repository path stays on one line,
+        // capped so a two-word question is not spread across a wall.
+        let width = Extent::share(60, 34, 100);
+        // The height depends on the width, so the width is settled first and the
+        // body measured against the room it will actually get. The two
+        // subtractions mirror `draw` exactly — the borders, then the same gutter
+        // taken from the same inner width — so what is reserved and what is
+        // drawn cannot disagree.
+        let inner_width = width.resolve(full.width).saturating_sub(2);
+        let content_width = inner_width.saturating_sub(2 * gutter(inner_width));
+        popup_area(
             full,
-            Constraint::Percentage(60),
+            width,
             // Two border rows and one padding row around whatever the body needs,
-            // so a dialog listing four losses is not silently clipped.
-            Constraint::Length(self.height()),
+            // so a dialog listing four losses is not silently clipped. Only a
+            // frame shorter than the dialog can trim it now, and it trims the
+            // explanation rather than the gate.
+            Extent::fixed(self.height(content_width)),
         )
     }
 
@@ -374,4 +405,35 @@ impl Modal for ConfirmComponent {
             HelpEntry::Binding("Ctrl+C", "Quit"),
         ]
     }
+}
+
+/// How many rows `line` occupies once wrapped to `width`.
+///
+/// Greedy word wrap, matching what `Paragraph`'s `Wrap` does closely enough to
+/// reserve space for: it only ever has to agree on the *count*, and erring long
+/// costs a blank row while erring short clips a warning.
+fn wrapped_rows(line: &Line<'_>, width: u16) -> u16 {
+    let width = width.max(1) as usize;
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    if text.trim().is_empty() {
+        return 1;
+    }
+    let mut rows = 1u16;
+    let mut used = 0usize;
+    for word in text.split_whitespace() {
+        let len = word.chars().count();
+        let needed = if used == 0 { len } else { used + 1 + len };
+        if needed > width && used > 0 {
+            rows = rows.saturating_add(1);
+            used = len;
+        } else {
+            used = needed;
+        }
+        // A word longer than the line takes rows of its own.
+        while used > width {
+            rows = rows.saturating_add(1);
+            used -= width;
+        }
+    }
+    rows
 }

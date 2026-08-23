@@ -5,13 +5,17 @@ mod help;
 mod list;
 mod modal;
 mod pr_worktree;
+mod prompt;
 mod repositories;
 mod select_directory;
 mod worktrees;
 
 pub use confirm::ConfirmComponent;
 pub use help::{worktrees_bindings, HelpComponent, HelpEntry};
-pub use modal::{centered, AppContext, ConfirmCallback, Modal, ModalFlow, SelectCallback};
+pub use modal::{
+    fits, gutter, place_cursor, popup_area, AppContext, ConfirmCallback, Extent, Modal, ModalFlow,
+    SelectCallback, MIN_HEIGHT, MIN_WIDTH,
+};
 pub use pr_worktree::PrWorktreeComponent;
 pub use repositories::{RepositoriesComponent, RepositoriesModal};
 pub use worktrees::WorktreesComponent;

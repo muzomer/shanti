@@ -111,3 +111,309 @@ pub fn centered(full: Rect, width: Constraint, height: Constraint) -> Rect {
     let [area] = Layout::horizontal([width]).flex(Flex::Center).areas(area);
     area
 }
+
+// --- The size floor ---------------------------------------------------------
+
+/// The smallest terminal shanti will draw its interface into.
+///
+/// Chosen as the point below which the *content* stops being readable rather
+/// than the point below which the code breaks: 40 columns is about what a
+/// `git repo / space-name` row needs once the border and the two status glyphs
+/// are paid for, and 10 rows leaves a title, a footer and a handful of spaces.
+/// Below this the base pane draws one sentence instead of a shredded frame.
+pub const MIN_WIDTH: u16 = 40;
+/// See [`MIN_WIDTH`].
+pub const MIN_HEIGHT: u16 = 10;
+
+/// Whether `area` is at or above the supported floor.
+pub fn fits(area: Rect) -> bool {
+    area.width >= MIN_WIDTH && area.height >= MIN_HEIGHT
+}
+
+/// How wide, or how tall, a popup would like to be.
+///
+/// One type for both axes because the policy is the same on both: take a share
+/// of the frame, but never shrink past the point where the content stops making
+/// sense, and never grow past the point where a centred dialog becomes a wall.
+/// The frame has the final word — see [`Extent::resolve`].
+#[derive(Clone, Copy)]
+pub struct Extent {
+    percent: u16,
+    min: u16,
+    max: u16,
+}
+
+impl Extent {
+    /// A share of the frame, held between a floor and a ceiling.
+    pub const fn share(percent: u16, min: u16, max: u16) -> Self {
+        Self { percent, min, max }
+    }
+
+    /// Exactly `n` cells, still clipped to the frame by [`Extent::resolve`].
+    /// What a popup sized from its own content asks for.
+    pub const fn fixed(n: u16) -> Self {
+        Self {
+            percent: 100,
+            min: n,
+            max: n,
+        }
+    }
+
+    /// The size to actually use, given how much there is.
+    ///
+    /// The clamp to `available` comes *last* on purpose: `min` expresses a
+    /// preference, not a guarantee, and a popup that honoured its floor over the
+    /// frame would be the overflow this whole type exists to prevent. When the
+    /// frame is the binding constraint the popup gets less than it asked for and
+    /// has to degrade — which is why every popup below lays its body out from
+    /// the area it is handed rather than from what it requested.
+    pub(super) fn resolve(self, available: u16) -> u16 {
+        // u32 throughout: `available * percent` overflows u16 past 655 cells.
+        let want = (u32::from(available) * u32::from(self.percent) / 100) as u16;
+        want.clamp(self.min.min(self.max), self.max).min(available)
+    }
+}
+
+/// The rectangle a popup gets: centred, sized by its [`Extent`]s, and never
+/// larger than the frame.
+///
+/// Returns an empty rect when the terminal is below the floor, which makes every
+/// popup a no-op there — nothing clears, so the one message the base pane draws
+/// stays legible instead of being overpainted by a dialog that cannot fit.
+pub fn popup_area(full: Rect, width: Extent, height: Extent) -> Rect {
+    if !fits(full) {
+        return Rect::ZERO;
+    }
+    centered(
+        full,
+        Constraint::Length(width.resolve(full.width)),
+        Constraint::Length(height.resolve(full.height)),
+    )
+}
+
+/// Horizontal breathing room inside a popup, surrendered a step at a time as the
+/// popup narrows. Padding is the first thing to go: at 40 columns the content is
+/// worth more than the margin around it.
+pub fn gutter(width: u16) -> u16 {
+    match width {
+        0..=31 => 0,
+        32..=51 => 1,
+        52..=79 => 2,
+        _ => 4,
+    }
+}
+
+/// Puts the caret at `(col, row)` unless that falls outside `area`.
+///
+/// Typing runs past the right edge of a narrow input long before the input
+/// scrolls, and a caret parked outside its own widget lands on whatever happens
+/// to be there. Pinning it to the last cell keeps it inside the box it belongs
+/// to.
+pub fn place_cursor(frame: &mut Frame, area: Rect, col: u16, row: u16) {
+    if area.is_empty() {
+        return;
+    }
+    frame.set_cursor_position((
+        col.min(area.right().saturating_sub(1)),
+        row.min(area.bottom().saturating_sub(1)),
+    ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    /// A ladder from absurd to comfortable. The interesting sizes are the ones
+    /// on either side of the floor: `39x9` is the last frame that gets the
+    /// message, `40x10` the first that gets the interface.
+    const SIZES: [(u16, u16); 8] = [
+        (1, 1),
+        (3, 2),
+        (10, 4),
+        (39, 9),
+        (40, 10),
+        (60, 16),
+        (140, 50),
+        (400, 120),
+    ];
+
+    fn frame_at(size: (u16, u16), draw: impl FnOnce(&mut Frame, Rect)) -> Rect {
+        let mut terminal =
+            Terminal::new(TestBackend::new(size.0, size.1)).expect("terminal should init");
+        let mut used = Rect::ZERO;
+        terminal
+            .draw(|frame| {
+                used = frame.area();
+                draw(frame, used);
+            })
+            .expect("drawing must not fail at any terminal size");
+        used
+    }
+
+    /// The contract of [`popup_area`], at every size: inside the frame, or empty.
+    #[test]
+    fn a_popup_never_escapes_the_frame_at_any_size() {
+        let extents = [
+            (Extent::share(60, 34, 100), Extent::fixed(22)),
+            (
+                Extent::share(70, 38, 110),
+                Extent::fixed(PROMPT_HEIGHT_FOR_TEST),
+            ),
+            (Extent::share(50, 34, 80), Extent::share(50, 8, 30)),
+            // A popup asking for more than any terminal has, twice over.
+            (Extent::fixed(500), Extent::fixed(500)),
+        ];
+        for (w, h) in extents {
+            for (width, height) in SIZES {
+                let full = Rect::new(0, 0, width, height);
+                let area = popup_area(full, w, h);
+                if !fits(full) {
+                    assert!(
+                        area.is_empty(),
+                        "below the floor a popup must not draw at all, got {area:?} in {full:?}"
+                    );
+                    continue;
+                }
+                assert!(
+                    area.right() <= full.right() && area.bottom() <= full.bottom(),
+                    "popup {area:?} escaped the frame {full:?}"
+                );
+            }
+        }
+    }
+
+    const PROMPT_HEIGHT_FOR_TEST: u16 = 9;
+
+    /// Every real popup, drawn at every size on the ladder.
+    ///
+    /// The point is not what it looks like — that is `shanti-b03.2`'s job — but
+    /// that no size on the way down produces a panic, and that below the floor
+    /// each popup declines to draw so the base pane's message survives.
+    #[test]
+    fn every_popup_draws_at_every_size() {
+        use super::super::{
+            create_worktree::CreateWorktreeComponent, help::worktrees_bindings,
+            select_directory::SelectDirectoryComponent, ConfirmComponent, HelpComponent,
+            PrWorktreeComponent, WorktreesComponent,
+        };
+        use crate::keymap::InputMode;
+        use crate::vcs::Backend;
+
+        for size in SIZES {
+            // A dialog with every optional section filled, so the tallest shape
+            // is the one under test.
+            let mut confirm = ConfirmComponent::new(
+                "Delete Space".into(),
+                "This cannot be undone.".into(),
+                "acme/widget / feature-one".into(),
+                Box::new(|_| ModalFlow::Close),
+            )
+            .at_risk(
+                vec![
+                    "3 uncommitted files (modified, staged or untracked)".into(),
+                    "a branch that was never pushed".into(),
+                ],
+                Some("Deleting it cannot be undone.".into()),
+            )
+            .removing(
+                vec![
+                    "the branch it has checked out".into(),
+                    "the worktree directory and its registration".into(),
+                ],
+                Some("Commits already pushed are kept.".into()),
+            )
+            .require_phrase("feature-one");
+            frame_at(size, |frame, full| {
+                let area = confirm.area(full);
+                confirm.draw(frame, area);
+            });
+
+            let mut create = CreateWorktreeComponent::new("acme-widget".into(), Backend::Git, true);
+            create.base_branch_hint = Some("Will be created from main (default branch)".into());
+            frame_at(size, |frame, full| {
+                let area = create.area(full);
+                create.draw(frame, area);
+            });
+
+            let mut pr = PrWorktreeComponent::new(
+                true,
+                std::sync::Arc::new(|_: &crate::github::PrUrl| unreachable!("no lookup in draw")),
+            );
+            pr.set_error("GitHub auth failed".into());
+            frame_at(size, |frame, full| {
+                let area = pr.area(full);
+                pr.draw(frame, area);
+            });
+
+            let mut picker = SelectDirectoryComponent::new(
+                (0..12).map(|i| format!("/home/dev/src/dir-{i}")).collect(),
+                Box::new(|_, _| ModalFlow::Close),
+            );
+            frame_at(size, |frame, full| {
+                let area = picker.area(full);
+                picker.draw(frame, area);
+            });
+
+            let mut help = HelpComponent::new(worktrees_bindings());
+            frame_at(size, |frame, full| {
+                let area = help.area(full);
+                help.draw(frame, area);
+            });
+
+            let mut spaces = WorktreesComponent::new(Vec::new());
+            frame_at(size, |frame, full| {
+                spaces.draw(frame, full, InputMode::Insert, true);
+            });
+        }
+    }
+
+    /// The help popup is the one that can want more rows than the terminal has,
+    /// so it is the one that must scroll rather than lose them.
+    #[test]
+    fn the_help_popup_scrolls_instead_of_overflowing() {
+        use super::super::{help::worktrees_bindings, HelpComponent};
+
+        let mut help = HelpComponent::new(worktrees_bindings());
+        let (_, wanted) = help.dimensions();
+        let short = (60u16, 20u16);
+        assert!(
+            wanted > short.1,
+            "the table should be taller than the frame under test"
+        );
+
+        let area = frame_at(short, |frame, full| {
+            let area = help.area(full);
+            help.draw(frame, area);
+            assert!(area.height <= full.height, "help must not exceed the frame");
+        });
+        assert_eq!(area.height, short.1);
+
+        // The rows the frame could not show are reachable, and going past the
+        // end stops at the end rather than running away.
+        assert_eq!(help.handle_action(Action::MoveUp), EventState::Consumed);
+        assert_eq!(help.handle_action(Action::GoLast), EventState::Consumed);
+        let bottom = help.scroll;
+        assert!(bottom > 0, "a clipped table must be scrollable");
+        help.handle_action(Action::MoveDown);
+        assert_eq!(help.scroll, bottom, "scrolling stops at the last row");
+    }
+
+    /// Rendering at an absurd size must be a no-op, never a panic.
+    ///
+    /// Ratatui's layout solver and every widget below tolerate a zero-sized
+    /// rect; this pins that down for the geometry *we* compute, which is where a
+    /// subtraction on a `u16` would otherwise wrap.
+    #[test]
+    fn drawing_into_an_empty_or_tiny_rect_is_a_no_op() {
+        for size in SIZES {
+            frame_at(size, |frame, full| {
+                let area = popup_area(full, Extent::share(60, 34, 100), Extent::fixed(22));
+                // Whatever geometry a popup derives from its area has to survive
+                // an empty one, including the caret.
+                place_cursor(frame, area, u16::MAX, u16::MAX);
+                let _ = gutter(area.width);
+            });
+        }
+    }
+}

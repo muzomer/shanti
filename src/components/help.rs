@@ -1,13 +1,28 @@
+//! The keybinding reference, and the one popup whose size is dictated by its
+//! own content rather than by a share of the frame.
+//!
+//! Because of that it is also the one popup that can want more rows than the
+//! terminal has, so it is the one that scrolls. Everything else degrades by
+//! giving up padding; this gives up nothing and moves the window instead.
+
 use ratatui::{
-    layout::{Alignment, Margin, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     text::{Line, Span},
-    widgets::{Block, BorderType, Clear, Paragraph},
+    widgets::{
+        Block, BorderType, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    },
     Frame,
 };
 
-use super::{centered, Action, AppContext, EventState, Modal, ModalFlow};
+use super::{
+    gutter, popup_area, prompt::footer, Action, AppContext, EventState, Extent, Modal, ModalFlow,
+};
 use crate::theme;
-use ratatui::layout::Constraint;
+
+/// Width of the key column. Wide enough for `q / Ctrl+C`, and fixed so every
+/// description starts on the same column — that alignment is what makes the
+/// popup scannable rather than a list of sentences.
+const KEY_COLUMN: usize = 12;
 
 pub enum HelpEntry {
     Binding(&'static str, &'static str),
@@ -17,80 +32,213 @@ pub enum HelpEntry {
 
 pub struct HelpComponent {
     pub entries: Vec<HelpEntry>,
+    /// First visible row. Only ever non-zero on a terminal too short for the
+    /// whole table.
+    pub(super) scroll: u16,
+    /// Rows the last frame could show, and rows it had. Remembered because
+    /// scrolling is clamped when the key is pressed, and only the draw knows how
+    /// much room there was.
+    viewport: u16,
+    content: u16,
 }
 
 impl HelpComponent {
     pub fn new(entries: Vec<HelpEntry>) -> Self {
-        Self { entries }
+        Self {
+            entries,
+            scroll: 0,
+            viewport: 0,
+            content: 0,
+        }
     }
 
-    /// Returns the (width, height) the popup needs, including borders and padding.
+    /// The (width, height) the popup would like, borders and padding included.
+    ///
+    /// A *request*, not a promise: [`popup_area`] clips it to the frame, and
+    /// what that clipping hides is what scrolling recovers.
     pub fn dimensions(&self) -> (u16, u16) {
         let content_width = self
             .entries
             .iter()
             .map(|e| match e {
-                HelpEntry::Binding(key, desc) => key.len().max(12) + desc.len(),
+                HelpEntry::Binding(key, desc) => key.len().max(KEY_COLUMN) + desc.len(),
                 HelpEntry::Section(title) => title.len(),
                 HelpEntry::Blank => 0,
             })
             .max()
             .unwrap_or(0) as u16;
-        // borders (2) + horizontal margin (2*2)
-        let width = content_width + 6;
-        // borders (2) + vertical margin (2*1) + one extra blank line per Section
+        // borders (2) + horizontal padding (2*2)
+        let width = content_width.saturating_add(6);
+        // borders (2) + vertical padding (2*1) + one blank line per section rule
         let section_count = self
             .entries
             .iter()
             .filter(|e| matches!(e, HelpEntry::Section(_)))
             .count() as u16;
-        let height = self.entries.len() as u16 + section_count + 4;
+        let height = (self.entries.len() as u16)
+            .saturating_add(section_count)
+            .saturating_add(4);
         (width, height)
     }
 
+    /// The table, one styled [`Line`] per row.
+    ///
+    /// Three levels, deliberately: a section heading is an accented rule, a key
+    /// is the accent again but held in its own column, and the sentence
+    /// explaining it is secondary text. Nothing here is an unstyled paragraph.
+    fn rows(&self, width: u16) -> Vec<Line<'static>> {
+        self.entries
+            .iter()
+            .flat_map(|e| match e {
+                HelpEntry::Binding(key, desc) => vec![Line::from(vec![
+                    Span::styled(format!("{:<KEY_COLUMN$}", key), theme::KEY),
+                    Span::styled(*desc, theme::SECONDARY),
+                ])],
+                HelpEntry::Section(title) => vec![
+                    Line::from(vec![
+                        Span::styled(*title, theme::TITLE),
+                        Span::raw(" "),
+                        // A rule out to the edge, so a heading reads as a band
+                        // across the popup rather than as one more row.
+                        Span::styled(
+                            "─".repeat((width as usize).saturating_sub(title.chars().count() + 1)),
+                            theme::RULE,
+                        ),
+                    ]),
+                    Line::raw(""),
+                ],
+                HelpEntry::Blank => vec![Line::raw("")],
+            })
+            .collect()
+    }
+
     pub fn draw(&mut self, f: &mut Frame, area: Rect) {
+        if area.is_empty() {
+            return;
+        }
         f.render_widget(Clear, area);
+
+        // Measured before the block is built, because the footer has to know
+        // whether scrolling is possible — and the row count does not depend on
+        // the width, so nothing here needs the inner area yet.
+        self.content = self.row_count();
+        self.viewport = area
+            .height
+            .saturating_sub(2 + 2 * u16::from(area.height >= 7));
+        self.scroll = self.scroll.min(self.max_scroll());
 
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(theme::BORDER_FOCUSED)
             .style(theme::POPUP_SURFACE)
-            .title(Line::from(" Help ").style(theme::TITLE))
-            .title_alignment(Alignment::Center);
+            .title(
+                Line::from(vec![
+                    Span::styled(" ? ", theme::KEY),
+                    Span::styled("Help ", theme::TITLE),
+                ])
+                .alignment(Alignment::Center),
+            )
+            .title_bottom(self.footer(area.width));
+        let outer = block.inner(area);
         f.render_widget(block, area);
 
-        let inner = area.inner(Margin {
-            horizontal: 2,
-            vertical: 1,
-        });
-        let rows: Vec<Line> = self
-            .entries
-            .iter()
-            .flat_map(|e| match e {
-                HelpEntry::Binding(key, desc) => vec![Line::from(vec![
-                    Span::styled(format!("{:<12}", key), theme::KEY),
-                    Span::raw(*desc),
-                ])],
-                HelpEntry::Section(title) => vec![
-                    Line::from(Span::styled(*title, theme::TITLE.underlined())),
-                    Line::raw(""),
-                ],
-                HelpEntry::Blank => vec![Line::raw("")],
-            })
-            .collect();
+        // Padding is the first thing surrendered as the popup shrinks. The
+        // vertical margin must agree with what was assumed above, so the footer
+        // and the viewport cannot disagree about how many rows there are.
+        let pad = gutter(outer.width).min(2);
+        let [inner] = Layout::horizontal([Constraint::Min(1)])
+            .horizontal_margin(pad)
+            .areas(outer);
+        let [inner] = Layout::vertical([Constraint::Min(1)])
+            .vertical_margin(u16::from(area.height >= 7))
+            .areas(inner);
 
-        f.render_widget(Paragraph::new(rows), inner);
+        // The scrollbar draws over the last column of `outer`, so a section rule
+        // run out to the full width would be overpainted by its track.
+        let rule_width = inner
+            .width
+            .saturating_sub(if self.max_scroll() > 0 { 1 } else { 0 });
+        f.render_widget(
+            Paragraph::new(self.rows(rule_width)).scroll((self.scroll, 0)),
+            inner,
+        );
+
+        if self.max_scroll() > 0 {
+            let mut state = ScrollbarState::new(self.content as usize)
+                .position(self.scroll as usize)
+                .viewport_content_length(self.viewport as usize);
+            f.render_stateful_widget(
+                Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                    .begin_symbol(None)
+                    .end_symbol(None)
+                    .thumb_style(theme::RULE)
+                    .track_style(theme::RULE),
+                outer,
+                &mut state,
+            );
+        }
     }
 
-    pub fn handle_action(&mut self, _action: Action) -> EventState {
-        EventState::NotConsumed
+    /// Rows hidden below the fold. Zero whenever the whole table is on screen,
+    /// which is also what decides whether the scrollbar and its hint appear.
+    fn max_scroll(&self) -> u16 {
+        self.content.saturating_sub(self.viewport)
+    }
+
+    /// The always-visible keybinding footer. It gains a scroll hint only when
+    /// there is something to scroll, so it never advertises a key that does
+    /// nothing.
+    fn footer(&self, width: u16) -> Line<'static> {
+        let mut entries = Vec::new();
+        if self.max_scroll() > 0 {
+            entries.push(("j/k", "scroll", theme::KEY));
+        }
+        entries.push(("Esc", "close", theme::KEY_SAFE));
+        footer(&entries, width)
+    }
+
+    /// Rows the table occupies — the entries plus the blank line each section
+    /// heading brings with it. Independent of the width, which is what lets the
+    /// footer know about scrolling before the layout is done.
+    fn row_count(&self) -> u16 {
+        self.entries
+            .iter()
+            .map(|e| match e {
+                HelpEntry::Section(_) => 2,
+                _ => 1,
+            })
+            .sum()
+    }
+
+    pub fn handle_action(&mut self, action: Action) -> EventState {
+        match action {
+            Action::MoveDown => {
+                self.scroll = self.scroll.saturating_add(1).min(self.max_scroll());
+                EventState::Consumed
+            }
+            Action::MoveUp => {
+                self.scroll = self.scroll.saturating_sub(1);
+                EventState::Consumed
+            }
+            Action::GoFirst => {
+                self.scroll = 0;
+                EventState::Consumed
+            }
+            Action::GoLast => {
+                self.scroll = self.max_scroll();
+                EventState::Consumed
+            }
+            _ => EventState::NotConsumed,
+        }
     }
 }
 
 impl Modal for HelpComponent {
     fn area(&self, full: Rect) -> Rect {
         let (width, height) = self.dimensions();
-        centered(full, Constraint::Length(width), Constraint::Length(height))
+        // `fixed` asks for exactly what the table needs; the frame trims it, and
+        // the trimmed rows stay reachable by scrolling rather than being lost.
+        popup_area(full, Extent::fixed(width), Extent::fixed(height))
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, _ctx: &mut AppContext) {

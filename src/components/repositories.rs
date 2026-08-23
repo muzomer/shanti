@@ -17,12 +17,13 @@ use ratatui::{
 };
 
 use super::{
-    centered,
     create_worktree::CreateWorktreeComponent,
     filter::FilterComponent,
     list::{Focus, ListComponent},
+    popup_area,
+    prompt::footer,
     worktrees::SpaceEntry,
-    Action, AppContext, EventState, HelpEntry, Modal, ModalFlow,
+    Action, AppContext, EventState, Extent, HelpEntry, Modal, ModalFlow,
 };
 use crate::keymap::InputMode;
 use tracing::error;
@@ -52,6 +53,11 @@ impl RepositoriesComponent {
     }
 
     pub fn draw(&mut self, f: &mut Frame, rect: Rect, mode: InputMode) {
+        // Empty when the terminal is below the floor: the base pane's one-line
+        // message is what the user gets, and clearing over it would leave a hole.
+        if rect.is_empty() {
+            return;
+        }
         f.render_widget(Clear, rect);
 
         let total = self.filtered_items().len();
@@ -76,7 +82,7 @@ impl RepositoriesComponent {
             .style(theme::POPUP_SURFACE)
             .title(title);
         if matches!(mode, InputMode::Normal) {
-            block = block.title_bottom(repos_keybinding_hint());
+            block = block.title_bottom(repos_keybinding_hint(rect.width));
         }
 
         let inner_area = block.inner(rect);
@@ -85,10 +91,12 @@ impl RepositoriesComponent {
         let in_filter = matches!(mode, InputMode::Insert) && matches!(self.focus, Focus::Filter);
 
         let list_area = if in_filter {
+            // `Min(1)` on the list, not `Fill`: the list is the point of the
+            // popup and is the last thing allowed to be squeezed to nothing.
             let [filter_line, sep_line, list_area] = Layout::vertical([
                 Constraint::Length(1),
                 Constraint::Length(1),
-                Constraint::Fill(1),
+                Constraint::Min(1),
             ])
             .areas(inner_area);
 
@@ -99,10 +107,14 @@ impl RepositoriesComponent {
                 ])),
                 filter_line,
             );
-            f.set_cursor_position((
+            // Clamped: a filter longer than the popup is wide would otherwise
+            // park the caret past the border.
+            super::place_cursor(
+                f,
+                filter_line,
                 filter_line.x + 3 + self.filter.cursor_pos() as u16,
                 filter_line.y,
-            ));
+            );
             f.render_widget(
                 Paragraph::new("─".repeat(sep_line.width as usize)).style(theme::RULE),
                 sep_line,
@@ -115,21 +127,28 @@ impl RepositoriesComponent {
         let items: Vec<ListItem> = self
             .filtered_items()
             .iter()
-            .map(|r| ListItem::new(r.repo().name.clone()))
+            .map(|r| repo_row(&r.repo().name, r.backend()))
             .collect();
         let list = List::new(items)
             .style(theme::TEXT)
             .highlight_style(theme::SELECTED_ROW)
+            // A marker as well as the band, for terminals that drop backgrounds.
+            .highlight_symbol("▸ ")
             .direction(ListDirection::TopToBottom);
         StatefulWidget::render(list, list_area, f.buffer_mut(), &mut self.state);
 
-        let mut scroll_state = ScrollbarState::new(total).position(self.state.offset());
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(None)
-            .end_symbol(None)
-            .thumb_style(theme::RULE)
-            .track_style(theme::RULE);
-        f.render_stateful_widget(scrollbar, list_area, &mut scroll_state);
+        // Only when something is off-screen; see `select_directory`.
+        if total > list_area.height as usize {
+            let mut scroll_state = ScrollbarState::new(total)
+                .position(self.state.offset())
+                .viewport_content_length(list_area.height as usize);
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .thumb_style(theme::RULE)
+                .track_style(theme::RULE);
+            f.render_stateful_widget(scrollbar, list_area, &mut scroll_state);
+        }
     }
 
     pub fn handle_action(&mut self, action: Action) -> EventState {
@@ -299,14 +318,28 @@ impl RepositoriesComponent {
     }
 }
 
-fn repos_keybinding_hint() -> Line<'static> {
-    Line::from(vec![
-        Span::styled("[Enter] ", theme::KEY),
-        Span::styled("select", theme::MUTED),
-        Span::styled("  [Esc] ", theme::KEY_DESTRUCTIVE),
-        Span::styled("close ", theme::MUTED),
-    ])
-    .right_aligned()
+fn repos_keybinding_hint(width: u16) -> Line<'static> {
+    footer(
+        &[
+            ("↑/↓", "move", theme::KEY),
+            ("i", "filter", theme::KEY),
+            ("Enter", "select", theme::KEY),
+            ("Esc", "close", theme::KEY_SAFE),
+        ],
+        width,
+    )
+}
+
+/// One row: the repository name at full weight, its backend tagged beside it.
+///
+/// A colocated repository is listed once per backend under the same name, so
+/// without the tag two adjacent rows are indistinguishable while creating
+/// different things.
+fn repo_row(name: &str, backend: Backend) -> ListItem<'static> {
+    ListItem::new(Line::from(vec![
+        Span::styled(format!("{:<4}", backend.label()), theme::MUTED),
+        Span::styled(name.to_string(), theme::TEXT),
+    ]))
 }
 
 impl ListComponent<BoxedVcs> for RepositoriesComponent {
@@ -386,7 +419,14 @@ impl Default for RepositoriesModal {
 
 impl Modal for RepositoriesModal {
     fn area(&self, full: Rect) -> Rect {
-        centered(full, Constraint::Percentage(50), Constraint::Percentage(50))
+        popup_area(
+            full,
+            // Half the frame, but never so narrow that a repository name is
+            // truncated to nothing, nor so wide that a column of short names
+            // sprawls across a large terminal.
+            Extent::share(50, 34, 80),
+            Extent::share(50, 8, 30),
+        )
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &mut AppContext) {

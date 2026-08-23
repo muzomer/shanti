@@ -1,17 +1,18 @@
 use ratatui::{
-    layout::{Alignment, Rect},
+    layout::{Alignment, Layout, Rect},
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Clear, List, ListDirection, ListItem, ListState, Scrollbar,
-        ScrollbarOrientation, ScrollbarState, StatefulWidget,
+        Block, BorderType, Clear, List, ListDirection, ListItem, ListState, Paragraph, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, StatefulWidget, Widget,
     },
     Frame,
 };
 
 use super::{
-    centered,
     list::{ItemOrder, ListComponent},
-    Action, AppContext, EventState, HelpEntry, Modal, ModalFlow, SelectCallback,
+    popup_area,
+    prompt::footer,
+    Action, AppContext, EventState, Extent, HelpEntry, Modal, ModalFlow, SelectCallback,
 };
 use crate::theme;
 use ratatui::layout::Constraint;
@@ -40,40 +41,68 @@ impl SelectDirectoryComponent {
     }
 
     pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
+        if area.is_empty() {
+            return;
+        }
         frame.render_widget(Clear, area);
 
-        let title = Line::from(vec![Span::styled(" Select Clone Directory ", theme::TITLE)])
-            .alignment(Alignment::Center);
+        let title = Line::from(vec![
+            Span::styled(" ▸ ", theme::KEY),
+            Span::styled("Select Clone Directory ", theme::TITLE),
+        ])
+        .alignment(Alignment::Center);
 
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(theme::BORDER_FOCUSED)
             .style(theme::POPUP_SURFACE)
             .title(title)
-            .title_bottom(dir_keybinding_hint());
+            .title_bottom(footer(
+                &[
+                    ("↑/↓", "move", theme::KEY),
+                    ("Enter", "select", theme::KEY),
+                    ("Esc", "cancel", theme::KEY_SAFE),
+                ],
+                area.width,
+            ));
 
         let inner_area = block.inner(area);
         frame.render_widget(block, area);
 
+        // The prompt row says what the choice is *for*; the list below says what
+        // the options are. Without it the popup is a bare column of paths.
+        let [prompt_area, list_area] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(inner_area);
+        Paragraph::new(Line::from(Span::styled(
+            " Clone the repository into:",
+            theme::SECONDARY,
+        )))
+        .render(prompt_area, frame.buffer_mut());
+
         let total = self.dirs.len();
-        let items: Vec<ListItem> = self
-            .dirs
-            .iter()
-            .map(|d| ListItem::new(d.as_str()))
-            .collect();
+        let items: Vec<ListItem> = self.dirs.iter().map(|d| dir_row(d)).collect();
         let list = List::new(items)
             .style(theme::TEXT)
             .highlight_style(theme::SELECTED_ROW)
+            // A marker as well as the band: the band alone disappears on a
+            // terminal that ignores background colours.
+            .highlight_symbol("▸ ")
             .direction(ListDirection::TopToBottom);
-        StatefulWidget::render(list, inner_area, frame.buffer_mut(), &mut self.state);
+        StatefulWidget::render(list, list_area, frame.buffer_mut(), &mut self.state);
 
-        let mut scroll_state = ScrollbarState::new(total).position(self.state.offset());
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(None)
-            .end_symbol(None)
-            .thumb_style(theme::RULE)
-            .track_style(theme::RULE);
-        frame.render_stateful_widget(scrollbar, inner_area, &mut scroll_state);
+        // Only when there is something off-screen: a full-height track beside a
+        // two-item list is chrome that says nothing.
+        if total > list_area.height as usize {
+            let mut scroll_state = ScrollbarState::new(total)
+                .position(self.state.offset())
+                .viewport_content_length(list_area.height as usize);
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .thumb_style(theme::RULE)
+                .track_style(theme::RULE);
+            frame.render_stateful_widget(scrollbar, list_area, &mut scroll_state);
+        }
     }
 
     pub fn handle_action(&mut self, action: Action) -> EventState {
@@ -101,9 +130,16 @@ impl SelectDirectoryComponent {
 
 impl Modal for SelectDirectoryComponent {
     fn area(&self, full: Rect) -> Rect {
-        // Grow with the list, but never past ten rows plus borders and hint.
-        let rows = (self.dirs.len() as u16).min(10) + 4;
-        centered(full, Constraint::Percentage(60), Constraint::Length(rows))
+        // Grow with the list, but never past ten rows plus borders, prompt and
+        // hint. `Extent` clips it to the frame from there, so the picker cannot
+        // outgrow a short terminal even with a dozen configured directories.
+        let rows = (self.dirs.len() as u16).min(10).saturating_add(5);
+        popup_area(
+            full,
+            // Wide enough for an absolute path, which is the whole content.
+            Extent::share(60, 38, 110),
+            Extent::fixed(rows),
+        )
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, _ctx: &mut AppContext) {
@@ -138,14 +174,22 @@ impl Modal for SelectDirectoryComponent {
     }
 }
 
-fn dir_keybinding_hint() -> Line<'static> {
-    Line::from(vec![
-        Span::styled("[Enter] ", theme::KEY),
-        Span::styled("select", theme::MUTED),
-        Span::styled("  [Esc] ", theme::KEY_DESTRUCTIVE),
-        Span::styled("cancel ", theme::MUTED),
-    ])
-    .right_aligned()
+/// One row of the picker: the parent path dimmed, the directory itself in full
+/// weight.
+///
+/// Configured repos dirs commonly share a long prefix (`~/src/work`,
+/// `~/src/personal`), and the part that differs is the part being chosen. Fading
+/// the shared head puts the eye on the tail without hiding anything — the row is
+/// still the whole path, character for character.
+fn dir_row(dir: &str) -> ListItem<'static> {
+    match dir.rsplit_once('/') {
+        // A trailing slash leaves nothing to emphasise; show it plainly.
+        Some((_, "")) | None => ListItem::new(Span::styled(dir.to_string(), theme::TEXT)),
+        Some((parent, name)) => ListItem::new(Line::from(vec![
+            Span::styled(format!("{}/", parent), theme::MUTED),
+            Span::styled(name.to_string(), theme::TEXT.bold()),
+        ])),
+    }
 }
 
 impl ListComponent<String> for SelectDirectoryComponent {

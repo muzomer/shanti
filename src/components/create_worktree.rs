@@ -1,13 +1,11 @@
 use crate::keymap::InputMode;
-use ratatui::{
-    layout::{Constraint, Layout, Rect},
-    style::Style,
-    text::{Line, Span},
-    widgets::{Block, BorderType, Clear, Padding, Paragraph, Widget},
-    Frame,
-};
+use ratatui::{layout::Rect, Frame};
 
-use super::{centered, Action, AppContext, EventState, HelpEntry, Modal, ModalFlow};
+use super::{
+    popup_area,
+    prompt::{confirm_and_cancel, prompt_width, Prompt, PROMPT_HEIGHT},
+    Action, AppContext, EventState, Extent, HelpEntry, Modal, ModalFlow,
+};
 use crate::theme;
 use crate::vcs::Backend;
 
@@ -71,88 +69,51 @@ impl CreateWorktreeComponent {
     }
 
     pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
-        frame.render_widget(Clear, area);
+        // A name that is merely unfinished is not an error: only an outright
+        // invalid one turns the box red.
+        let valid =
+            self.new_worktree_name.is_empty() || is_valid_branch_name(&self.new_worktree_name);
 
-        let input_border_style =
-            if self.new_worktree_name.is_empty() || is_valid_branch_name(&self.new_worktree_name) {
-                theme::BORDER_INPUT_FOCUSED
-            } else {
-                Style::new().fg(theme::DANGER)
-            };
-
-        let outer_block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(theme::BORDER_FOCUSED)
-            .style(theme::POPUP_SURFACE)
-            // Titled in the vocabulary of the backend that will do the work, so
-            // a jj user is not offered a "worktree" they will never see.
-            .title(
-                Line::from(format!(" New {} ", capitalised(self.backend.space_noun())))
-                    .style(theme::TITLE),
+        // A colocated repository could take either backend, so the prompt says
+        // out loud which one it picked rather than leaving the user to discover
+        // it in the list afterwards.
+        let aside = self.colocated.then(|| {
+            (
+                // Kept short so it survives the fit check on a narrow popup: this
+                // is the one thing about a colocated repository the user cannot
+                // work out from the rest of the prompt.
+                format!("colocated → {}", self.backend.space_noun()),
+                theme::WARNING_TEXT,
             )
-            .title_top(
-                Line::from(format!(" repo: {} · {} ", self.repo_name, self.backend))
-                    .style(theme::SECONDARY)
-                    .right_aligned(),
-            )
-            .title_bottom(keybinding_hint());
+        });
 
-        let inner_area = outer_block.inner(area);
-        outer_block.render(area, frame.buffer_mut());
+        // A warning about the branch outranks a note about where it will start.
+        let status = match (&self.warning, &self.base_branch_hint) {
+            (Some(warning), _) => Some((warning.clone(), theme::WARNING_TEXT)),
+            (None, Some(hint)) => Some((hint.clone(), theme::SECONDARY)),
+            (None, None) => None,
+        };
 
-        let [_, label_area, input_area, hint_area] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(3),
-            Constraint::Length(1),
-        ])
-        .horizontal_margin(4)
-        .areas(inner_area);
+        // Titled in the vocabulary of the backend that will do the work, so a jj
+        // user is not offered a "worktree" they will never see.
+        let title = format!("New {}", capitalised(self.backend.space_noun()));
 
-        Paragraph::new(match self.backend {
-            Backend::Git => "Branch name:",
-            Backend::Jj => "Bookmark name:",
-        })
-        .style(theme::SECONDARY)
-        .render(label_area, frame.buffer_mut());
-
-        // A colocated repository could take either backend, so the default is
-        // stated out loud rather than left for the user to discover in the list.
-        if self.colocated {
-            Paragraph::new(format!(
-                "colocated repo — creating a {} {} ",
-                self.backend,
-                self.backend.space_noun()
-            ))
-            .style(Style::new().fg(theme::WARNING))
-            .right_aligned()
-            .render(label_area, frame.buffer_mut());
+        Prompt {
+            title: &title,
+            context: Some(format!("{} · {}", self.repo_name, self.backend)),
+            label: match self.backend {
+                Backend::Git => "Branch name",
+                Backend::Jj => "Bookmark name",
+            },
+            aside,
+            value: &self.new_worktree_name,
+            placeholder: "type a name…",
+            cursor: self.character_index,
+            valid,
+            status,
+            footer: confirm_and_cancel("create").to_vec(),
         }
-
-        Paragraph::new(self.new_worktree_name.as_str())
-            .block(
-                Block::bordered()
-                    .border_type(BorderType::Rounded)
-                    .border_style(input_border_style)
-                    .padding(Padding::horizontal(1)),
-            )
-            .render(input_area, frame.buffer_mut());
-
-        if let Some(warning) = &self.warning {
-            Paragraph::new(warning.as_str())
-                .style(Style::new().fg(theme::WARNING))
-                .render(hint_area, frame.buffer_mut());
-        } else if let Some(hint) = &self.base_branch_hint {
-            Paragraph::new(hint.as_str())
-                .style(theme::SECONDARY)
-                .render(hint_area, frame.buffer_mut());
-        }
-
-        // input_area: border(1) + padding(1) = offset 2; y+1 skips top border row
-        frame.set_cursor_position((
-            input_area.x + 2 + self.character_index as u16,
-            input_area.y + 1,
-        ));
+        .render(frame, area);
     }
 
     pub fn handle_action(&mut self, action: Action) -> EventState {
@@ -222,7 +183,9 @@ impl CreateWorktreeComponent {
 
 impl Modal for CreateWorktreeComponent {
     fn area(&self, full: Rect) -> Rect {
-        centered(full, Constraint::Percentage(55), Constraint::Length(9))
+        // A branch name is short; the floor is set by the base-branch sentence
+        // beneath it, which is the longest thing this popup ever says.
+        popup_area(full, prompt_width(55, 36, 90), Extent::fixed(PROMPT_HEIGHT))
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, _ctx: &mut AppContext) {
@@ -272,16 +235,6 @@ impl Modal for CreateWorktreeComponent {
             HelpEntry::Binding("Ctrl+C", "Quit"),
         ]
     }
-}
-
-fn keybinding_hint() -> Line<'static> {
-    Line::from(vec![
-        Span::styled("[Enter] ", theme::KEY),
-        Span::styled("confirm", theme::MUTED),
-        Span::styled("  [Esc] ", theme::KEY_DESTRUCTIVE),
-        Span::styled("cancel ", theme::MUTED),
-    ])
-    .right_aligned()
 }
 
 fn is_valid_branch_char(c: char) -> bool {
