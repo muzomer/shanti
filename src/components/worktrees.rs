@@ -334,19 +334,26 @@ impl WorktreesComponent {
 
     /// Says a scan is running and how many repositories it has found; `None`
     /// means it is over and the spinner goes away.
-    pub fn set_scan(&mut self, found: Option<usize>) {
-        // Taken as reported rather than accumulated: the count is cumulative
-        // within a scan and starts again at zero when a new one begins, so a
-        // rescan that now finds nothing must be able to say so. The last count
-        // survives the scan ending, which is what the empty state reads.
-        if let Some(found) = found {
-            self.scanned = true;
-            self.repos_seen = found;
-        }
-        match (found, &mut self.scan) {
-            (Some(found), Some(scan)) => scan.found = found,
-            (Some(found), slot) => *slot = Some(ScanProgress { found, frame: 0 }),
-            (None, slot) => *slot = None,
+    /// Reports how many repositories a scan has found, and whether it is still
+    /// running.
+    ///
+    /// The count and the spinner are separate arguments on purpose. They used to
+    /// share one `Option`, so the call that ended a scan also erased its result —
+    /// and since that is the same call which learns the final count, the last
+    /// batch was never recorded and a repository list with no spaces reported
+    /// itself as no repositories at all.
+    ///
+    /// The count is taken as reported rather than accumulated: it is cumulative
+    /// within a scan and starts again at zero when a new one begins, so a rescan
+    /// that now finds nothing must be able to say so. It survives the scan
+    /// ending, which is what the empty state reads.
+    pub fn set_scan(&mut self, found: usize, scanning: bool) {
+        self.scanned = true;
+        self.repos_seen = found;
+        match (scanning, &mut self.scan) {
+            (true, Some(scan)) => scan.found = found,
+            (true, slot) => *slot = Some(ScanProgress { found, frame: 0 }),
+            (false, slot) => *slot = None,
         }
     }
 
@@ -1277,16 +1284,16 @@ mod tests {
             "nothing has been scanned, so nothing may be claimed"
         );
 
-        component.set_scan(Some(0));
+        component.set_scan(0, true);
         assert_eq!(component.empty_state(), EmptyState::Scanning);
 
         // The scan ended having found nothing: the configuration is the suspect.
-        component.set_scan(None);
+        component.set_scan(0, false);
         assert_eq!(component.empty_state(), EmptyState::NoRepositories);
 
         // A second scan finds repositories, none of which has a space.
-        component.set_scan(Some(3));
-        component.set_scan(None);
+        component.set_scan(3, true);
+        component.set_scan(3, false);
         assert_eq!(component.empty_state(), EmptyState::NoSpaces { repos: 3 });
     }
 
@@ -1296,8 +1303,8 @@ mod tests {
     fn a_filter_that_matches_nothing_is_not_reported_as_a_missing_repository() {
         let mut component =
             WorktreesComponent::new(vec![entry("alpha", Backend::Git, "one", "/s/a/one")]);
-        component.set_scan(Some(1));
-        component.set_scan(None);
+        component.set_scan(1, true);
+        component.set_scan(1, false);
         type_filter(&mut component, "zzz");
         assert_eq!(component.empty_state(), EmptyState::Filtered);
     }

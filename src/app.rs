@@ -316,8 +316,8 @@ impl App {
     /// Keeps the spinner in step with the scan: shown with its count while any
     /// root is still being walked, gone the moment the last one lands.
     fn update_scan_indicator(&mut self) {
-        let found = self.is_scanning().then_some(self.scan_found);
-        self.worktrees_component.set_scan(found);
+        self.worktrees_component
+            .set_scan(self.scan_found, self.is_scanning());
     }
 
     /// Applies whatever background work has landed since the last tick.
