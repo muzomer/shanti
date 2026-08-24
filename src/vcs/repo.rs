@@ -28,7 +28,15 @@ impl RepoId {
     /// repositories shanti discovers — two checkouts may share a name, or even
     /// a remote, but not a directory.
     pub fn from_path(path: impl AsRef<Path>) -> Self {
-        Self(path.as_ref().to_string_lossy().into_owned())
+        // Normalise so one directory yields one id however a backend spelled it.
+        // A colocated repository is opened by both backends from the same path,
+        // but libgit2's `workdir()` ends in a separator where jj and discovery
+        // use the bare canonical path — two spellings of one directory. Left as
+        // raw strings they became two ids, and the repositories list showed the
+        // repository twice. Rebuilding from `components()` drops a trailing
+        // separator (and any `.`), so both spellings collapse to one id.
+        let normalized: PathBuf = path.as_ref().components().collect();
+        Self(normalized.to_string_lossy().into_owned())
     }
 
     /// Borrow the underlying identity, for logging and map lookups.

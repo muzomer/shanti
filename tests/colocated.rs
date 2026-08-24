@@ -147,6 +147,27 @@ fn discovery_reports_both_backends_of_a_colocated_repository() {
     );
 }
 
+/// Both backends of one colocated repository must share a single `RepoId`, so
+/// the repositories list shows it once, not once per backend.
+///
+/// The regression: `RepoId` was the raw path string, and libgit2's `workdir()`
+/// ends in a separator where jj uses the bare path — two ids for one directory,
+/// so the list showed a "jj" row and a "git" row for the same repository.
+#[test]
+fn both_backends_of_a_colocated_repository_share_one_id() {
+    let Some(fixture) = Colocated::new() else {
+        return;
+    };
+    let backends = fixture.backends();
+    assert_eq!(backends.len(), 2, "a colocated repo opens as two backends");
+
+    let ids: Vec<_> = backends.iter().map(|b| b.repo().id.clone()).collect();
+    assert_eq!(
+        ids[0], ids[1],
+        "the git and jj backends of one directory must have the same id"
+    );
+}
+
 /// The bug: 23 git worktrees, one row on screen. Both backends are opened now,
 /// so both kinds of space are listed.
 #[test]
