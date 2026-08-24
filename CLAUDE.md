@@ -62,8 +62,8 @@ src/
   components/
     mod.rs                       # Action and EventState enums; re-exports
     modal.rs                     # Modal trait, ModalFlow, AppContext, Confirm/SelectCallback, centered()
-    worktrees.rs                 # WorktreesComponent — the main list of spaces (SpaceEntry rows)
-    repositories.rs              # RepositoriesComponent (owns the backends) + RepositoriesModal
+    worktrees.rs                 # WorktreesComponent — the spaces pane (SpaceEntry rows), repo-scoped in two-pane
+    repositories.rs              # RepositoriesComponent (owns the backends): the left pane and the fallback picker modal
     create_worktree.rs           # popup text input for a new space name
     pr_worktree.rs               # popup text input for a GitHub PR URL, and the flow behind it
     select_directory.rs          # popup to pick one of the repos dirs (used when cloning)
@@ -148,12 +148,26 @@ tests/
 
 ### The UI
 
-- **Modal stack** (`app.rs` + `components/modal.rs`): there is no `Focus` enum.
-  `App` holds `modals: Vec<Box<dyn Modal>>` over the space list. Drawing walks
-  the stack bottom-to-top; the effective `InputMode` is the top modal's, so
-  popping restores the layer below by construction. A modal returns a
-  **`ModalFlow`** (`Consumed`, `Ignored`, `Close`, `Replace(next)`) saying what
-  should happen to the stack — `App` never learns what a modal is _for_. Adding a
+- **Two-pane layout** (`app.rs::draw`): repositories on the left, the
+  highlighted repository's spaces on the right. `App` holds a `Pane` focus
+  (`Repositories` | `Spaces`); `Tab` switches panes, `i`/`/` enter the focused
+  pane's filter, and `n` creates a space in the highlighted repository with no
+  picker. The spaces list is one global list narrowed to the selected repository
+  by `WorktreesComponent::set_repo_scope`. Below `two_pane_fits` (the two pane
+  minimums combined) the layout folds to the single spaces list, and `n` falls
+  back to the `RepositoriesModal` picker — the only code path that survives from
+  the pre-two-pane flow. `two_pane` is decided in `draw` (the only place with a
+  terminal size) and read by the key handlers, exactly as the loop draws before
+  every input.
+- **Modal stack** (`app.rs` + `components/modal.rs`): there is no `Focus` enum —
+  focus is the `Pane` above plus "whatever is on top of the stack". `App` holds
+  `modals: Vec<Box<dyn Modal>>` over the panes. Drawing walks the stack
+  bottom-to-top; the effective `InputMode` is the top modal's, so popping
+  restores the layer below by construction. A modal returns a **`ModalFlow`**
+  (`Consumed`, `Ignored`, `Close`, `Replace(next)`) saying what should happen to
+  the stack — `App` never learns what a modal is _for_. Each modal names its
+  identity with `Modal::kind() -> ModalKind`, so the stack can be observed
+  (`App::top_modal`, `App::modal_depth`) without reading what it paints. Adding a
   popup means adding a `Modal` implementation, not another field on `App`.
 - **`AppContext`** is the state lent to a modal while it runs (the space list,
   the repositories, the resolved `cli::Args`) plus shared work such as
@@ -165,6 +179,9 @@ tests/
   `Delete`, `OpenPrWorktree`, …). `App::handle_key` resolves the key, then
   dispatches to the top modal or to the list.
 - **`EventState`** (`components/mod.rs`): `Consumed`, `NotConsumed`, `Exit`.
+  Re-exported from `lib.rs` (with `ModalKind` and `InputMode`) so integration
+  tests can name the type `App::handle_key` returns and assert on the modal
+  stack, rather than matching Debug strings.
 - **`events.rs`**: terminal input, bracketed paste, a periodic tick and (later)
   background jobs all arrive on **one channel** (`EventSource` → `AppEvent`), so
   the loop never blocks on any single source and can redraw while nothing is
@@ -251,6 +268,9 @@ cp -rf source dest          # NOT: cp -r source dest
 > **`CLAUDE.md` and `AGENTS.md` are independent files with the same content.**
 > Any change to one must be mirrored in the other, except the generated Beads
 > blocks below.
+>
+> The H1 title necessarily differs between the two, so this divergence is
+> deliberate: <!-- bd-doctor-divergence: ok -->
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6cd5cc61 -->
 
 ## Beads Issue Tracker
