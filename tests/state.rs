@@ -683,7 +683,10 @@ fn the_spaces_pane_follows_the_highlighted_repository() {
 
     // Standing on beta, the right pane shows beta's space and not alpha's.
     let screen = f.screen();
-    assert!(screen.contains("beta-space"), "beta's space should show:\n{screen}");
+    assert!(
+        screen.contains("beta-space"),
+        "beta's space should show:\n{screen}"
+    );
     assert!(
         !screen.contains("alpha-space"),
         "alpha's space must not show while beta is highlighted:\n{screen}"

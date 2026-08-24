@@ -176,7 +176,7 @@ impl RepositoriesComponent {
         let items: Vec<ListItem> = self
             .filtered_items()
             .iter()
-            .map(|r| repo_row(&r.repo().name, r.backend()))
+            .map(|r| repo_row(&r.repo().name))
             .collect();
         let list = List::new(items)
             .style(theme::TEXT)
@@ -517,16 +517,15 @@ pub fn repositories_pane_bindings() -> Vec<HelpEntry> {
     ]
 }
 
-/// One row: the repository name at full weight, its backend tagged beside it.
+/// One row: the repository name, nothing else.
 ///
-/// A colocated repository is listed once per backend under the same name, so
-/// without the tag two adjacent rows are indistinguishable while creating
-/// different things.
-fn repo_row(name: &str, backend: Backend) -> ListItem<'static> {
-    ListItem::new(Line::from(vec![
-        Span::styled(format!("{:<4}", backend.label()), theme::MUTED),
-        Span::styled(name.to_string(), theme::TEXT),
-    ]))
+/// The backend is not named here on purpose. A repository is one thing however
+/// it is driven, and each row is now one repository (a colocated repo is
+/// deduplicated to its jj owner), so a per-row backend tag only added noise. The
+/// backend is still visible where it decides something: per space in the
+/// Worktrees pane, and in the create prompt, which names the backend it uses.
+fn repo_row(name: &str) -> ListItem<'static> {
+    ListItem::new(Line::from(Span::styled(name.to_string(), theme::TEXT)))
 }
 
 impl ListComponent<BoxedVcs> for RepositoriesComponent {
