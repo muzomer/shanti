@@ -622,7 +622,11 @@ fn tab_moves_focus_between_the_two_panes() {
 fn i_enters_a_panes_filter_and_switching_pane_leaves_it() {
     let mut f = Fixture::new().wide();
     f.screen();
-    assert_eq!(f.app.focus_pane(), Pane::Repositories, "opens on repositories");
+    assert_eq!(
+        f.app.focus_pane(),
+        Pane::Repositories,
+        "opens on repositories"
+    );
 
     f.press_char('i');
     assert_eq!(f.mode(), Mode::Insert, "i opens the repositories filter");
@@ -664,6 +668,41 @@ fn n_in_two_pane_opens_the_create_prompt_with_no_picker() {
     assert_eq!(f.app.focus_pane(), Pane::Spaces);
     f.press_char('n');
     assert_eq!(f.modal(), Some(ModalKind::CreateWorktree));
+}
+
+/// Opening the create prompt must not also open the repositories filter.
+///
+/// Regression (shanti-9jh): the create prompt is Insert mode, and the panes are
+/// drawn with the top modal's effective mode. The repositories pane read that
+/// Insert mode as "filter me", so its filter input appeared under the prompt.
+/// The filter belongs to the *focused* pane only; a popup means neither pane is.
+#[test]
+fn opening_the_create_prompt_does_not_open_the_repositories_filter() {
+    let mut f = Fixture::new().wide();
+    f.screen();
+    assert_eq!(f.app.focus_pane(), Pane::Repositories);
+
+    f.press_char('n');
+    assert_eq!(f.modal(), Some(ModalKind::CreateWorktree));
+
+    // The row directly under the Repositories title is still a repository, not a
+    // "/" filter prompt pushed in above it. Look only at the left (repositories)
+    // pane's columns — the row also spans the spaces pane, which mentions alpha.
+    let screen = f.screen();
+    let lines: Vec<&str> = screen.lines().collect();
+    let title = lines
+        .iter()
+        .position(|l| l.contains("Repositories ("))
+        .expect("the repositories pane must be on screen");
+    let repos_column = lines[title + 1]
+        .split("││")
+        .next()
+        .expect("a row spanning both panes");
+    assert!(
+        repos_column.contains("alpha"),
+        "the repositories filter opened under the prompt:\n{}",
+        repos_column
+    );
 }
 
 /// The right pane shows only the highlighted repository's spaces. Moving the

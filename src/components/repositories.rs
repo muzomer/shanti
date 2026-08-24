@@ -64,6 +64,9 @@ impl RepositoriesComponent {
             f,
             rect,
             mode,
+            // The picker is the active modal: it owns the keyboard, so its own
+            // Insert mode may open the filter.
+            true,
             theme::BORDER_FOCUSED,
             theme::POPUP_SURFACE,
             &repositories_bindings(),
@@ -83,6 +86,10 @@ impl RepositoriesComponent {
             f,
             rect,
             mode,
+            // Only the focused pane may open its filter: the effective mode is
+            // the top modal's, so without this an Insert-mode popup (the create
+            // prompt) would make this unfocused pane draw its filter too.
+            focused,
             border,
             theme::CANVAS,
             &repositories_pane_bindings(),
@@ -94,6 +101,7 @@ impl RepositoriesComponent {
         f: &mut Frame,
         rect: Rect,
         mode: InputMode,
+        filtering: bool,
         border_style: ratatui::style::Style,
         surface: ratatui::style::Style,
         bindings: &[HelpEntry],
@@ -137,7 +145,8 @@ impl RepositoriesComponent {
         let inner_area = block.inner(rect);
         f.render_widget(block, rect);
 
-        let in_filter = matches!(mode, InputMode::Insert) && matches!(self.focus, Focus::Filter);
+        let in_filter =
+            filtering && matches!(mode, InputMode::Insert) && matches!(self.focus, Focus::Filter);
 
         let list_area = if in_filter {
             // `Min(1)` on the list, not `Fill`: the list is the point of the

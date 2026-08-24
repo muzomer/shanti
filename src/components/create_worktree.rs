@@ -268,7 +268,8 @@ impl Modal for CreateWorktreeComponent {
         ];
         // Only a colocated repository has a backend to switch between.
         if self.colocated {
-            entries.push(HelpEntry::bind("Tab", "Switch backend (git / jj)").hint("Tab", "backend"));
+            entries
+                .push(HelpEntry::bind("Tab", "Switch backend (git / jj)").hint("Tab", "backend"));
         }
         entries
     }
