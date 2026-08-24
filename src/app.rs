@@ -189,9 +189,12 @@ impl App {
             args,
             pr_fetcher,
             mode: InputMode::Normal,
-            // Start on the spaces list: it is the single-pane view's only pane,
-            // and the one the app opens to whether or not two panes fit.
-            focus_pane: Pane::Spaces,
+            // Open focused on the repositories pane: the workflow is
+            // repository-first — find the repository, then look at its spaces —
+            // so `i` filters repositories straight away and Tab crosses to the
+            // spaces beside them. Ignored in the single-pane view, whose only
+            // pane is the spaces list.
+            focus_pane: Pane::Repositories,
             two_pane: false,
             selected_path: None,
             jobs: None,

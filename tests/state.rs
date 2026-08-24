@@ -595,19 +595,24 @@ fn worktrees_normal_enters_and_leaves_insert_mode() {
 }
 
 /// Tab moves focus between the two panes; the filter is a per-pane thing reached
-/// with `i`. The app opens on the spaces pane — its only pane when narrow.
+/// with `i`. The app opens on the repositories pane — the workflow is
+/// repository-first.
 #[test]
 fn tab_moves_focus_between_the_two_panes() {
     let mut f = Fixture::new().wide();
     f.screen(); // a draw decides the layout, so the panes exist to switch between
     assert!(f.app.two_pane(), "SCREEN_W is wide enough for two panes");
-    assert_eq!(f.app.focus_pane(), Pane::Spaces, "opens on the spaces pane");
-
-    assert_eq!(f.press(key(KeyCode::Tab)), CONSUMED);
-    assert_eq!(f.app.focus_pane(), Pane::Repositories);
+    assert_eq!(
+        f.app.focus_pane(),
+        Pane::Repositories,
+        "opens on the repositories pane"
+    );
 
     assert_eq!(f.press(key(KeyCode::Tab)), CONSUMED);
     assert_eq!(f.app.focus_pane(), Pane::Spaces);
+
+    assert_eq!(f.press(key(KeyCode::Tab)), CONSUMED);
+    assert_eq!(f.app.focus_pane(), Pane::Repositories);
 }
 
 /// `i` enters the focused pane's filter (Insert); Tab leaves it by moving to the
@@ -617,19 +622,20 @@ fn tab_moves_focus_between_the_two_panes() {
 fn i_enters_a_panes_filter_and_switching_pane_leaves_it() {
     let mut f = Fixture::new().wide();
     f.screen();
+    assert_eq!(f.app.focus_pane(), Pane::Repositories, "opens on repositories");
 
     f.press_char('i');
-    assert_eq!(f.mode(), Mode::Insert, "i opens the spaces filter");
+    assert_eq!(f.mode(), Mode::Insert, "i opens the repositories filter");
 
     assert_eq!(f.press(key(KeyCode::Tab)), CONSUMED);
     assert_eq!(
         f.mode(),
         Mode::Normal,
-        "moving to the repos pane leaves the filter"
+        "moving to the spaces pane leaves the filter"
     );
-    assert_eq!(f.app.focus_pane(), Pane::Repositories);
+    assert_eq!(f.app.focus_pane(), Pane::Spaces);
 
-    // The repos pane has its own filter, reached the same way and left with Esc.
+    // The spaces pane has its own filter, reached the same way and left with Esc.
     f.press_char('i');
     assert_eq!(f.mode(), Mode::Insert);
     assert_eq!(f.press(key(KeyCode::Esc)), CONSUMED);
@@ -643,7 +649,7 @@ fn i_enters_a_panes_filter_and_switching_pane_leaves_it() {
 fn n_in_two_pane_opens_the_create_prompt_with_no_picker() {
     let mut f = Fixture::new().wide();
 
-    // From the spaces pane.
+    // From the repositories pane (where the app opens).
     f.press_char('n');
     assert_eq!(
         f.modal(),
@@ -653,9 +659,9 @@ fn n_in_two_pane_opens_the_create_prompt_with_no_picker() {
     assert_eq!(f.mode(), Mode::Insert);
     f.press(key(KeyCode::Esc));
 
-    // And from the repositories pane.
+    // And from the spaces pane.
     f.press(key(KeyCode::Tab));
-    assert_eq!(f.app.focus_pane(), Pane::Repositories);
+    assert_eq!(f.app.focus_pane(), Pane::Spaces);
     f.press_char('n');
     assert_eq!(f.modal(), Some(ModalKind::CreateWorktree));
 }
@@ -667,14 +673,14 @@ fn n_in_two_pane_opens_the_create_prompt_with_no_picker() {
 fn the_spaces_pane_follows_the_highlighted_repository() {
     // Two repositories, each with a space of its own, so scoping is visible:
     // one repository's space must not show while the other is highlighted.
+    // Opens on the repositories pane, alpha highlighted: make a space in alpha.
     let mut f = Fixture::new().wide();
     f.press_char('n');
     f.type_str("alpha-space");
     f.press(key(KeyCode::Enter));
     f.deliver_any();
 
-    // Highlight beta on the left and make it a space too.
-    f.press(key(KeyCode::Tab));
+    // Still on the repositories pane; move down to beta and make it a space too.
     f.press_char('j');
     f.press_char('n');
     f.type_str("beta-space");
@@ -1257,6 +1263,8 @@ fn the_dialog_counts_every_file_it_says_it_counts() {
     .expect("could not write an untracked file");
     f.reload();
 
+    // Space actions live on the spaces pane; the app opens on repositories.
+    f.press(key(KeyCode::Tab));
     f.press_char('d');
     let screen = f.screen();
     assert!(
@@ -1274,6 +1282,8 @@ fn the_dialog_says_the_branch_goes_with_the_worktree() {
     let mut f = Fixture::new().wide();
     f.push("alpha", "feature-one");
 
+    // Space actions live on the spaces pane; the app opens on repositories.
+    f.press(key(KeyCode::Tab));
     f.press_char('d');
     let screen = f.screen();
     assert!(
@@ -1308,6 +1318,8 @@ fn uncommitted_changes_are_guarded_even_when_the_branch_is_pushed() {
     f.dirty("alpha", "feature-one");
     let path = f.worktree_path("alpha", "feature-one");
 
+    // Space actions live on the spaces pane; the app opens on repositories.
+    f.press(key(KeyCode::Tab));
     f.press_char('d');
     let screen = f.screen();
     // A number, not a phrase: "1 uncommitted file" stops a user where
@@ -1719,6 +1731,8 @@ fn confirming_a_clone_with_several_repos_dirs_asks_which_one() {
     let mut f = Fixture::with_two_repos_dirs().wide();
     f.stub_pr_branch("feature-from-pr", false);
 
+    // The PR flow is a spaces-pane action; the app opens on repositories.
+    f.press(key(KeyCode::Tab));
     f.press_char('p');
     submit_pr(&mut f, "https://github.com/acme/widget/pull/7");
     assert_eq!(f.modal(), Some(ModalKind::Confirm));
