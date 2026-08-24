@@ -18,7 +18,7 @@ use ratatui::{
 use super::{
     gutter, popup_area,
     prompt::{footer, FooterEntry},
-    Action, AppContext, EventState, Extent, Modal, ModalFlow,
+    Action, AppContext, EventState, Extent, Modal, ModalFlow, ModalKind,
 };
 use crate::theme;
 
@@ -388,6 +388,10 @@ impl HelpComponent {
 }
 
 impl Modal for HelpComponent {
+    fn kind(&self) -> ModalKind {
+        ModalKind::Help
+    }
+
     fn area(&self, full: Rect) -> Rect {
         let (width, height) = self.dimensions();
         // `fixed` asks for exactly what the table needs; the frame trims it, and

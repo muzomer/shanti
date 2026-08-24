@@ -27,7 +27,7 @@ use super::{
     popup_area,
     prompt::footer,
     worktrees::SpaceEntry,
-    Action, AppContext, EventState, Extent, HelpEntry, Modal, ModalFlow, FILTER_SECTION,
+    Action, AppContext, EventState, Extent, HelpEntry, Modal, ModalFlow, ModalKind, FILTER_SECTION,
     KEYS_SECTION,
 };
 use crate::keymap::InputMode;
@@ -57,7 +57,47 @@ impl RepositoriesComponent {
         }
     }
 
+    /// The picker modal: a popup surface with an always-focused border, drawn
+    /// over the list. This is the narrow-terminal fallback for creating a space.
     pub fn draw(&mut self, f: &mut Frame, rect: Rect, mode: InputMode) {
+        self.render(
+            f,
+            rect,
+            mode,
+            theme::BORDER_FOCUSED,
+            theme::POPUP_SURFACE,
+            &repositories_bindings(),
+        );
+    }
+
+    /// The persistent left pane of the two-pane layout. Sits on the canvas like
+    /// the spaces pane, and shows focus through its border — accented when it
+    /// holds the keyboard, muted when the spaces pane does.
+    pub fn draw_pane(&mut self, f: &mut Frame, rect: Rect, mode: InputMode, focused: bool) {
+        let border = if focused {
+            theme::BORDER_FOCUSED
+        } else {
+            theme::BORDER
+        };
+        self.render(
+            f,
+            rect,
+            mode,
+            border,
+            theme::CANVAS,
+            &repositories_pane_bindings(),
+        );
+    }
+
+    fn render(
+        &mut self,
+        f: &mut Frame,
+        rect: Rect,
+        mode: InputMode,
+        border_style: ratatui::style::Style,
+        surface: ratatui::style::Style,
+        bindings: &[HelpEntry],
+    ) {
         // Empty when the terminal is below the floor: the base pane's one-line
         // message is what the user gets, and clearing over it would leave a hole.
         if rect.is_empty() {
@@ -83,12 +123,16 @@ impl RepositoriesComponent {
 
         // Drawn in both modes, not just Normal: filter mode is exactly where a
         // user is most likely to have forgotten which key gets them back out.
+        let section = match mode {
+            InputMode::Normal => KEYS_SECTION,
+            InputMode::Insert => FILTER_SECTION,
+        };
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
-            .border_style(theme::BORDER_FOCUSED)
-            .style(theme::POPUP_SURFACE)
+            .border_style(border_style)
+            .style(surface)
             .title(title)
-            .title_bottom(repos_keybinding_hint(mode, rect.width));
+            .title_bottom(footer(&footer_entries(bindings, section), rect.width));
 
         let inner_area = block.inner(rect);
         f.render_widget(block, rect);
@@ -301,6 +345,12 @@ impl RepositoriesComponent {
         self.state.select(Some(index));
     }
 
+    /// The highlighted repository's id, for scoping the spaces pane to it. A
+    /// public view of the same anchor a rebuild uses to keep the selection.
+    pub fn selected_repo_id(&mut self) -> Option<RepoId> {
+        self.selected_id()
+    }
+
     pub fn selected_repository(&mut self) -> Option<&dyn Vcs> {
         let index = self.selected_index?;
         // Copy the borrow out of the temporary Vec: its elements already point
@@ -441,12 +491,30 @@ pub fn spaces_of(backends: &[BoxedVcs]) -> (Vec<SpaceEntry>, Vec<String>) {
 
 /// The picker's footer, taken from the same table its help popup shows and cut
 /// to the section the current mode is in.
-fn repos_keybinding_hint(mode: InputMode, width: u16) -> Line<'static> {
-    let section = match mode {
-        InputMode::Normal => KEYS_SECTION,
-        InputMode::Insert => FILTER_SECTION,
-    };
-    footer(&footer_entries(&repositories_bindings(), section), width)
+/// Footer bindings for the left pane of the two-pane layout. Unlike the picker
+/// (`repositories_bindings`), Enter does not pick a repository and Esc does not
+/// close a popup: the pane is always on screen. `n` makes a space in the
+/// highlighted repository, and `Tab` moves to the spaces pane beside it.
+pub fn repositories_pane_bindings() -> Vec<HelpEntry> {
+    vec![
+        HelpEntry::Section(KEYS_SECTION),
+        HelpEntry::bind("j / ↓", "Move down").hint("j/k", "move"),
+        HelpEntry::bind("k / ↑", "Move up"),
+        HelpEntry::bind("n", "New space here").hint("n", "new"),
+        HelpEntry::bind("i", "Enter filter mode").hint("i", "filter"),
+        HelpEntry::bind("Tab", "Focus spaces").hint("Tab", "spaces"),
+        HelpEntry::bind("? / F1", "Show this help")
+            .hint("?", "help")
+            .aside(),
+        HelpEntry::bind("q / Ctrl+C", "Quit"),
+        HelpEntry::Blank,
+        HelpEntry::Section(FILTER_SECTION),
+        HelpEntry::bind("Esc", "Leave filter mode")
+            .hint("Esc", "list")
+            .safe()
+            .essential(),
+        HelpEntry::bind("↑ / ↓ / Ctrl+K / Ctrl+J", "Move in list").hint("↑/↓", "move"),
+    ]
 }
 
 /// One row: the repository name at full weight, its backend tagged beside it.
@@ -537,6 +605,10 @@ impl Default for RepositoriesModal {
 }
 
 impl Modal for RepositoriesModal {
+    fn kind(&self) -> ModalKind {
+        ModalKind::Repositories
+    }
+
     fn area(&self, full: Rect) -> Rect {
         popup_area(
             full,

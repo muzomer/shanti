@@ -28,39 +28,37 @@ use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::TestBackend, Terminal};
-use shanti::app::App;
+use shanti::app::{App, Pane};
 use shanti::cli::Args;
 use shanti::config::{Config, Hooks};
 use shanti::events::AppEvent;
 use shanti::github::PrInfo;
 use shanti::hooks::HookSettings;
 use shanti::jobs::Worker;
+use shanti::{EventState, ModalKind};
 use tempfile::{tempdir, TempDir};
 
-const CONSUMED: &str = "Consumed";
-const NOT_CONSUMED: &str = "NotConsumed";
-const EXIT: &str = "Exit";
+// The real values `App::handle_key` returns, now that `EventState` is exported
+// from the crate root. Assertions compare against the enum, not its Debug text.
+const CONSUMED: EventState = EventState::Consumed;
+const NOT_CONSUMED: EventState = EventState::NotConsumed;
+const EXIT: EventState = EventState::Exit;
 
 /// Large enough that no popup is clipped, so title markers always render in full.
+/// Wide enough for the two-pane layout (see `App::two_pane_fits`). Opt in with
+/// [`Fixture::wide`].
 const SCREEN_W: u16 = 140;
+/// Below the two-pane threshold, so the default fixture draws the single spaces
+/// list — the picker/create flow the legacy tests describe.
+const SINGLE_W: u16 = 67;
 const SCREEN_H: u16 = 50;
 
 // ---------------------------------------------------------------------------
 // Observable state
 // ---------------------------------------------------------------------------
 
-/// Which modal is on screen. Derived from block titles, never from body text.
-#[derive(Debug, PartialEq, Eq)]
-enum Modal {
-    /// No popup: the worktree list owns the screen.
-    None,
-    Repositories,
-    CreateWorktree,
-    Confirm,
-    Help,
-    PrWorktree,
-    SelectReposDir,
-}
+// Which modal is on top is read from `App::top_modal()` — a real `ModalKind`,
+// `None` when the list is bare — not scraped from what the frame paints.
 
 #[derive(Debug, PartialEq, Eq)]
 enum Mode {
@@ -92,6 +90,10 @@ struct Fixture {
     /// Kept so the app can be rebuilt after the fixture changes on disk;
     /// statuses are probed when spaces are listed, not per frame.
     args: Args,
+    /// The terminal width every draw uses. Defaults to a single-pane width, so
+    /// the picker- and create-flow tests exercise the flow they were written
+    /// for; [`Fixture::wide`] opts a test into the two-pane layout.
+    width: u16,
 }
 
 impl Fixture {
@@ -104,6 +106,54 @@ impl Fixture {
     /// makes the clone flow ask which directory to clone into.
     fn with_two_repos_dirs() -> Self {
         Self::build(true)
+    }
+
+    /// Draw at a width that fits two panes, opting this fixture into the two-pane
+    /// layout for the tests that are about it.
+    fn wide(mut self) -> Self {
+        self.width = SCREEN_W;
+        self
+    }
+
+    /// An empty repos dir: the scan finishes having found no repository at all.
+    /// The state behind the "no repositories found" notice.
+    fn no_repositories() -> Self {
+        Self::empty(false)
+    }
+
+    /// One repository with no spaces: the scan finds a repository, none of which
+    /// has a worktree. The state behind the "no spaces yet" notice.
+    fn one_repository_no_spaces() -> Self {
+        Self::empty(true)
+    }
+
+    /// Boots against a repos dir that either holds nothing or a single
+    /// space-less repository — the two empty states, told apart only by whether
+    /// a repository is present.
+    fn empty(with_repository: bool) -> Self {
+        let repos_dir = tempdir().expect("could not create repos dir");
+        let worktrees_dir = tempdir().expect("could not create worktrees dir");
+
+        if with_repository {
+            init_repo(repos_dir.path(), "alpha");
+        }
+
+        let args = Args::for_dirs(
+            worktrees_dir.path().display().to_string(),
+            vec![repos_dir.path().display().to_string()],
+        );
+        let (app, results) = boot(&args);
+
+        Self {
+            app,
+            results,
+            repos_dir,
+            worktrees_dir,
+            _extra_repos_dir: None,
+            _remote_dir: None,
+            args,
+            width: SINGLE_W,
+        }
     }
 
     /// Two repos dirs of two repositories each, with the startup scan still
@@ -144,6 +194,7 @@ impl Fixture {
             _extra_repos_dir: Some(extra),
             _remote_dir: None,
             args,
+            width: SINGLE_W,
         }
     }
 
@@ -181,6 +232,7 @@ impl Fixture {
             _extra_repos_dir: extra,
             _remote_dir: None,
             args,
+            width: SINGLE_W,
         }
     }
 
@@ -321,13 +373,19 @@ impl Fixture {
 
     // -- driving -----------------------------------------------------------
 
-    /// Returns the `EventState` as a string: the enum is not re-exported from the
-    /// crate root, so an integration test cannot name the type. See the report.
-    fn press(&mut self, key: KeyEvent) -> String {
-        format!("{:?}", self.app.handle_key(key))
+    /// The real `EventState` `handle_key` returned — the enum is re-exported now,
+    /// so tests name it instead of matching its Debug text.
+    ///
+    /// A draw runs first, exactly as the event loop draws every frame before it
+    /// reads a key: the layout (single vs two panes, and so how a key routes) is
+    /// decided during draw, so a test that pressed without drawing would route
+    /// against a stale, pre-first-frame layout.
+    fn press(&mut self, key: KeyEvent) -> EventState {
+        self.screen();
+        self.app.handle_key(key)
     }
 
-    fn press_char(&mut self, c: char) -> String {
+    fn press_char(&mut self, c: char) -> EventState {
         self.press(ch(c))
     }
 
@@ -341,7 +399,7 @@ impl Fixture {
 
     fn screen(&mut self) -> String {
         let mut terminal =
-            Terminal::new(TestBackend::new(SCREEN_W, SCREEN_H)).expect("terminal init");
+            Terminal::new(TestBackend::new(self.width, SCREEN_H)).expect("terminal init");
         terminal
             .draw(|frame| self.app.draw(frame))
             .expect("draw failed");
@@ -356,26 +414,10 @@ impl Fixture {
             .join("\n")
     }
 
-    fn modal(&mut self) -> Modal {
-        let screen = self.screen();
-        // Order matters: Help renders on top of the Repositories popup.
-        if screen.contains(" Help ") {
-            Modal::Help
-        // The prompt is titled in the vocabulary of the backend it will create
-        // through, so a jj repository says "Workspace" where git says "Worktree".
-        } else if screen.contains("New Worktree") || screen.contains("New Workspace") {
-            Modal::CreateWorktree
-        } else if screen.contains("Worktree from PR") {
-            Modal::PrWorktree
-        } else if screen.contains("Select Clone Directory") {
-            Modal::SelectReposDir
-        } else if screen.contains('⚠') {
-            Modal::Confirm
-        } else if screen.contains("Repositories") {
-            Modal::Repositories
-        } else {
-            Modal::None
-        }
+    /// The modal on top, as the app itself reports it — `None` for the bare
+    /// list. No screen scraping: the stack's identity is state, not a paint.
+    fn modal(&mut self) -> Option<ModalKind> {
+        self.app.top_modal()
     }
 
     fn mode(&mut self) -> Mode {
@@ -389,7 +431,7 @@ impl Fixture {
 
     /// Asserts we are back at the bare worktree list in Normal mode.
     fn assert_at_worktree_list(&mut self) {
-        assert_eq!(self.modal(), Modal::None, "expected no popup on screen");
+        assert_eq!(self.modal(), None, "expected no popup on screen");
         assert_eq!(self.mode(), Mode::Normal, "expected Normal mode");
     }
 }
@@ -552,35 +594,117 @@ fn worktrees_normal_enters_and_leaves_insert_mode() {
     assert_eq!(f.mode(), Mode::Insert);
 }
 
-/// The component's starting focus must agree with `App`'s starting mode.
-///
-/// Regression test for shanti-gmf.8: the component was built focused on the
-/// filter while `App` started in Normal, so the first Tab toggled focus to the
-/// list and left the mode Normal — a keystroke that changed nothing the user
-/// could see, and two Tabs to reach the filter.
+/// Tab moves focus between the two panes; the filter is a per-pane thing reached
+/// with `i`. The app opens on the spaces pane — its only pane when narrow.
 #[test]
-fn one_tab_from_startup_reaches_the_filter() {
-    let mut f = Fixture::new();
-    assert_eq!(f.mode(), Mode::Normal);
+fn tab_moves_focus_between_the_two_panes() {
+    let mut f = Fixture::new().wide();
+    f.screen(); // a draw decides the layout, so the panes exist to switch between
+    assert!(f.app.two_pane(), "SCREEN_W is wide enough for two panes");
+    assert_eq!(f.app.focus_pane(), Pane::Spaces, "opens on the spaces pane");
 
     assert_eq!(f.press(key(KeyCode::Tab)), CONSUMED);
-    assert_eq!(f.mode(), Mode::Insert, "one Tab should reach the filter");
+    assert_eq!(f.app.focus_pane(), Pane::Repositories);
+
+    assert_eq!(f.press(key(KeyCode::Tab)), CONSUMED);
+    assert_eq!(f.app.focus_pane(), Pane::Spaces);
 }
 
+/// `i` enters the focused pane's filter (Insert); Tab leaves it by moving to the
+/// other pane, which lands in Normal so a half-typed filter's mode does not
+/// carry across. Esc is the in-pane way back out.
 #[test]
-fn worktrees_insert_mode_tab_moves_focus_to_the_list_and_back_to_normal() {
-    let mut f = Fixture::new();
+fn i_enters_a_panes_filter_and_switching_pane_leaves_it() {
+    let mut f = Fixture::new().wide();
+    f.screen();
 
     f.press_char('i');
-    assert_eq!(f.mode(), Mode::Insert);
+    assert_eq!(f.mode(), Mode::Insert, "i opens the spaces filter");
 
-    // Tab off the filter → focus is the list → Normal mode.
     assert_eq!(f.press(key(KeyCode::Tab)), CONSUMED);
-    assert_eq!(f.mode(), Mode::Normal);
+    assert_eq!(
+        f.mode(),
+        Mode::Normal,
+        "moving to the repos pane leaves the filter"
+    );
+    assert_eq!(f.app.focus_pane(), Pane::Repositories);
 
-    // Tab back onto the filter → Insert mode again.
-    f.press(key(KeyCode::Tab));
+    // The repos pane has its own filter, reached the same way and left with Esc.
+    f.press_char('i');
     assert_eq!(f.mode(), Mode::Insert);
+    assert_eq!(f.press(key(KeyCode::Esc)), CONSUMED);
+    assert_eq!(f.mode(), Mode::Normal);
+}
+
+/// In the two-pane view 'n' skips the picker: the repository is already on
+/// screen and highlighted, so the name prompt opens straight onto it. It opens
+/// from either pane — the highlighted repository is the same one either way.
+#[test]
+fn n_in_two_pane_opens_the_create_prompt_with_no_picker() {
+    let mut f = Fixture::new().wide();
+
+    // From the spaces pane.
+    f.press_char('n');
+    assert_eq!(
+        f.modal(),
+        Some(ModalKind::CreateWorktree),
+        "'n' must open the name prompt directly, not the repository picker"
+    );
+    assert_eq!(f.mode(), Mode::Insert);
+    f.press(key(KeyCode::Esc));
+
+    // And from the repositories pane.
+    f.press(key(KeyCode::Tab));
+    assert_eq!(f.app.focus_pane(), Pane::Repositories);
+    f.press_char('n');
+    assert_eq!(f.modal(), Some(ModalKind::CreateWorktree));
+}
+
+/// The right pane shows only the highlighted repository's spaces. Moving the
+/// selection on the left swaps the list on the right; the picker-less create
+/// then lands in whichever repository is highlighted.
+#[test]
+fn the_spaces_pane_follows_the_highlighted_repository() {
+    // Two repositories, each with a space of its own, so scoping is visible:
+    // one repository's space must not show while the other is highlighted.
+    let mut f = Fixture::new().wide();
+    f.press_char('n');
+    f.type_str("alpha-space");
+    f.press(key(KeyCode::Enter));
+    f.deliver_any();
+
+    // Highlight beta on the left and make it a space too.
+    f.press(key(KeyCode::Tab));
+    f.press_char('j');
+    f.press_char('n');
+    f.type_str("beta-space");
+    f.press(key(KeyCode::Enter));
+    f.deliver_any();
+
+    // Standing on beta, the right pane shows beta's space and not alpha's.
+    let screen = f.screen();
+    assert!(screen.contains("beta-space"), "beta's space should show:\n{screen}");
+    assert!(
+        !screen.contains("alpha-space"),
+        "alpha's space must not show while beta is highlighted:\n{screen}"
+    );
+}
+
+/// Below the two-pane width the layout falls back to the single spaces list —
+/// every repository's spaces at once — and 'n' returns to the picker, the only
+/// way to choose a repository when none is on screen.
+#[test]
+fn a_narrow_terminal_falls_back_to_one_pane_and_the_picker() {
+    let mut f = Fixture::new(); // default width is below the two-pane threshold
+    f.screen();
+    assert!(!f.app.two_pane(), "the default width must be single-pane");
+
+    f.press_char('n');
+    assert_eq!(
+        f.modal(),
+        Some(ModalKind::Repositories),
+        "with no repository on screen, 'n' must offer the picker"
+    );
 }
 
 #[test]
@@ -615,7 +739,7 @@ fn worktrees_insert_mode_char_keys_do_not_trigger_normal_mode_actions() {
 
     // In Insert mode 'q', 'n', 'p' and '?' are literal characters, not actions.
     f.type_str("qnp?");
-    assert_eq!(f.modal(), Modal::None, "no popup should have opened");
+    assert_eq!(f.modal(), None, "no popup should have opened");
     assert_eq!(f.mode(), Mode::Insert);
 }
 
@@ -663,7 +787,7 @@ fn help_opens_over_the_worktree_list_and_escape_returns() {
     let mut f = Fixture::new();
 
     assert_eq!(f.press_char('?'), CONSUMED);
-    assert_eq!(f.modal(), Modal::Help);
+    assert_eq!(f.modal(), Some(ModalKind::Help));
 
     f.press(key(KeyCode::Esc));
     f.assert_at_worktree_list();
@@ -674,7 +798,7 @@ fn help_toggles_closed_with_the_same_key() {
     let mut f = Fixture::new();
 
     f.press_char('?');
-    assert_eq!(f.modal(), Modal::Help);
+    assert_eq!(f.modal(), Some(ModalKind::Help));
 
     assert_eq!(f.press_char('?'), CONSUMED);
     f.assert_at_worktree_list();
@@ -685,10 +809,10 @@ fn help_over_repositories_returns_to_repositories_not_the_worktree_list() {
     let mut f = Fixture::new();
 
     f.press_char('n');
-    assert_eq!(f.modal(), Modal::Repositories);
+    assert_eq!(f.modal(), Some(ModalKind::Repositories));
 
     f.press_char('?');
-    assert_eq!(f.modal(), Modal::Help);
+    assert_eq!(f.modal(), Some(ModalKind::Help));
     assert!(
         f.screen().contains("Repositories"),
         "the parent popup should stay visible behind help:\n{}",
@@ -698,7 +822,7 @@ fn help_over_repositories_returns_to_repositories_not_the_worktree_list() {
     f.press(key(KeyCode::Esc));
     assert_eq!(
         f.modal(),
-        Modal::Repositories,
+        Some(ModalKind::Repositories),
         "escape from help must return to the popup it was opened over"
     );
 
@@ -723,7 +847,7 @@ fn repositories_opens_and_escape_returns_to_the_worktree_list() {
     let mut f = Fixture::new();
 
     assert_eq!(f.press_char('n'), CONSUMED);
-    assert_eq!(f.modal(), Modal::Repositories);
+    assert_eq!(f.modal(), Some(ModalKind::Repositories));
     assert_eq!(f.mode(), Mode::Normal);
     assert!(
         f.screen().contains("Repositories (2)"),
@@ -748,7 +872,7 @@ fn repositories_navigation_keys_are_consumed() {
             k
         );
     }
-    assert_eq!(f.modal(), Modal::Repositories);
+    assert_eq!(f.modal(), Some(ModalKind::Repositories));
 }
 
 #[test]
@@ -768,7 +892,7 @@ fn repositories_insert_mode_filters_then_escape_returns_to_normal() {
 
     // Esc in Insert mode leaves the mode, it does not close the popup.
     f.press(key(KeyCode::Esc));
-    assert_eq!(f.modal(), Modal::Repositories);
+    assert_eq!(f.modal(), Some(ModalKind::Repositories));
     assert_eq!(f.mode(), Mode::Normal);
 
     // A second Esc closes the popup.
@@ -817,7 +941,7 @@ fn selecting_a_repository_opens_the_create_worktree_prompt_in_insert_mode() {
 
     f.press_char('n');
     assert_eq!(f.press(key(KeyCode::Enter)), CONSUMED);
-    assert_eq!(f.modal(), Modal::CreateWorktree);
+    assert_eq!(f.modal(), Some(ModalKind::CreateWorktree));
     assert_eq!(f.mode(), Mode::Insert);
 }
 
@@ -845,7 +969,7 @@ fn cancelling_create_worktree_returns_to_the_worktree_list_with_no_residue() {
     // Reopening the prompt must not show the abandoned text.
     f.press_char('n');
     f.press(key(KeyCode::Enter));
-    assert_eq!(f.modal(), Modal::CreateWorktree);
+    assert_eq!(f.modal(), Some(ModalKind::CreateWorktree));
     assert!(
         !f.screen().contains("scratch-branch"),
         "the prompt must reopen empty:\n{}",
@@ -938,14 +1062,15 @@ fn creating_a_space_copies_the_files_and_runs_the_commands() {
 /// A broken hook is news, but never a reason to lose the space.
 #[test]
 fn a_failing_hook_reports_and_leaves_the_space_intact() {
+    // Wide, so 'n' makes a space in the highlighted repository (alpha) with no
+    // picker step — the two-pane create flow.
     let mut f = Fixture::with_hooks(Hooks {
         copy: Vec::new(),
         run: vec!["exit 3".to_string()],
-    });
+    })
+    .wide();
 
     f.press_char('n');
-    f.press_char('g');
-    f.press(key(KeyCode::Enter));
     f.type_str("feature-two");
     f.press(key(KeyCode::Enter));
     f.deliver_one();
@@ -999,7 +1124,7 @@ fn delete_with_confirmation_opens_the_confirm_modal() {
     let mut f = Fixture::new();
 
     assert_eq!(f.press_char('d'), CONSUMED);
-    assert_eq!(f.modal(), Modal::Confirm);
+    assert_eq!(f.modal(), Some(ModalKind::Confirm));
 }
 
 #[test]
@@ -1008,7 +1133,7 @@ fn cancelling_the_confirm_modal_leaves_the_worktree_untouched() {
     let path = f.worktree_path("alpha", "feature-one");
 
     f.press_char('d');
-    assert_eq!(f.modal(), Modal::Confirm);
+    assert_eq!(f.modal(), Some(ModalKind::Confirm));
 
     assert_eq!(f.press(key(KeyCode::Esc)), CONSUMED);
     f.assert_at_worktree_list();
@@ -1028,7 +1153,7 @@ fn confirming_the_delete_removes_the_worktree_and_returns_to_the_list() {
     f.press_char('d');
     assert_eq!(f.press(key(KeyCode::Enter)), CONSUMED);
 
-    assert_eq!(f.modal(), Modal::None);
+    assert_eq!(f.modal(), None);
     assert!(!path.exists(), "the worktree directory should be gone");
     assert!(
         f.screen().contains("Worktrees (0/0)"),
@@ -1046,12 +1171,12 @@ fn enter_cannot_delete_a_worktree_that_was_never_pushed() {
     let path = f.worktree_path("alpha", "feature-one");
 
     f.press_char('d');
-    assert_eq!(f.modal(), Modal::Confirm);
+    assert_eq!(f.modal(), Some(ModalKind::Confirm));
     assert_eq!(f.press(key(KeyCode::Enter)), CONSUMED);
 
     assert_eq!(
         f.modal(),
-        Modal::Confirm,
+        Some(ModalKind::Confirm),
         "the dialog must stay up until the override is given"
     );
     assert!(path.exists(), "Enter alone must not delete unpushed work");
@@ -1070,7 +1195,7 @@ fn the_override_deletes_a_worktree_that_was_never_pushed() {
 
     f.delete_deliberately("feature-one");
 
-    assert_eq!(f.modal(), Modal::None);
+    assert_eq!(f.modal(), None);
     assert!(!path.exists(), "the worktree directory should be gone");
     assert!(f.screen().contains("Worktrees (0/0)"));
 }
@@ -1090,7 +1215,7 @@ fn stray_typing_then_enter_does_not_delete_the_worktree() {
     f.type_str("feature-on");
     f.press(key(KeyCode::Enter));
 
-    assert_eq!(f.modal(), Modal::Confirm);
+    assert_eq!(f.modal(), Some(ModalKind::Confirm));
     assert!(path.exists(), "loose keystrokes must not delete anything");
 }
 
@@ -1119,7 +1244,7 @@ fn the_dialog_names_what_would_be_lost() {
 /// exactly as thoroughly as an edited one.
 #[test]
 fn the_dialog_counts_every_file_it_says_it_counts() {
-    let mut f = Fixture::new();
+    let mut f = Fixture::new().wide();
     f.push("alpha", "feature-one");
     f.dirty("alpha", "feature-one");
     std::fs::write(
@@ -1143,7 +1268,7 @@ fn the_dialog_counts_every_file_it_says_it_counts() {
 /// have to infer it from "the directory goes".
 #[test]
 fn the_dialog_says_the_branch_goes_with_the_worktree() {
-    let mut f = Fixture::new();
+    let mut f = Fixture::new().wide();
     f.push("alpha", "feature-one");
 
     f.press_char('d');
@@ -1175,7 +1300,7 @@ fn the_dialog_says_the_branch_goes_with_the_worktree() {
 /// it: the file the user edited exists in no object store anywhere.
 #[test]
 fn uncommitted_changes_are_guarded_even_when_the_branch_is_pushed() {
-    let mut f = Fixture::new();
+    let mut f = Fixture::new().wide();
     f.push("alpha", "feature-one");
     f.dirty("alpha", "feature-one");
     let path = f.worktree_path("alpha", "feature-one");
@@ -1206,11 +1331,7 @@ fn force_delete_skips_the_dialog_only_when_nothing_would_be_lost() {
     let path = f.worktree_path("alpha", "feature-one");
 
     assert_eq!(f.press_char('D'), CONSUMED);
-    assert_eq!(
-        f.modal(),
-        Modal::None,
-        "a clean, pushed worktree needs no dialog"
-    );
+    assert_eq!(f.modal(), None, "a clean, pushed worktree needs no dialog");
     assert!(!path.exists(), "the worktree directory should be gone");
 }
 
@@ -1222,7 +1343,7 @@ fn force_delete_still_raises_the_dialog_when_work_would_be_lost() {
     assert_eq!(f.press_char('D'), CONSUMED);
     assert_eq!(
         f.modal(),
-        Modal::Confirm,
+        Some(ModalKind::Confirm),
         "force delete must not skip the guard"
     );
     assert!(
@@ -1242,7 +1363,7 @@ fn delete_with_confirmation_on_an_empty_list_does_not_open_the_modal() {
     assert_eq!(f.press_char('d'), CONSUMED);
     assert_eq!(
         f.modal(),
-        Modal::None,
+        None,
         "with nothing selected there is nothing to confirm"
     );
 }
@@ -1275,7 +1396,7 @@ fn pr_prompt_opens_in_insert_mode_and_escape_returns() {
     let mut f = Fixture::new();
 
     assert_eq!(f.press_char('p'), CONSUMED);
-    assert_eq!(f.modal(), Modal::PrWorktree);
+    assert_eq!(f.modal(), Some(ModalKind::PrWorktree));
     assert_eq!(f.mode(), Mode::Insert);
 
     assert_eq!(f.press(key(KeyCode::Esc)), CONSUMED);
@@ -1287,7 +1408,7 @@ fn pr_auto_clone_prompt_opens_in_insert_mode_and_escape_returns() {
     let mut f = Fixture::new();
 
     assert_eq!(f.press_char('P'), CONSUMED);
-    assert_eq!(f.modal(), Modal::PrWorktree);
+    assert_eq!(f.modal(), Some(ModalKind::PrWorktree));
     assert_eq!(f.mode(), Mode::Insert);
 
     f.press(key(KeyCode::Esc));
@@ -1306,7 +1427,7 @@ fn cancelling_the_pr_prompt_clears_the_typed_url() {
     f.assert_at_worktree_list();
 
     f.press_char('p');
-    assert_eq!(f.modal(), Modal::PrWorktree);
+    assert_eq!(f.modal(), Some(ModalKind::PrWorktree));
     assert!(
         !f.screen().contains("acme/widget"),
         "the PR prompt must reopen empty:\n{}",
@@ -1325,7 +1446,7 @@ fn submitting_an_unparseable_pr_url_keeps_the_prompt_open() {
 
     assert_eq!(
         f.modal(),
-        Modal::PrWorktree,
+        Some(ModalKind::PrWorktree),
         "a rejected URL must keep the prompt open so it can be corrected"
     );
 
@@ -1356,7 +1477,7 @@ fn pr_prompt_ctrl_c_exits() {
 /// see the next step appear on the same keystroke has to pump the result the way
 /// the real loop does. That is the point of the issue — the keystroke returns
 /// immediately, whatever GitHub is doing.
-fn submit_pr(f: &mut Fixture, url: &str) -> String {
+fn submit_pr(f: &mut Fixture, url: &str) -> EventState {
     f.type_str(url);
     let state = f.press(key(KeyCode::Enter));
     f.deliver_one();
@@ -1373,7 +1494,11 @@ fn a_submitted_pr_url_leaves_the_prompt_up_and_spinning() {
     // Enter returns without the answer: nothing has been pumped yet.
     assert_eq!(f.press(key(KeyCode::Enter)), CONSUMED);
 
-    assert_eq!(f.modal(), Modal::PrWorktree, "the prompt must stay up");
+    assert_eq!(
+        f.modal(),
+        Some(ModalKind::PrWorktree),
+        "the prompt must stay up"
+    );
     let screen = f.screen();
     assert!(
         screen.contains("Looking up acme/alpha #7"),
@@ -1385,7 +1510,7 @@ fn a_submitted_pr_url_leaves_the_prompt_up_and_spinning() {
 
     // And the answer still lands when it arrives.
     f.deliver_one();
-    assert_eq!(f.modal(), Modal::CreateWorktree);
+    assert_eq!(f.modal(), Some(ModalKind::CreateWorktree));
 }
 
 #[test]
@@ -1423,7 +1548,7 @@ fn a_second_enter_during_a_lookup_does_not_start_a_second_one() {
     assert!(!f.screen().contains("pull/7xyz"));
 
     f.deliver_one();
-    assert_eq!(f.modal(), Modal::CreateWorktree);
+    assert_eq!(f.modal(), Some(ModalKind::CreateWorktree));
     assert!(
         f.results.try_recv().is_err(),
         "one submission must produce exactly one job"
@@ -1445,10 +1570,10 @@ fn keys_pressed_during_a_lookup_do_not_disturb_it() {
     for k in ['?', 'q', 'd', 'j'] {
         assert_eq!(f.press_char(k), CONSUMED);
     }
-    assert_eq!(f.modal(), Modal::PrWorktree);
+    assert_eq!(f.modal(), Some(ModalKind::PrWorktree));
 
     f.deliver_one();
-    assert_eq!(f.modal(), Modal::CreateWorktree);
+    assert_eq!(f.modal(), Some(ModalKind::CreateWorktree));
 }
 
 #[test]
@@ -1462,7 +1587,11 @@ fn a_failing_pr_lookup_keeps_the_prompt_open_with_the_error() {
         CONSUMED
     );
 
-    assert_eq!(f.modal(), Modal::PrWorktree, "the prompt must stay open");
+    assert_eq!(
+        f.modal(),
+        Some(ModalKind::PrWorktree),
+        "the prompt must stay open"
+    );
     assert!(
         f.screen().contains("GitHub auth failed"),
         "the failure should be shown in the prompt:\n{}",
@@ -1481,7 +1610,7 @@ fn a_pr_on_a_known_repo_opens_the_branch_prompt_prefilled() {
         CONSUMED
     );
 
-    assert_eq!(f.modal(), Modal::CreateWorktree);
+    assert_eq!(f.modal(), Some(ModalKind::CreateWorktree));
     assert!(
         f.screen().contains("feature-from-pr"),
         "the PR branch should be prefilled:\n{}",
@@ -1520,7 +1649,7 @@ fn a_merged_pr_on_an_existing_worktree_reports_why_nothing_was_created() {
     f.press_char('p');
     submit_pr(&mut f, "https://github.com/acme/alpha/pull/7");
 
-    assert_eq!(f.modal(), Modal::None);
+    assert_eq!(f.modal(), None);
     assert!(
         f.screen().contains("merged"),
         "a merged PR should say so rather than fail silently:\n{}",
@@ -1565,7 +1694,7 @@ fn a_pr_on_an_unknown_repo_offers_to_clone_it() {
         CONSUMED
     );
 
-    assert_eq!(f.modal(), Modal::Confirm);
+    assert_eq!(f.modal(), Some(ModalKind::Confirm));
     let screen = f.screen();
     assert!(
         screen.contains("Clone Repository") && screen.contains("git@github.com:acme/widget.git"),
@@ -1584,17 +1713,17 @@ fn a_pr_on_an_unknown_repo_offers_to_clone_it() {
 
 #[test]
 fn confirming_a_clone_with_several_repos_dirs_asks_which_one() {
-    let mut f = Fixture::with_two_repos_dirs();
+    let mut f = Fixture::with_two_repos_dirs().wide();
     f.stub_pr_branch("feature-from-pr", false);
 
     f.press_char('p');
     submit_pr(&mut f, "https://github.com/acme/widget/pull/7");
-    assert_eq!(f.modal(), Modal::Confirm);
+    assert_eq!(f.modal(), Some(ModalKind::Confirm));
 
     assert_eq!(f.press(key(KeyCode::Enter)), CONSUMED);
     assert_eq!(
         f.modal(),
-        Modal::SelectReposDir,
+        Some(ModalKind::SelectReposDir),
         "with more than one repos dir the flow must ask where to clone"
     );
     assert!(
@@ -1624,7 +1753,7 @@ fn auto_clone_skips_the_confirmation_and_goes_straight_to_the_picker() {
         CONSUMED
     );
 
-    assert_eq!(f.modal(), Modal::SelectReposDir);
+    assert_eq!(f.modal(), Some(ModalKind::SelectReposDir));
 
     f.press(key(KeyCode::Esc));
     f.assert_at_worktree_list();
@@ -1638,12 +1767,12 @@ fn help_over_the_clone_directory_picker_returns_to_the_picker() {
 
     f.press_char('P');
     submit_pr(&mut f, "https://github.com/acme/widget/pull/7");
-    assert_eq!(f.modal(), Modal::SelectReposDir);
+    assert_eq!(f.modal(), Some(ModalKind::SelectReposDir));
 
     assert_eq!(f.press_char('?'), CONSUMED);
-    assert_eq!(f.modal(), Modal::Help);
+    assert_eq!(f.modal(), Some(ModalKind::Help));
     f.press(key(KeyCode::Esc));
-    assert_eq!(f.modal(), Modal::SelectReposDir);
+    assert_eq!(f.modal(), Some(ModalKind::SelectReposDir));
 
     f.press(key(KeyCode::Esc));
     f.assert_at_worktree_list();
@@ -1662,7 +1791,7 @@ fn multiple_repos_dirs_still_start_on_the_worktree_list() {
     assert!(f.screen().contains("Worktrees (1/1)"));
 
     f.press_char('n');
-    assert_eq!(f.modal(), Modal::Repositories);
+    assert_eq!(f.modal(), Some(ModalKind::Repositories));
     f.press(key(KeyCode::Esc));
     f.assert_at_worktree_list();
 }
@@ -1690,17 +1819,17 @@ fn escape_unwinds_every_reachable_depth_back_to_the_worktree_list() {
         for k in keys {
             f.press(k);
         }
-        assert_ne!(f.modal(), Modal::None, "{name}: expected a modal to open");
+        assert_ne!(f.modal(), None, "{name}: expected a modal to open");
 
         // At most two Escapes: help over a popup is the deepest reachable stack.
         f.press(key(KeyCode::Esc));
-        if f.modal() != Modal::None {
+        if f.modal().is_some() {
             f.press(key(KeyCode::Esc));
         }
 
         assert_eq!(
             f.modal(),
-            Modal::None,
+            None,
             "{name}: escape should unwind to the worktree list"
         );
         assert_eq!(
@@ -1820,6 +1949,39 @@ fn a_filter_typed_during_a_scan_survives_the_next_batch() {
     );
 }
 
+/// The two empty states are decided at the `App` level — which one shows turns
+/// on whether the finished scan found a repository — and only a state-level test
+/// sees them wired to the real screen. A unit test on `EmptyState` cannot catch
+/// the two being swapped here, and the notice must name the directory that was
+/// actually scanned, not the name of a setting.
+#[test]
+fn the_empty_screen_names_the_scanned_path_or_tells_you_to_create_a_space() {
+    let mut f = Fixture::no_repositories();
+    let screen = f.screen();
+    assert!(
+        screen.contains("no repositories found"),
+        "an empty repos dir should say so: {screen}"
+    );
+    // The real directory that was walked, not "--repos-dir": the fix is to look
+    // at the path and see shanti searched somewhere the repositories are not.
+    let scanned = f.repos_dir.path().display().to_string();
+    assert!(
+        screen.contains(&scanned) && screen.contains("scanned (from"),
+        "the notice should name the directory it scanned: {screen}"
+    );
+
+    let mut f = Fixture::one_repository_no_spaces();
+    let screen = f.screen();
+    assert!(
+        screen.contains("no spaces yet") && screen.contains("press n to create one"),
+        "a repository with no worktree should invite creating one: {screen}"
+    );
+    assert!(
+        !screen.contains("no repositories found"),
+        "found a repository, so this is not the no-repositories state: {screen}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The keybinding footer (shanti-hq6.3)
 // ---------------------------------------------------------------------------
@@ -1850,7 +2012,7 @@ fn bottom_row(screen: &str) -> String {
 
 #[test]
 fn the_space_list_names_its_keys_without_opening_help() {
-    let mut f = Fixture::new();
+    let mut f = Fixture::new().wide();
     let bottom = bottom_row(&f.screen());
 
     for hint in [

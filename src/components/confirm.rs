@@ -8,7 +8,7 @@ use ratatui::{
 
 use super::{
     footer_entries, gutter, popup_area, prompt::footer, Action, AppContext, ConfirmCallback,
-    EventState, Extent, HelpEntry, Modal, ModalFlow, KEYS_SECTION,
+    EventState, Extent, HelpEntry, Modal, ModalFlow, ModalKind, KEYS_SECTION,
 };
 use crate::keymap::InputMode;
 use crate::theme;
@@ -301,6 +301,10 @@ impl ConfirmComponent {
 }
 
 impl Modal for ConfirmComponent {
+    fn kind(&self) -> ModalKind {
+        ModalKind::Confirm
+    }
+
     fn area(&self, full: Rect) -> Rect {
         // Wide enough that a remote URL or a repository path stays on one line,
         // capped so a two-word question is not spread across a wall.

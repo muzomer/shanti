@@ -105,7 +105,28 @@ impl From<EventState> for ModalFlow {
     }
 }
 
+/// Which modal is on top, as a value rather than a rendered title.
+///
+/// There is no `Focus` enum any more — focus is "whatever is on top of the modal
+/// stack" — so this is what an observer (a test above all) names instead. It is
+/// the stable identity of a modal, independent of what the modal paints, so an
+/// assertion on it does not break when a title is reworded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModalKind {
+    Repositories,
+    CreateWorktree,
+    Confirm,
+    Help,
+    PrWorktree,
+    SelectReposDir,
+}
+
 pub trait Modal {
+    /// This modal's stable identity, so the stack can be observed without
+    /// reading what it draws. Every modal declares its own — there is no
+    /// sensible default, and a new modal that forgets to is a compile error.
+    fn kind(&self) -> ModalKind;
+
     /// Where this modal sits inside the full frame. Each modal sizes itself, so
     /// the stack can draw bottom-to-top without knowing any geometry.
     fn area(&self, full: Rect) -> Rect;
@@ -384,7 +405,7 @@ mod tests {
 
             let mut spaces = WorktreesComponent::new(Vec::new());
             frame_at(size, |frame, full| {
-                spaces.draw(frame, full, InputMode::Insert, true, None);
+                spaces.draw(frame, full, InputMode::Insert, true, false, None);
             });
         }
     }

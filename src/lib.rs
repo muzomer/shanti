@@ -14,7 +14,13 @@ pub mod vcs;
 
 use color_eyre::eyre::{Result, WrapErr};
 
-use components::EventState;
+// Re-exported at the crate root so an integration test can name the type
+// `App::handle_key` returns, and the modal-stack identity `App::top_modal`
+// yields, without `mod components` being public. `InputMode` rides along from
+// `keymap` for the same reason. See shanti-b03.7.
+pub use components::{EventState, ModalKind};
+pub use keymap::InputMode;
+
 use events::{AppEvent, EventSource};
 use jobs::Worker;
 use ratatui::{backend::Backend, Terminal};

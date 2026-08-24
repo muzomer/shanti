@@ -23,6 +23,7 @@ use super::{
     worktrees_bindings, Action, EventState, RepositoriesComponent, FILTER_SECTION, KEYS_SECTION,
     MIN_HEIGHT, MIN_WIDTH,
 };
+use crate::cli::Origin;
 use crate::keymap::InputMode;
 use crate::theme;
 use crate::vcs::{Backend, RepoId, Space};
@@ -334,6 +335,18 @@ pub struct WorktreesComponent {
     /// "your configuration found nothing" apart from "your repositories have no
     /// spaces yet".
     repos_seen: usize,
+    /// The directories the scan actually walks, and where that setting came
+    /// from. Kept here — not re-resolved — so the "no repositories" notice can
+    /// name the real paths instead of the names of the settings, without
+    /// putting the precedence rules in a second place. `App` hands these in.
+    scan_roots: Vec<PathBuf>,
+    scan_origin: Origin,
+    /// When `Some`, the list shows only that repository's spaces — the right
+    /// pane of the two-pane layout, scoped to the repository highlighted on the
+    /// left. `None` is the whole set: the single-pane view, and the narrow
+    /// fallback. The global list is kept intact either way; this only narrows
+    /// what [`WorktreesComponent::filtered_items`] returns.
+    repo_scope: Option<RepoId>,
 }
 
 impl WorktreesComponent {
@@ -354,7 +367,43 @@ impl WorktreesComponent {
             frame: 0,
             scanned: false,
             repos_seen: 0,
+            scan_roots: Vec::new(),
+            scan_origin: Origin::Default,
+            repo_scope: None,
         }
+    }
+
+    /// Narrows the list to one repository's spaces, or (`None`) shows them all.
+    ///
+    /// `App` calls this as the repositories-pane selection moves, so the spaces
+    /// pane always shows the highlighted repository. Returns whether the scope
+    /// changed, so the caller can reset the selection to the top only when the
+    /// rows underneath it actually changed.
+    pub fn set_repo_scope(&mut self, scope: Option<RepoId>) -> bool {
+        if self.repo_scope == scope {
+            return false;
+        }
+        self.repo_scope = scope;
+        true
+    }
+
+    /// Whether an entry belongs to the current repo scope. `None` scope admits
+    /// every entry; a set scope admits only that repository's spaces.
+    fn in_scope(&self, entry: &SpaceEntry) -> bool {
+        match &self.repo_scope {
+            Some(id) => &entry.space.repo == id,
+            None => true,
+        }
+    }
+
+    /// Tells the list which directories the scan walks, and where that setting
+    /// was decided, so an empty result can name the paths that came up empty.
+    ///
+    /// `App` owns both — the resolved roots and their [`Origin`] — and calls
+    /// this as it starts a scan; the list never resolves either for itself.
+    pub fn set_scan_roots(&mut self, roots: Vec<PathBuf>, origin: Origin) {
+        self.scan_roots = roots;
+        self.scan_origin = origin;
     }
 
     /// Replaces every row, keeping the user where they were.
@@ -454,12 +503,32 @@ impl WorktreesComponent {
         } else if !self.scanned {
             EmptyState::Unknown
         } else if self.repos_seen == 0 {
-            EmptyState::NoRepositories
+            EmptyState::NoRepositories {
+                roots: self.scan_roots.clone(),
+                origin: self.scan_origin,
+            }
+        } else if self.repo_scope.is_some() {
+            // Scoped to one repository (the two-pane right side): the count of
+            // *other* repositories is not this pane's business — only that this
+            // repository has no space yet, and how to make one.
+            EmptyState::NoSpacesHere
         } else {
             EmptyState::NoSpaces {
                 repos: self.repos_seen,
             }
         }
+    }
+
+    /// Moves the cursor to the first row, or clears it when there are none.
+    ///
+    /// Called when the repo scope changes under the spaces pane: the old cursor
+    /// pointed into a different repository's rows, so keeping its index would
+    /// land on an unrelated space. The top is the one position that always makes
+    /// sense for a freshly narrowed list.
+    pub fn select_first(&mut self) {
+        let has_rows = !self.filtered_items().is_empty();
+        self.selected_index = has_rows.then_some(0);
+        self.state.select(self.selected_index);
     }
 
     /// The row the user is on, as something a rebuilt list can be searched for.
@@ -501,6 +570,11 @@ impl WorktreesComponent {
         rect: Rect,
         mode: InputMode,
         is_active: bool,
+        // Whether this pane holds the keyboard *and* should say so with an
+        // accented border. Distinct from `is_active`: the single-pane view is
+        // interactive but keeps a muted border, so only the two-pane spaces side
+        // passes this `true`.
+        focused: bool,
         notice: Option<&Notification>,
     ) {
         // Below the supported floor there is no honest layout left: the border
@@ -579,9 +653,14 @@ impl WorktreesComponent {
             Line::from(spans)
         };
 
+        let border_style = if focused {
+            theme::BORDER_FOCUSED
+        } else {
+            theme::BORDER
+        };
         let block = Block::bordered()
             .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(theme::BORDER)
+            .border_style(border_style)
             .style(theme::CANVAS)
             .title(title)
             .title_bottom(status)
@@ -720,17 +799,6 @@ impl WorktreesComponent {
 
     pub fn focus_list(&mut self) {
         self.focus = Focus::List;
-    }
-
-    pub fn toggle_focus(&mut self) {
-        self.focus = match self.focus {
-            Focus::Filter => Focus::List,
-            Focus::List => Focus::Filter,
-        };
-    }
-
-    pub fn is_filter_focused(&self) -> bool {
-        matches!(self.focus, Focus::Filter)
     }
 
     /// Clears any active filter, finds the space matching the given branch name,
@@ -915,7 +983,8 @@ impl ListComponent<SpaceEntry> for WorktreesComponent {
     fn filtered_items(&mut self) -> Vec<&SpaceEntry> {
         let query = self.filter.value.as_str();
         if query.is_empty() {
-            let mut items: Vec<&SpaceEntry> = self.spaces.iter().collect();
+            let mut items: Vec<&SpaceEntry> =
+                self.spaces.iter().filter(|e| self.in_scope(e)).collect();
             items.sort_by(|a, b| (&a.repo_name, &a.space.name).cmp(&(&b.repo_name, &b.space.name)));
             return items;
         }
@@ -937,6 +1006,7 @@ impl ListComponent<SpaceEntry> for WorktreesComponent {
         let mut scored: Vec<(&SpaceEntry, u32)> = self
             .spaces
             .iter()
+            .filter(|entry| self.in_scope(entry))
             .filter_map(|entry| {
                 let label = entry.label();
                 let mut total = 0u32;
@@ -977,11 +1047,16 @@ enum EmptyState {
     /// Nothing has been scanned yet, so nothing can be claimed.
     Unknown,
     /// The scan finished and found no repository at all — which almost always
-    /// means the repos dir is not where shanti was told to look.
-    NoRepositories,
+    /// means the repos dir is not where shanti was told to look. Carries the
+    /// directories that were walked, and where that setting came from, so the
+    /// notice can point at the actual paths rather than the setting names.
+    NoRepositories { roots: Vec<PathBuf>, origin: Origin },
     /// Repositories were found and none of them has a space yet. Everything
     /// works; the user simply has not made one.
     NoSpaces { repos: usize },
+    /// The one repository this pane is scoped to has no space yet. Same next
+    /// step as `NoSpaces`, without a count that belongs to the whole list.
+    NoSpacesHere,
 }
 
 impl EmptyState {
@@ -1001,18 +1076,29 @@ impl EmptyState {
                 detail("press / to change it".to_owned()),
             ],
             EmptyState::Unknown => vec![detail("no spaces yet".to_owned())],
-            // The paths themselves would say more than the names of the
-            // settings, and `cli::Args` holds them along with the `Origin` each
-            // came from — but the list is never handed the arguments, and
-            // resolving the repos dir a second time here would put the
-            // precedence rules in two places. Naming the three inputs, in the
-            // order that wins, is the honest fallback until `App` passes them in.
-            EmptyState::NoRepositories => vec![
-                headline("no repositories found"),
-                detail("nothing was found in the repos dir".to_owned()),
-                detail("set it with --repos-dir,".to_owned()),
-                detail("SHANTI_REPOS_DIR or config.toml".to_owned()),
-            ],
+            // Name the directories that were actually walked, and where that
+            // setting was decided, so the fix is obvious: the user reads the
+            // paths and sees at once that shanti looked somewhere other than
+            // where the repositories are. `App` resolves both and hands them in
+            // via `set_scan_roots`, keeping the precedence rules in one place.
+            EmptyState::NoRepositories { roots, origin } => {
+                let mut lines = vec![
+                    headline("no repositories found"),
+                    detail(format!("scanned (from the {origin}):")),
+                ];
+                if roots.is_empty() {
+                    // No root can only mean nothing was configured to scan;
+                    // never print a heading with nothing underneath it.
+                    lines.push(detail("  (no repos dir configured)".to_owned()));
+                } else {
+                    lines.extend(
+                        roots
+                            .iter()
+                            .map(|root| detail(format!("  {}", root.display()))),
+                    );
+                }
+                lines
+            }
             EmptyState::NoSpaces { repos } => vec![
                 headline("no spaces yet"),
                 detail(format!(
@@ -1024,6 +1110,10 @@ impl EmptyState {
                         "repositories"
                     }
                 )),
+                detail("press n to create one".to_owned()),
+            ],
+            EmptyState::NoSpacesHere => vec![
+                headline("no spaces yet"),
                 detail("press n to create one".to_owned()),
             ],
         }
@@ -1461,9 +1551,17 @@ mod tests {
         component.set_scan(0, true);
         assert_eq!(component.empty_state(), EmptyState::Scanning);
 
-        // The scan ended having found nothing: the configuration is the suspect.
+        // The scan ended having found nothing: the configuration is the suspect,
+        // and the notice names the very directories that came up empty.
+        component.set_scan_roots(vec![PathBuf::from("/repos")], Origin::CommandLine);
         component.set_scan(0, false);
-        assert_eq!(component.empty_state(), EmptyState::NoRepositories);
+        assert_eq!(
+            component.empty_state(),
+            EmptyState::NoRepositories {
+                roots: vec![PathBuf::from("/repos")],
+                origin: Origin::CommandLine,
+            }
+        );
 
         // A second scan finds repositories, none of which has a space.
         component.set_scan(3, true);
@@ -1501,10 +1599,15 @@ mod tests {
                 .join("\n")
         };
 
-        let no_repos = text(EmptyState::NoRepositories);
+        let no_repos = text(EmptyState::NoRepositories {
+            roots: vec![PathBuf::from("/home/me/src"), PathBuf::from("/work")],
+            origin: Origin::Environment,
+        });
         assert!(no_repos.contains("no repositories found"), "{no_repos}");
-        assert!(no_repos.contains("--repos-dir"), "{no_repos}");
-        assert!(no_repos.contains("SHANTI_REPOS_DIR"), "{no_repos}");
+        // The origin the setting was decided by, and every path that was walked.
+        assert!(no_repos.contains("from the environment"), "{no_repos}");
+        assert!(no_repos.contains("/home/me/src"), "{no_repos}");
+        assert!(no_repos.contains("/work"), "{no_repos}");
 
         let no_spaces = text(EmptyState::NoSpaces { repos: 1 });
         assert!(no_spaces.contains("no spaces yet"), "{no_spaces}");
@@ -1523,8 +1626,14 @@ mod tests {
             EmptyState::Scanning,
             EmptyState::Filtered,
             EmptyState::Unknown,
-            EmptyState::NoRepositories,
+            // A path can always outgrow the floor and wrap; the fixed lines
+            // around it are what this pins, so a short root stands in.
+            EmptyState::NoRepositories {
+                roots: vec![PathBuf::from("~/src")],
+                origin: Origin::Default,
+            },
             EmptyState::NoSpaces { repos: 12 },
+            EmptyState::NoSpacesHere,
         ] {
             let lines = state.lines();
             assert!(

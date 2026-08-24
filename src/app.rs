@@ -6,7 +6,7 @@ use std::{
 use color_eyre::eyre::Result;
 use crossterm::event::KeyEvent;
 use ratatui::{
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Rect},
     Frame,
 };
 use tracing::{debug, warn};
@@ -14,10 +14,11 @@ use tracing::{debug, warn};
 use crate::{
     cli,
     components::{
-        resume_pr_flow, spaces_of, worktrees_bindings, Action, Activity, AppContext,
-        ConfirmComponent, EventState, HelpComponent, Modal, ModalFlow, Notifications, PrCommand,
-        PrRequests, PrStep, PrWorktreeComponent, RepositoriesComponent, RepositoriesModal,
-        SpaceEntry, WorktreesComponent,
+        repositories_pane_bindings, resume_pr_flow, spaces_of, worktrees_bindings, Action,
+        Activity, AppContext, ConfirmComponent, CreateWorktreeComponent, EventState, HelpComponent,
+        Modal, ModalFlow, ModalKind, Notifications, PrCommand, PrRequests, PrStep,
+        PrWorktreeComponent, RepositoriesComponent, RepositoriesModal, SpaceEntry,
+        WorktreesComponent, MIN_HEIGHT, MIN_WIDTH,
     },
     github,
     hooks::{self, HookOutcome, HookPlan, HookReport},
@@ -25,6 +26,31 @@ use crate::{
     keymap::{self, InputMode},
     vcs::{BoxedVcs, Consequence, DeletionRisk, RepoId, Space},
 };
+
+/// Which of the two panes holds the keyboard, when both are on screen.
+///
+/// There is no wider `Focus` concept — a modal on the stack takes input
+/// regardless, and this only decides who receives keys once the stack is empty
+/// and the terminal is wide enough for two panes. In the single-pane view the
+/// spaces list is the only pane, so this is ignored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pane {
+    Repositories,
+    Spaces,
+}
+
+/// The narrowest the left (repositories) pane is ever drawn, and the right
+/// (spaces) pane's own floor — the same [`MIN_WIDTH`] every list already
+/// enforces. Below their sum the layout drops to a single pane rather than
+/// render two columns too narrow to read.
+const REPOS_PANE_MIN: u16 = 28;
+
+/// Whether the frame has room for two panes side by side. Below the sum of the
+/// two pane minimums — or under the shared height floor — the layout drops to
+/// the single spaces list rather than draw two columns too narrow to use.
+fn two_pane_fits(area: Rect) -> bool {
+    area.height >= MIN_HEIGHT && area.width >= REPOS_PANE_MIN + MIN_WIDTH
+}
 
 /// The worktree list plus a stack of modals on top of it.
 ///
@@ -51,6 +77,12 @@ pub struct App {
     pr_fetcher: github::PrFetcher,
     /// Input mode of the worktree list, the one layer that is not a modal.
     mode: InputMode,
+    /// Which pane has the keyboard in the two-pane view. Ignored in single-pane.
+    focus_pane: Pane,
+    /// Whether the last frame drew two panes. Written by `draw`, read by the key
+    /// handlers, which have no terminal size of their own: `draw` runs every
+    /// frame before input, so this is never more than one frame stale.
+    two_pane: bool,
     pub selected_path: Option<String>,
     /// The pool slow work is handed to, once a main loop exists to receive its
     /// results. `None` in a test, where every job is simply never submitted.
@@ -157,6 +189,10 @@ impl App {
             args,
             pr_fetcher,
             mode: InputMode::Normal,
+            // Start on the spaces list: it is the single-pane view's only pane,
+            // and the one the app opens to whether or not two panes fit.
+            focus_pane: Pane::Spaces,
+            two_pane: false,
             selected_path: None,
             jobs: None,
             outstanding: HashSet::new(),
@@ -208,6 +244,33 @@ impl App {
         !self.scans.is_empty()
     }
 
+    /// How many modals are stacked over the list. Zero means the list owns the
+    /// screen. This is the modal-stack equivalent of the old `Focus`: an
+    /// observer names the state directly instead of reading it back off a paint.
+    pub fn modal_depth(&self) -> usize {
+        self.modals.len()
+    }
+
+    /// The identity of the modal on top, or `None` when the list is bare.
+    ///
+    /// Paired with [`App::modal_depth`], this is the whole observable surface of
+    /// the stack: which popup has focus, without scraping its title.
+    pub fn top_modal(&self) -> Option<ModalKind> {
+        self.modals.last().map(|m| m.kind())
+    }
+
+    /// Whether the last frame drew two panes rather than the single spaces list.
+    /// Depends on the terminal width, so it is only meaningful after a draw.
+    pub fn two_pane(&self) -> bool {
+        self.two_pane
+    }
+
+    /// Which pane holds the keyboard. Only meaningful in the two-pane view; the
+    /// single-pane view always routes to the spaces list whatever this says.
+    pub fn focus_pane(&self) -> Pane {
+        self.focus_pane
+    }
+
     /// Starts discovery: one [`Job::ScanRepositories`] per configured repos dir.
     ///
     /// **One job per root, not one job for the whole list.** A job produces
@@ -235,6 +298,11 @@ impl App {
         }
         self.repositories_component.replace_backends(Vec::new());
         self.worktrees_component.set_spaces(Vec::new());
+        // Tell the list what it is about to walk, so an empty result can name
+        // the real paths. Set on every scan — the roots or their origin could
+        // in principle have changed — and it is only a clone of a short list.
+        self.worktrees_component
+            .set_scan_roots(self.scan_roots.clone(), self.args.origins.repos_dirs);
         self.scan_found = 0;
 
         // The roots are *kept*, not consumed: `R` runs this again, and a list of
@@ -540,29 +608,86 @@ impl App {
         self.modals.last().map_or(self.mode, |m| m.mode())
     }
 
-    pub fn draw(&mut self, frame: &mut Frame) {
-        let [full_area] = Layout::default()
-            .constraints([Constraint::Percentage(100)])
-            .areas(frame.area());
+    /// Render seam for the rendering tests: draw the spaces list alone,
+    /// full-frame and unscoped — the single-pane list, independent of whether
+    /// two panes would fit. The list's own column, glyph and empty-state output
+    /// is a property of the widget, not of the layout that hosts it, so the
+    /// tests that pin that output drive it here rather than through `draw`.
+    #[doc(hidden)]
+    pub fn draw_spaces_list(&mut self, frame: &mut Frame, area: Rect) {
+        self.worktrees_component.set_repo_scope(None);
+        let mode = self.mode;
+        let Self {
+            worktrees_component,
+            notifications,
+            ..
+        } = self;
+        worktrees_component.draw(frame, area, mode, true, false, notifications.current());
+    }
 
+    pub fn draw(&mut self, frame: &mut Frame) {
+        let full_area = frame.area();
         let mode = self.effective_mode();
+        let stack_empty = self.modals.is_empty();
+
+        // Decide the layout and bring the spaces scope in step *before* the
+        // fields are borrowed apart. Two panes → the spaces list is narrowed to
+        // the highlighted repository; one pane → it shows every space. When the
+        // scope actually changes, the cursor drops to the top: its old index
+        // pointed into a different repository's rows.
+        let two_pane = two_pane_fits(full_area);
+        self.two_pane = two_pane;
+        let scope = two_pane
+            .then(|| self.repositories_component.selected_repo_id())
+            .flatten();
+        if self.worktrees_component.set_repo_scope(scope) {
+            self.worktrees_component.select_first();
+        }
+
         let Self {
             worktrees_component,
             repositories_component,
             notifications,
             modals,
             args,
+            focus_pane,
             pending_hooks,
             ..
         } = self;
 
-        worktrees_component.draw(
-            frame,
-            full_area,
-            mode,
-            modals.is_empty(),
-            notifications.current(),
-        );
+        if two_pane {
+            // Percentage width for the left pane, clamped to a strict minimum so
+            // it never collapses, and capped so a wide terminal does not hand a
+            // column of short repository names half the screen. The right pane
+            // takes the rest under its own `MIN_WIDTH` floor.
+            let repos_w = (full_area.width * 35 / 100).clamp(REPOS_PANE_MIN, 48);
+            let [left, right] =
+                Layout::horizontal([Constraint::Length(repos_w), Constraint::Min(MIN_WIDTH)])
+                    .areas(full_area);
+
+            let repos_focused = stack_empty && *focus_pane == Pane::Repositories;
+            let spaces_focused = stack_empty && *focus_pane == Pane::Spaces;
+            repositories_component.draw_pane(frame, left, mode, repos_focused);
+            worktrees_component.draw(
+                frame,
+                right,
+                mode,
+                spaces_focused,
+                spaces_focused,
+                notifications.current(),
+            );
+        } else {
+            // The single-pane view keeps its muted border — interactive, but not
+            // one of two panes competing for a focus marker.
+            worktrees_component.draw(
+                frame,
+                full_area,
+                mode,
+                stack_empty,
+                false,
+                notifications.current(),
+            );
+        }
 
         let mut ctx = AppContext {
             worktrees: worktrees_component,
@@ -598,9 +723,87 @@ impl App {
         }
 
         if self.modals.is_empty() {
-            return self.handle_worktrees_action(action);
+            // Tab moves focus between the two panes, above either pane's own
+            // handler — in the single-pane view it has nowhere to go.
+            if action == Action::FocusNext {
+                return self.switch_pane();
+            }
+            return if self.two_pane && self.focus_pane == Pane::Repositories {
+                self.handle_repositories_action(action)
+            } else {
+                self.handle_worktrees_action(action)
+            };
         }
         self.dispatch_to_top_modal(action)
+    }
+
+    /// Tab: hand the keyboard to the other pane. A no-op — but still consumed —
+    /// in the single-pane view, where there is only one pane to be on. Both
+    /// panes drop back to their list in Normal mode, so a half-typed filter on
+    /// the pane you leave does not carry its Insert mode to the one you enter.
+    fn switch_pane(&mut self) -> EventState {
+        if self.two_pane {
+            self.focus_pane = match self.focus_pane {
+                Pane::Repositories => Pane::Spaces,
+                Pane::Spaces => Pane::Repositories,
+            };
+            self.mode = InputMode::Normal;
+            self.worktrees_component.focus_list();
+            self.repositories_component.focus_list();
+        }
+        EventState::Consumed
+    }
+
+    /// Keys for the repositories pane (two-pane view only). `n` makes a space in
+    /// the highlighted repository with no picker; Enter hands focus to its
+    /// spaces; `i`/Esc drive the pane's own filter; the rest is list movement.
+    fn handle_repositories_action(&mut self, action: Action) -> EventState {
+        match action {
+            Action::OpenRepositories => {
+                self.open_create_for_selected_repo();
+                EventState::Consumed
+            }
+            Action::Select => {
+                self.focus_pane = Pane::Spaces;
+                EventState::Consumed
+            }
+            Action::EnterInsertMode => {
+                self.mode = InputMode::Insert;
+                self.repositories_component.focus_filter();
+                EventState::Consumed
+            }
+            Action::ExitInsertMode => {
+                self.mode = InputMode::Normal;
+                self.repositories_component.focus_list();
+                EventState::Consumed
+            }
+            Action::Refresh => {
+                self.start_refresh();
+                EventState::Consumed
+            }
+            Action::Rescan => {
+                self.start_scan();
+                EventState::Consumed
+            }
+            _ => self.repositories_component.handle_action(action),
+        }
+    }
+
+    /// Pushes the name prompt for a new space in the highlighted repository,
+    /// carrying that repository's default backend — the same construction the
+    /// picker modal does, without the picker step now that the repository is
+    /// already on screen and selected.
+    fn open_create_for_selected_repo(&mut self) {
+        let selected = self
+            .repositories_component
+            .selected_repository()
+            .map(|r| (r.repo().name.clone(), r.repo().id.clone(), r.backend()));
+        if let Some((name, id, backend)) = selected {
+            let colocated = self.repositories_component.backends_of(&id).len() > 1;
+            self.modals.push(Box::new(CreateWorktreeComponent::new(
+                name, backend, colocated,
+            )));
+        }
     }
 
     /// Applies a bracketed paste to whichever text field currently has focus.
@@ -615,10 +818,12 @@ impl App {
         }
         for c in text.chars().filter(|c| !c.is_control()) {
             let action = Action::InsertChar(c);
-            if self.modals.is_empty() {
-                self.handle_worktrees_action(action);
-            } else {
+            if !self.modals.is_empty() {
                 self.dispatch_to_top_modal(action);
+            } else if self.two_pane && self.focus_pane == Pane::Repositories {
+                self.handle_repositories_action(action);
+            } else {
+                self.handle_worktrees_action(action);
             }
         }
     }
@@ -632,10 +837,15 @@ impl App {
         {
             return;
         }
-        let entries = self
-            .modals
-            .last()
-            .map_or_else(worktrees_bindings, |m| m.help());
+        // With the stack empty, help is about whichever pane holds the keyboard;
+        // otherwise it is the top modal's own bindings.
+        let entries = match self.modals.last() {
+            Some(modal) => modal.help(),
+            None if self.two_pane && self.focus_pane == Pane::Repositories => {
+                repositories_pane_bindings()
+            }
+            None => worktrees_bindings(),
+        };
         self.modals.push(Box::new(HelpComponent::new(entries)));
     }
 
@@ -761,7 +971,14 @@ impl App {
     fn handle_worktrees_action(&mut self, action: Action) -> EventState {
         match action {
             Action::OpenRepositories => {
-                self.modals.push(Box::new(RepositoriesModal::new()));
+                // Two panes → the repository is already on screen and scoped, so
+                // 'n' makes a space in it directly. One pane → there is no
+                // repository context, so fall back to the picker modal.
+                if self.two_pane {
+                    self.open_create_for_selected_repo();
+                } else {
+                    self.modals.push(Box::new(RepositoriesModal::new()));
+                }
                 EventState::Consumed
             }
             Action::OpenPrWorktree => {
@@ -816,15 +1033,8 @@ impl App {
                 self.worktrees_component.focus_list();
                 EventState::Consumed
             }
-            Action::FocusNext => {
-                self.worktrees_component.toggle_focus();
-                self.mode = if self.worktrees_component.is_filter_focused() {
-                    InputMode::Insert
-                } else {
-                    InputMode::Normal
-                };
-                EventState::Consumed
-            }
+            // Tab (FocusNext) is intercepted in `handle_key` as a pane switch, so
+            // it never reaches here.
             _ => {
                 let result = self.worktrees_component.handle_action(action);
                 if result == EventState::Exit {

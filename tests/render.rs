@@ -370,10 +370,38 @@ impl Fixture {
         self.frame(size).join("\n")
     }
 
+    /// The spaces list drawn alone, full-frame and unscoped — the single-pane
+    /// list, whatever the terminal width. The column/glyph/separator tests are
+    /// about this widget, not the two-pane layout that hosts it at wide sizes,
+    /// so they render it directly here (see `App::draw_spaces_list`).
+    fn spaces_frame(&mut self, size: (u16, u16)) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(size.0, size.1)).expect("terminal init");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                self.app.draw_spaces_list(frame, area);
+            })
+            .expect("drawing must not fail at any terminal size");
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// The spaces list drawn alone, as one string — the `screen` equivalent for
+    /// tests asserting the list's own message rather than the whole app.
+    fn spaces_screen(&mut self, size: (u16, u16)) -> String {
+        self.spaces_frame(size).join("\n")
+    }
+
     /// The list rows on screen, with the border cells stripped, so column 0 of
     /// the returned string is column 0 of the row.
     fn rows(&mut self, size: (u16, u16)) -> Vec<String> {
-        self.frame(size)
+        self.spaces_frame(size)
             .into_iter()
             .filter_map(|line| {
                 let inner = line.strip_prefix('│')?;
@@ -899,18 +927,15 @@ fn a_scan_in_flight_says_so() {
     );
 }
 
-/// "Nothing was found" is a configuration problem, so the notice names the three
-/// settings that would fix it, in the order that wins.
+/// "Nothing was found" is a configuration problem, so the notice names the
+/// directory that was actually scanned and where that setting was decided —
+/// the path the user can read to see shanti looked in the wrong place.
 #[test]
-fn an_empty_repos_dir_names_the_settings_that_would_fix_it() {
+fn an_empty_repos_dir_names_the_directory_it_scanned() {
     let mut f = Fixture::with_bare_repos(&[]);
+    let scanned = f._repos_dir.path().display().to_string();
     let screen = f.screen(ROOMY);
-    for expected in [
-        "no repositories found",
-        "nothing was found in the repos dir",
-        "--repos-dir",
-        "SHANTI_REPOS_DIR or config.toml",
-    ] {
+    for expected in ["no repositories found", "scanned (from", &scanned] {
         assert!(screen.contains(expected), "missing {expected:?}:\n{screen}");
     }
 }
@@ -918,9 +943,8 @@ fn an_empty_repos_dir_names_the_settings_that_would_fix_it() {
 /// Repositories but no spaces is not a problem at all — it is a next step.
 ///
 /// Regression test for a bug these tests found. A user whose repositories simply
-/// had no spaces yet was told "no repositories found — set it with --repos-dir,
-/// SHANTI_REPOS_DIR or config.toml": a configuration error that did not exist,
-/// pointing at settings that were already correct.
+/// had no spaces yet was told "no repositories found": a configuration error
+/// that did not exist, pointing at a repos dir that was already correct.
 ///
 /// The cause was in `App`, not in the notice. `set_scan` took one `Option` for
 /// both the count and whether a scan was running, and `update_scan_indicator`
@@ -932,7 +956,9 @@ fn an_empty_repos_dir_names_the_settings_that_would_fix_it() {
 #[test]
 fn repositories_without_spaces_say_how_to_make_one() {
     let mut f = Fixture::with_bare_repos(&["alpha", "beta", "gamma"]);
-    let screen = f.screen(ROOMY);
+    // The whole-list message counts every repository, so it is asserted on the
+    // unscoped single-pane list, not the two-pane pane scoped to one repository.
+    let screen = f.spaces_screen(ROOMY);
     for expected in [
         "no spaces yet",
         "3 repositories, none with a space",

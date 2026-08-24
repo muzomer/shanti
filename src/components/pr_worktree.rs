@@ -24,7 +24,7 @@ use super::{
     prompt::{prompt_width, FooterEntry, Prompt, PROMPT_HEIGHT},
     select_directory::SelectDirectoryComponent,
     Action, AppContext, ConfirmCallback, ConfirmComponent, EventState, Extent, HelpEntry, Modal,
-    ModalFlow, SelectCallback, KEYS_SECTION,
+    ModalFlow, ModalKind, SelectCallback, KEYS_SECTION,
 };
 use crate::theme;
 use crate::{
@@ -482,6 +482,10 @@ impl PrWorktreeComponent {
 }
 
 impl Modal for PrWorktreeComponent {
+    fn kind(&self) -> ModalKind {
+        ModalKind::PrWorktree
+    }
+
     fn area(&self, full: Rect) -> Rect {
         // Wider than the name prompt: a pull request URL is roughly 45 columns
         // before anyone's repository is named, and an input the user cannot read

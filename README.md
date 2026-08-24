@@ -17,6 +17,7 @@
 # Features
 
 - **Manage spaces** — create, delete, and navigate git worktrees and jujutsu workspaces across different repositories.
+- **Two-pane layout** — repositories on the left, the highlighted repository's spaces on the right; `Tab` moves focus between them, and `n` creates a space in the highlighted repository with no picker. A narrow terminal folds back to a single list.
 - **Both backends, one list** — shanti detects per repository whether it is driven by git or by jj, and each row says which backend owns it.
 - **Status indicators** — every space shows two glyphs: one for its relationship to the upstream, one for its local state. See [Status indicators](#status-indicators).
 - **Create spaces from PR links** — paste a GitHub PR URL and shanti clones the repo and creates a space from the PR branch (requires `gh` CLI or read-only `GITHUB_TOKEN`).
@@ -154,9 +155,9 @@ Run `cd $(shanti)` in `bash`/`zsh` or `cd (shanti)` in `fish` shell from any dir
 | --- | --- |
 | `j` / `↓`, `k` / `↑` | move down / up |
 | `g` / `Home`, `G` / `End` | go to first / last |
-| `i` or `/` | filter mode (`Esc` leaves it) |
-| `Tab` | toggle filter / list |
-| `n` | new space (pick a repository) |
+| `i` or `/` | filter the focused pane (`Esc` leaves it) |
+| `Tab` | move focus between the repositories and spaces panes |
+| `n` | new space in the highlighted repository (a repository picker when the terminal is too narrow for two panes) |
 | `p` | new space from a GitHub PR URL |
 | `P` | same, cloning the repository if it is missing |
 | `r` | refresh: re-read every known repository's spaces and status (no network) |

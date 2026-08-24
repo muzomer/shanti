@@ -4,7 +4,7 @@ use ratatui::{layout::Rect, Frame};
 use super::{
     footer_entries, popup_area,
     prompt::{prompt_width, Prompt, PROMPT_HEIGHT},
-    Action, AppContext, EventState, Extent, HelpEntry, Modal, ModalFlow, KEYS_SECTION,
+    Action, AppContext, EventState, Extent, HelpEntry, Modal, ModalFlow, ModalKind, KEYS_SECTION,
 };
 use crate::theme;
 use crate::vcs::Backend;
@@ -184,6 +184,10 @@ impl CreateWorktreeComponent {
 }
 
 impl Modal for CreateWorktreeComponent {
+    fn kind(&self) -> ModalKind {
+        ModalKind::CreateWorktree
+    }
+
     fn area(&self, full: Rect) -> Rect {
         // A branch name is short; the floor is set by the base-branch sentence
         // beneath it, which is the longest thing this popup ever says.

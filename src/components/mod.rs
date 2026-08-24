@@ -12,16 +12,19 @@ mod select_directory;
 mod worktrees;
 
 pub use confirm::ConfirmComponent;
+pub use create_worktree::CreateWorktreeComponent;
 pub use help::{
     footer_entries, worktrees_bindings, HelpComponent, HelpEntry, FILTER_SECTION, KEYS_SECTION,
 };
 pub use modal::{
     fits, gutter, place_cursor, popup_area, AppContext, ConfirmCallback, Extent, Modal, ModalFlow,
-    SelectCallback, MIN_HEIGHT, MIN_WIDTH,
+    ModalKind, SelectCallback, MIN_HEIGHT, MIN_WIDTH,
 };
 pub use notify::Notifications;
 pub use pr_worktree::{resume_pr_flow, PrCommand, PrRequests, PrStep, PrWorktreeComponent};
-pub use repositories::{spaces_of, RepositoriesComponent, RepositoriesModal};
+pub use repositories::{
+    repositories_pane_bindings, spaces_of, RepositoriesComponent, RepositoriesModal,
+};
 pub use worktrees::{Activity, SpaceEntry, WorktreesComponent};
 
 // Components carry no palette of their own: every colour they draw comes from

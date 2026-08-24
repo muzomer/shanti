@@ -13,7 +13,7 @@ use super::{
     list::{ItemOrder, ListComponent},
     popup_area,
     prompt::footer,
-    Action, AppContext, EventState, Extent, HelpEntry, Modal, ModalFlow, SelectCallback,
+    Action, AppContext, EventState, Extent, HelpEntry, Modal, ModalFlow, ModalKind, SelectCallback,
     KEYS_SECTION,
 };
 use crate::theme;
@@ -147,6 +147,10 @@ impl SelectDirectoryComponent {
 }
 
 impl Modal for SelectDirectoryComponent {
+    fn kind(&self) -> ModalKind {
+        ModalKind::SelectReposDir
+    }
+
     fn area(&self, full: Rect) -> Rect {
         // Grow with the list, but never past ten rows plus borders, prompt and
         // hint. `Extent` clips it to the frame from there, so the picker cannot
