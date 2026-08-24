@@ -9,7 +9,7 @@ pub mod hooks;
 pub mod jobs;
 pub mod keymap;
 pub mod logs;
-mod theme;
+pub mod theme;
 pub mod vcs;
 
 use color_eyre::eyre::{Result, WrapErr};

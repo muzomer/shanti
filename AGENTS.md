@@ -18,10 +18,11 @@ Rust TUI for creating and managing **spaces** — git worktrees and jujutsu work
 
 - Avoid generic plain-text or default block layouts.
 - **Colour lives in `src/theme.rs` and nowhere else.** No component names a raw
-  `Color`; it names the _meaning_ (`theme::TITLE`, `theme::MUTED`,
-  `theme::SELECTED_ROW`, `theme::BORDER_DESTRUCTIVE`, …). The palette is Tokyo
-  Night (night variant); `theme::tone(Tone)` is the single mapping from a domain
-  `Tone` to a colour.
+  `Color`; it names the _meaning_ (`theme::title()`, `theme::muted()`,
+  `theme::selected_row()`, `theme::border_destructive()`, …). The palette is a
+  runtime `Theme` value in one process-global slot, installed by `theme::set`
+  and defaulting to Tokyo Night (night variant); `theme::tone(Tone)` is the
+  single mapping from a domain `Tone` to a colour.
 - Styling: bold accent colours for active headers, dimmed text for secondary
   detail, a high-contrast background band for the selected row.
 - Layout: constraint-based layouts (`Layout`) with strict minimums/percentages so

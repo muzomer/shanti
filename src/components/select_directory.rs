@@ -49,15 +49,15 @@ impl SelectDirectoryComponent {
         frame.render_widget(Clear, area);
 
         let title = Line::from(vec![
-            Span::styled(" ▸ ", theme::KEY),
-            Span::styled("Select Clone Directory ", theme::TITLE),
+            Span::styled(" ▸ ", theme::key()),
+            Span::styled("Select Clone Directory ", theme::title()),
         ])
         .alignment(Alignment::Center);
 
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
-            .border_style(theme::BORDER_FOCUSED)
-            .style(theme::POPUP_SURFACE)
+            .border_style(theme::border_focused())
+            .style(theme::popup_surface())
             .title(title)
             // Read off the same table the help popup shows.
             .title_bottom(footer(
@@ -83,15 +83,15 @@ impl SelectDirectoryComponent {
         .areas(inner_area);
         Paragraph::new(Line::from(Span::styled(
             " Clone with git into:",
-            theme::SECONDARY,
+            theme::secondary(),
         )))
         .render(prompt_area, frame.buffer_mut());
 
         let total = self.dirs.len();
         let items: Vec<ListItem> = self.dirs.iter().map(|d| dir_row(d)).collect();
         let list = List::new(items)
-            .style(theme::TEXT)
-            .highlight_style(theme::SELECTED_ROW)
+            .style(theme::text())
+            .highlight_style(theme::selected_row())
             // A marker as well as the band: the band alone disappears on a
             // terminal that ignores background colours.
             .highlight_symbol("▸ ")
@@ -107,8 +107,8 @@ impl SelectDirectoryComponent {
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None)
                 .end_symbol(None)
-                .thumb_style(theme::RULE)
-                .track_style(theme::RULE);
+                .thumb_style(theme::rule())
+                .track_style(theme::rule());
             frame.render_stateful_widget(scrollbar, list_area, &mut scroll_state);
         }
 
@@ -118,7 +118,7 @@ impl SelectDirectoryComponent {
         // so nothing load-bearing is lost on a narrow terminal.
         const HINT: &str = " ↳ for jj: jj git init --colocate";
         if hint_area.width as usize >= HINT.chars().count() {
-            Paragraph::new(Line::from(Span::styled(HINT, theme::MUTED)))
+            Paragraph::new(Line::from(Span::styled(HINT, theme::muted())))
                 .render(hint_area, frame.buffer_mut());
         }
     }
@@ -212,10 +212,10 @@ impl Modal for SelectDirectoryComponent {
 fn dir_row(dir: &str) -> ListItem<'static> {
     match dir.rsplit_once('/') {
         // A trailing slash leaves nothing to emphasise; show it plainly.
-        Some((_, "")) | None => ListItem::new(Span::styled(dir.to_string(), theme::TEXT)),
+        Some((_, "")) | None => ListItem::new(Span::styled(dir.to_string(), theme::text())),
         Some((parent, name)) => ListItem::new(Line::from(vec![
-            Span::styled(format!("{}/", parent), theme::MUTED),
-            Span::styled(name.to_string(), theme::TEXT.bold()),
+            Span::styled(format!("{}/", parent), theme::muted()),
+            Span::styled(name.to_string(), theme::text().bold()),
         ])),
     }
 }

@@ -70,9 +70,9 @@ impl Severity {
     /// colour, exactly as it does for status glyphs.
     pub fn style(self) -> Style {
         match self {
-            Severity::Info => theme::INFO_TEXT,
-            Severity::Warning => theme::WARNING_TEXT,
-            Severity::Error => theme::DANGER_TEXT,
+            Severity::Info => theme::info_text(),
+            Severity::Warning => theme::warning_text(),
+            Severity::Error => theme::danger_text(),
         }
     }
 }

@@ -84,14 +84,14 @@ impl CreateWorktreeComponent {
                 // work out from the rest of the prompt. `Tab` switches which
                 // backend the space is made through.
                 format!("colocated → {} · Tab to switch", self.backend.space_noun()),
-                theme::WARNING_TEXT,
+                theme::warning_text(),
             )
         });
 
         // A warning about the branch outranks a note about where it will start.
         let status = match (&self.warning, &self.base_branch_hint) {
-            (Some(warning), _) => Some((warning.clone(), theme::WARNING_TEXT)),
-            (None, Some(hint)) => Some((hint.clone(), theme::SECONDARY)),
+            (Some(warning), _) => Some((warning.clone(), theme::warning_text())),
+            (None, Some(hint)) => Some((hint.clone(), theme::secondary())),
             (None, None) => None,
         };
 

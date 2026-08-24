@@ -107,7 +107,7 @@ impl HelpEntry {
     /// do nothing, because nothing else is ever chained onto those.
     pub fn hint(mut self, key: &'static str, verb: &'static str) -> Self {
         if let HelpEntry::Binding(binding) = &mut self {
-            binding.hint = Some((key, verb, theme::KEY));
+            binding.hint = Some((key, verb, theme::key()));
         }
         self
     }
@@ -115,12 +115,12 @@ impl HelpEntry {
     /// Paints the hint's key in the destructive colour, so the footer doubles as
     /// a warning: what cannot be undone is what stands out in it.
     pub fn destructive(self) -> Self {
-        self.restyle(theme::KEY_DESTRUCTIVE)
+        self.restyle(theme::key_destructive())
     }
 
     /// Paints the hint's key as the way safely back out.
     pub fn safe(self) -> Self {
-        self.restyle(theme::KEY_SAFE)
+        self.restyle(theme::key_safe())
     }
 
     /// Holds this hint back to the end of the footer, where [`footer_entries`]
@@ -245,18 +245,18 @@ impl HelpComponent {
             .iter()
             .flat_map(|e| match e {
                 HelpEntry::Binding(b) => vec![Line::from(vec![
-                    Span::styled(key_cell(b.keys), theme::KEY),
-                    Span::styled(b.description, theme::SECONDARY),
+                    Span::styled(key_cell(b.keys), theme::key()),
+                    Span::styled(b.description, theme::secondary()),
                 ])],
                 HelpEntry::Section(title) => vec![
                     Line::from(vec![
-                        Span::styled(*title, theme::TITLE),
+                        Span::styled(*title, theme::title()),
                         Span::raw(" "),
                         // A rule out to the edge, so a heading reads as a band
                         // across the popup rather than as one more row.
                         Span::styled(
                             "─".repeat((width as usize).saturating_sub(title.chars().count() + 1)),
-                            theme::RULE,
+                            theme::rule(),
                         ),
                     ]),
                     Line::raw(""),
@@ -283,12 +283,12 @@ impl HelpComponent {
 
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
-            .border_style(theme::BORDER_FOCUSED)
-            .style(theme::POPUP_SURFACE)
+            .border_style(theme::border_focused())
+            .style(theme::popup_surface())
             .title(
                 Line::from(vec![
-                    Span::styled(" ? ", theme::KEY),
-                    Span::styled("Help ", theme::TITLE),
+                    Span::styled(" ? ", theme::key()),
+                    Span::styled("Help ", theme::title()),
                 ])
                 .alignment(Alignment::Center),
             )
@@ -325,8 +325,8 @@ impl HelpComponent {
                 Scrollbar::new(ScrollbarOrientation::VerticalRight)
                     .begin_symbol(None)
                     .end_symbol(None)
-                    .thumb_style(theme::RULE)
-                    .track_style(theme::RULE),
+                    .thumb_style(theme::rule())
+                    .track_style(theme::rule()),
                 outer,
                 &mut state,
             );
@@ -345,9 +345,9 @@ impl HelpComponent {
     fn footer(&self, width: u16) -> Line<'static> {
         let mut entries = Vec::new();
         if self.max_scroll() > 0 {
-            entries.push(("j/k", "scroll", theme::KEY));
+            entries.push(("j/k", "scroll", theme::key()));
         }
-        entries.push(("Esc", "close", theme::KEY_SAFE));
+        entries.push(("Esc", "close", theme::key_safe()));
         footer(&entries, width)
     }
 

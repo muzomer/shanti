@@ -134,12 +134,12 @@ impl ConfirmComponent {
     /// popup, so what is drawn and what is reserved can never disagree.
     fn body(&self) -> Vec<Line<'static>> {
         let mut lines = vec![
-            Line::from(Span::styled(self.label.clone(), theme::TEXT.bold())),
+            Line::from(Span::styled(self.label.clone(), theme::text().bold())),
             Line::from(Span::styled(
                 format!(" {} ", self.detail),
                 Style::new()
-                    .fg(theme::DANGER)
-                    .bg(theme::DESTRUCTIVE_SURFACE)
+                    .fg(theme::danger())
+                    .bg(theme::destructive_surface())
                     .bold(),
             )),
         ];
@@ -148,12 +148,12 @@ impl ConfirmComponent {
             lines.push(Line::default());
             lines.push(Line::from(Span::styled(
                 "This would destroy:",
-                theme::MUTED,
+                theme::muted(),
             )));
             for loss in &self.losses {
                 lines.push(Line::from(vec![
-                    Span::styled("  • ", theme::MUTED),
-                    Span::styled(loss.clone(), theme::WARNING_TEXT),
+                    Span::styled("  • ", theme::muted()),
+                    Span::styled(loss.clone(), theme::warning_text()),
                 ]));
             }
         }
@@ -162,18 +162,18 @@ impl ConfirmComponent {
             lines.push(Line::default());
             lines.push(Line::from(Span::styled(
                 "Deleting also removes:",
-                theme::MUTED,
+                theme::muted(),
             )));
             for removal in &self.removals {
                 lines.push(Line::from(vec![
-                    Span::styled("  • ", theme::MUTED),
+                    Span::styled("  • ", theme::muted()),
                     // Dimmer than a loss: this is a statement of fact about what
                     // deletion does, not a warning about work disappearing.
-                    Span::styled(removal.clone(), theme::SECONDARY),
+                    Span::styled(removal.clone(), theme::secondary()),
                 ]));
             }
             if let Some(retained) = &self.retained {
-                lines.push(Line::from(Span::styled(retained.clone(), theme::MUTED)));
+                lines.push(Line::from(Span::styled(retained.clone(), theme::muted())));
             }
         }
 
@@ -181,7 +181,7 @@ impl ConfirmComponent {
             lines.push(Line::default());
             lines.push(Line::from(Span::styled(
                 aftermath.clone(),
-                Style::new().fg(theme::DESTRUCTIVE).bold(),
+                Style::new().fg(theme::destructive()).bold(),
             )));
         }
 
@@ -204,8 +204,8 @@ impl ConfirmComponent {
             Gate::Enter => None,
             Gate::Override => Some((
                 Line::from(vec![
-                    Span::styled(format!("Press {} ", OVERRIDE_KEY), theme::KEY_DESTRUCTIVE),
-                    Span::styled("to delete it anyway.", theme::SECONDARY),
+                    Span::styled(format!("Press {} ", OVERRIDE_KEY), theme::key_destructive()),
+                    Span::styled("to delete it anyway.", theme::secondary()),
                 ]),
                 0,
             )),
@@ -240,15 +240,15 @@ impl ConfirmComponent {
         frame.render_widget(Clear, area);
 
         let title = Line::from(vec![
-            Span::styled(" ⚠ ", theme::KEY_DESTRUCTIVE),
-            Span::styled(self.title.clone(), theme::TITLE),
+            Span::styled(" ⚠ ", theme::key_destructive()),
+            Span::styled(self.title.clone(), theme::title()),
             Span::raw(" "),
         ]);
 
         let outer_block = Block::bordered()
             .border_type(BorderType::Rounded)
-            .border_style(theme::BORDER_DESTRUCTIVE)
-            .style(theme::POPUP_SURFACE)
+            .border_style(theme::border_destructive())
+            .style(theme::popup_surface())
             .title(title)
             .title_bottom(self.keybinding_hint(area.width));
 

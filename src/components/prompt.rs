@@ -75,12 +75,12 @@ impl Prompt<'_> {
 
         let mut block = Block::bordered()
             .border_type(BorderType::Rounded)
-            .border_style(theme::BORDER_FOCUSED)
-            .style(theme::POPUP_SURFACE)
+            .border_style(theme::border_focused())
+            .style(theme::popup_surface())
             .title(
                 Line::from(vec![
-                    Span::styled(" ▏", theme::KEY),
-                    Span::styled(self.title, theme::TITLE),
+                    Span::styled(" ▏", theme::key()),
+                    Span::styled(self.title, theme::title()),
                     Span::raw(" "),
                 ])
                 .left_aligned(),
@@ -93,7 +93,7 @@ impl Prompt<'_> {
             {
                 block = block.title_top(
                     Line::from(format!(" {} ", context))
-                        .style(theme::MUTED)
+                        .style(theme::muted())
                         .right_aligned(),
                 );
             }
@@ -115,7 +115,7 @@ impl Prompt<'_> {
         .areas(inner);
 
         Paragraph::new(self.label)
-            .style(theme::SECONDARY)
+            .style(theme::secondary())
             .render(label_area, frame.buffer_mut());
 
         // The aside shares its row with the label, so it is drawn only when both
@@ -132,18 +132,18 @@ impl Prompt<'_> {
         }
 
         let (text, text_style) = if self.value.is_empty() {
-            (self.placeholder, theme::MUTED.italic())
+            (self.placeholder, theme::muted().italic())
         } else {
-            (self.value, theme::TEXT.bold())
+            (self.value, theme::text().bold())
         };
         Paragraph::new(Span::styled(text, text_style))
             .block(
                 Block::bordered()
                     .border_type(BorderType::Rounded)
                     .border_style(if self.valid {
-                        theme::BORDER_INPUT_FOCUSED
+                        theme::border_input_focused()
                     } else {
-                        theme::BORDER_DESTRUCTIVE
+                        theme::border_destructive()
                     })
                     .padding(Padding::horizontal(1)),
             )
@@ -154,7 +154,7 @@ impl Prompt<'_> {
         // misleading rather than merely terse.
         if let Some((status, style)) = &self.status {
             Paragraph::new(Line::from(vec![
-                Span::styled("↳ ", theme::RULE),
+                Span::styled("↳ ", theme::rule()),
                 Span::styled(status.clone(), *style),
             ]))
             .wrap(Wrap { trim: false })
@@ -204,7 +204,7 @@ pub fn footer(entries: &[FooterEntry<'_>], width: u16) -> Line<'static> {
     let mut spans = Vec::new();
     for (key, verb, style) in entries.iter().skip(entries.len() - keep) {
         spans.push(Span::styled(format!(" [{}] ", key), *style));
-        spans.push(Span::styled(verb.to_string(), theme::MUTED));
+        spans.push(Span::styled(verb.to_string(), theme::muted()));
     }
     spans.push(Span::raw(" "));
     Line::from(spans).right_aligned()

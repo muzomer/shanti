@@ -355,10 +355,10 @@ impl PrWorktreeComponent {
                 // keeps being drawn — which is once per tick, and is the only
                 // evidence the user has that a multi-minute clone is alive.
                 waiting.frame = waiting.frame.wrapping_add(1);
-                Some((format!("{glyph} {}…", waiting.message), theme::SECONDARY))
+                Some((format!("{glyph} {}…", waiting.message), theme::secondary()))
             }
-            (None, Some(err)) => Some((err.clone(), theme::DANGER_TEXT)),
-            (None, None) => Some(("github.com/owner/repo/pull/123".to_string(), theme::MUTED)),
+            (None, Some(err)) => Some((err.clone(), theme::danger_text())),
+            (None, None) => Some(("github.com/owner/repo/pull/123".to_string(), theme::muted())),
         };
 
         Prompt {

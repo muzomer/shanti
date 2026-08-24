@@ -627,13 +627,13 @@ impl WorktreesComponent {
         let title = {
             let mut spans = vec![
                 Span::raw(" "),
-                Span::styled("Worktrees", theme::TITLE),
-                Span::styled(format!(" ({}/{}) ", current, total), theme::SECONDARY),
+                Span::styled("Worktrees", theme::title()),
+                Span::styled(format!(" ({}/{}) ", current, total), theme::secondary()),
             ];
             if !self.filter.value.is_empty() && matches!(mode, InputMode::Normal) {
                 spans.push(Span::styled(
                     format!("/{} ", self.filter.value),
-                    theme::MUTED,
+                    theme::muted(),
                 ));
             }
             // The one thing on screen that says shanti is still working. The
@@ -643,25 +643,25 @@ impl WorktreesComponent {
                 let (verb, noun) = activity.wording();
                 spans.push(Span::styled(
                     format!("{} ", SPINNER[self.frame % SPINNER.len()]),
-                    theme::TITLE,
+                    theme::title(),
                 ));
                 spans.push(Span::styled(
                     format!("{verb}\u{2026} {count} {noun} "),
-                    theme::SECONDARY,
+                    theme::secondary(),
                 ));
             }
             Line::from(spans)
         };
 
         let border_style = if focused {
-            theme::BORDER_FOCUSED
+            theme::border_focused()
         } else {
-            theme::BORDER
+            theme::border()
         };
         let block = Block::bordered()
             .border_type(ratatui::widgets::BorderType::Rounded)
             .border_style(border_style)
-            .style(theme::CANVAS)
+            .style(theme::canvas())
             .title(title)
             .title_bottom(status)
             .title_bottom(keys);
@@ -683,8 +683,8 @@ impl WorktreesComponent {
 
             f.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled(" / ", theme::KEY),
-                    Span::styled(self.filter.value.clone(), theme::TEXT),
+                    Span::styled(" / ", theme::key()),
+                    Span::styled(self.filter.value.clone(), theme::text()),
                 ])),
                 filter_line,
             );
@@ -697,7 +697,7 @@ impl WorktreesComponent {
                 filter_line.y,
             );
             f.render_widget(
-                Paragraph::new("─".repeat(sep_line.width as usize)).style(theme::RULE),
+                Paragraph::new("─".repeat(sep_line.width as usize)).style(theme::rule()),
                 sep_line,
             );
             list_area
@@ -718,8 +718,8 @@ impl WorktreesComponent {
             .collect();
 
         let list = List::new(items)
-            .style(theme::TEXT)
-            .highlight_style(theme::SELECTED_ROW)
+            .style(theme::text())
+            .highlight_style(theme::selected_row())
             .direction(ratatui::widgets::ListDirection::TopToBottom);
         StatefulWidget::render(list, list_area, f.buffer_mut(), &mut self.state);
 
@@ -748,8 +748,8 @@ impl WorktreesComponent {
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None)
                 .end_symbol(None)
-                .thumb_style(theme::RULE)
-                .track_style(theme::RULE);
+                .thumb_style(theme::rule())
+                .track_style(theme::rule());
             f.render_stateful_widget(scrollbar, list_area, &mut scroll_state);
         }
     }
@@ -932,7 +932,7 @@ fn space_row(space: &Space, label: &RowLabel, cols: &RowLayout) -> Line<'static>
     // when deleted. Padded so the repo names still line up in a column.
     spans.push(Span::styled(
         format!("{:<width$} ", space.backend.label(), width = BACKEND_WIDTH),
-        theme::MUTED,
+        theme::muted(),
     ));
 
     match (&label.space, cols.space) {
@@ -941,12 +941,12 @@ fn space_row(space: &Space, label: &RowLabel, cols: &RowLayout) -> Line<'static>
         (Some(name), space_width) if space_width > 0 => {
             spans.push(Span::styled(
                 pad_start(&clip_start(&label.repo, cols.repo), cols.repo),
-                theme::SECONDARY,
+                theme::secondary(),
             ));
-            spans.push(Span::styled(SEPARATOR, theme::MUTED));
+            spans.push(Span::styled(SEPARATOR, theme::muted()));
             spans.push(Span::styled(
                 clip_end(name, space_width),
-                theme::TEXT.add_modifier(Modifier::BOLD),
+                theme::text().add_modifier(Modifier::BOLD),
             ));
         }
         // Nothing follows it, so the repository name *is* the row's subject and
@@ -972,7 +972,10 @@ fn space_row(space: &Space, label: &RowLabel, cols: &RowLayout) -> Line<'static>
             } else {
                 name
             };
-            spans.push(Span::styled(name, theme::TEXT.add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(
+                name,
+                theme::text().add_modifier(Modifier::BOLD),
+            ));
         }
     }
 
@@ -1066,8 +1069,8 @@ impl EmptyState {
     /// unwrapped, because the wrap that would otherwise save them costs a row
     /// the centring has not reserved.
     fn lines(&self) -> Vec<Line<'static>> {
-        let headline = |text: &'static str| Line::from(Span::styled(text, theme::TITLE));
-        let detail = |text: String| Line::from(Span::styled(text, theme::MUTED));
+        let headline = |text: &'static str| Line::from(Span::styled(text, theme::title()));
+        let detail = |text: String| Line::from(Span::styled(text, theme::muted()));
 
         match self {
             EmptyState::Scanning => vec![detail("scanning for repositories\u{2026}".to_owned())],
@@ -1162,8 +1165,8 @@ fn elide(text: &str, budget: usize) -> String {
 /// clock anyway, and every one of them is in the log as well.
 fn status_zone(mode: InputMode, width: u16, notice: Option<&Notification>) -> (Line<'static>, u16) {
     let (label, style) = match mode {
-        InputMode::Normal => (" NORMAL ", theme::SUCCESS_TEXT),
-        InputMode::Insert => (" INSERT ", theme::WARNING_TEXT),
+        InputMode::Normal => (" NORMAL ", theme::success_text()),
+        InputMode::Insert => (" INSERT ", theme::warning_text()),
     };
     let indicator = Span::styled(label, style);
     let mode_width = label.chars().count() as u16;
@@ -1185,7 +1188,7 @@ fn status_zone(mode: InputMode, width: u16, notice: Option<&Notification>) -> (L
     (
         Line::from(vec![
             indicator,
-            Span::styled("\u{2502} ", theme::RULE),
+            Span::styled("\u{2502} ", theme::rule()),
             Span::styled(format!("{text} "), notice.severity.style()),
         ]),
         claimed,
@@ -1205,16 +1208,16 @@ const MIN_MESSAGE: usize = 16;
 /// It says the number it wants, because "too small" without a target leaves the
 /// user dragging the corner and guessing.
 fn draw_too_small(f: &mut Frame, rect: Rect) {
-    f.render_widget(Paragraph::new("").style(theme::CANVAS), rect);
+    f.render_widget(Paragraph::new("").style(theme::canvas()), rect);
     let message = Paragraph::new(vec![
-        Line::from(Span::styled("Terminal too small", theme::WARNING_TEXT)),
+        Line::from(Span::styled("Terminal too small", theme::warning_text())),
         Line::from(Span::styled(
             format!("Need {}x{}", MIN_WIDTH, MIN_HEIGHT),
-            theme::MUTED,
+            theme::muted(),
         )),
         Line::from(Span::styled(
             format!("Have {}x{}", rect.width, rect.height),
-            theme::MUTED,
+            theme::muted(),
         )),
     ])
     .wrap(Wrap { trim: true })
@@ -1844,9 +1847,9 @@ mod tests {
             line.spans.last().expect("the message span").style.fg
         };
 
-        assert_eq!(colour(Severity::Info), Some(theme::INFO));
-        assert_eq!(colour(Severity::Warning), Some(theme::WARNING));
-        assert_eq!(colour(Severity::Error), Some(theme::DANGER));
+        assert_eq!(colour(Severity::Info), Some(theme::info()));
+        assert_eq!(colour(Severity::Warning), Some(theme::warning()));
+        assert_eq!(colour(Severity::Error), Some(theme::danger()));
     }
 
     /// At the size floor half a border cannot hold a sentence, and a word

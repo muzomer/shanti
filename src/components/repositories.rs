@@ -11,6 +11,7 @@ use crate::theme;
 use crate::vcs::{Backend, BoxedVcs, Repo, RepoId, Space, Vcs};
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
+    style::Style,
     text::{Line, Span},
     widgets::{
         Block, BorderType, Clear, List, ListDirection, ListItem, ListState, Paragraph, Scrollbar,
@@ -46,6 +47,16 @@ pub struct RepositoriesComponent {
     focus: Focus,
 }
 
+/// How one drawing of the list is dressed: the same rows are painted as a
+/// popup over the canvas or as the resting left pane, and only these three
+/// values differ between them. Grouped so `render` describes *what* it draws
+/// and this type carries *how* it looks.
+struct Chrome<'a> {
+    border: Style,
+    surface: Style,
+    bindings: &'a [HelpEntry],
+}
+
 impl RepositoriesComponent {
     pub fn new(repositories: Vec<BoxedVcs>) -> Self {
         Self {
@@ -67,9 +78,11 @@ impl RepositoriesComponent {
             // The picker is the active modal: it owns the keyboard, so its own
             // Insert mode may open the filter.
             true,
-            theme::BORDER_FOCUSED,
-            theme::POPUP_SURFACE,
-            &repositories_bindings(),
+            Chrome {
+                border: theme::border_focused(),
+                surface: theme::popup_surface(),
+                bindings: &repositories_bindings(),
+            },
         );
     }
 
@@ -78,9 +91,9 @@ impl RepositoriesComponent {
     /// holds the keyboard, muted when the spaces pane does.
     pub fn draw_pane(&mut self, f: &mut Frame, rect: Rect, mode: InputMode, focused: bool) {
         let border = if focused {
-            theme::BORDER_FOCUSED
+            theme::border_focused()
         } else {
-            theme::BORDER
+            theme::border()
         };
         self.render(
             f,
@@ -90,9 +103,11 @@ impl RepositoriesComponent {
             // the top modal's, so without this an Insert-mode popup (the create
             // prompt) would make this unfocused pane draw its filter too.
             focused,
-            border,
-            theme::CANVAS,
-            &repositories_pane_bindings(),
+            Chrome {
+                border,
+                surface: theme::canvas(),
+                bindings: &repositories_pane_bindings(),
+            },
         );
     }
 
@@ -102,9 +117,7 @@ impl RepositoriesComponent {
         rect: Rect,
         mode: InputMode,
         filtering: bool,
-        border_style: ratatui::style::Style,
-        surface: ratatui::style::Style,
-        bindings: &[HelpEntry],
+        chrome: Chrome<'_>,
     ) {
         // Empty when the terminal is below the floor: the base pane's one-line
         // message is what the user gets, and clearing over it would leave a hole.
@@ -117,13 +130,13 @@ impl RepositoriesComponent {
         let title = {
             let mut spans = vec![
                 Span::raw(" "),
-                Span::styled("Repositories", theme::TITLE),
-                Span::styled(format!(" ({}) ", total), theme::SECONDARY),
+                Span::styled("Repositories", theme::title()),
+                Span::styled(format!(" ({}) ", total), theme::secondary()),
             ];
             if !self.filter.value.is_empty() && matches!(mode, InputMode::Normal) {
                 spans.push(Span::styled(
                     format!("/{} ", self.filter.value),
-                    theme::MUTED,
+                    theme::muted(),
                 ));
             }
             Line::from(spans).alignment(Alignment::Center)
@@ -137,10 +150,13 @@ impl RepositoriesComponent {
         };
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
-            .border_style(border_style)
-            .style(surface)
+            .border_style(chrome.border)
+            .style(chrome.surface)
             .title(title)
-            .title_bottom(footer(&footer_entries(bindings, section), rect.width));
+            .title_bottom(footer(
+                &footer_entries(chrome.bindings, section),
+                rect.width,
+            ));
 
         let inner_area = block.inner(rect);
         f.render_widget(block, rect);
@@ -160,8 +176,8 @@ impl RepositoriesComponent {
 
             f.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled(" / ", theme::KEY),
-                    Span::styled(self.filter.value.clone(), theme::TEXT),
+                    Span::styled(" / ", theme::key()),
+                    Span::styled(self.filter.value.clone(), theme::text()),
                 ])),
                 filter_line,
             );
@@ -174,7 +190,7 @@ impl RepositoriesComponent {
                 filter_line.y,
             );
             f.render_widget(
-                Paragraph::new("─".repeat(sep_line.width as usize)).style(theme::RULE),
+                Paragraph::new("─".repeat(sep_line.width as usize)).style(theme::rule()),
                 sep_line,
             );
             list_area
@@ -188,8 +204,8 @@ impl RepositoriesComponent {
             .map(|r| repo_row(&r.repo().name))
             .collect();
         let list = List::new(items)
-            .style(theme::TEXT)
-            .highlight_style(theme::SELECTED_ROW)
+            .style(theme::text())
+            .highlight_style(theme::selected_row())
             // A marker as well as the band, for terminals that drop backgrounds.
             .highlight_symbol("▸ ")
             .direction(ListDirection::TopToBottom);
@@ -203,8 +219,8 @@ impl RepositoriesComponent {
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None)
                 .end_symbol(None)
-                .thumb_style(theme::RULE)
-                .track_style(theme::RULE);
+                .thumb_style(theme::rule())
+                .track_style(theme::rule());
             f.render_stateful_widget(scrollbar, list_area, &mut scroll_state);
         }
     }
@@ -547,7 +563,7 @@ pub fn repositories_pane_bindings() -> Vec<HelpEntry> {
 /// backend is still visible where it decides something: per space in the
 /// Worktrees pane, and in the create prompt, which names the backend it uses.
 fn repo_row(name: &str) -> ListItem<'static> {
-    ListItem::new(Line::from(Span::styled(name.to_string(), theme::TEXT)))
+    ListItem::new(Line::from(Span::styled(name.to_string(), theme::text())))
 }
 
 impl ListComponent<BoxedVcs> for RepositoriesComponent {
