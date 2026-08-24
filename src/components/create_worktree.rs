@@ -81,8 +81,9 @@ impl CreateWorktreeComponent {
             (
                 // Kept short so it survives the fit check on a narrow popup: this
                 // is the one thing about a colocated repository the user cannot
-                // work out from the rest of the prompt.
-                format!("colocated → {}", self.backend.space_noun()),
+                // work out from the rest of the prompt. `Tab` switches which
+                // backend the space is made through.
+                format!("colocated → {} · Tab to switch", self.backend.space_noun()),
                 theme::WARNING_TEXT,
             )
         });
@@ -206,7 +207,7 @@ impl Modal for CreateWorktreeComponent {
         match action {
             Action::Select => {
                 if !self.new_worktree_name.is_empty() {
-                    match ctx.create_space(&self.new_worktree_name) {
+                    match ctx.create_space_via(&self.new_worktree_name, self.backend) {
                         // The new row is the success message; all that is left
                         // to do is retire a failure the user has since fixed.
                         Ok(()) => ctx.notify.clear(),
@@ -216,6 +217,23 @@ impl Modal for CreateWorktreeComponent {
                 ModalFlow::Close
             }
             Action::ClosePopup | Action::ExitInsertMode => ModalFlow::Close,
+            // Tab switches the target backend, but only where there is a choice:
+            // a colocated repository can take a git worktree or a jj workspace.
+            // The base branch is backend-specific, so it is recomputed here.
+            Action::FocusNext if self.colocated => {
+                self.backend = match self.backend {
+                    Backend::Jj => Backend::Git,
+                    Backend::Git => Backend::Jj,
+                };
+                self.base_branch_hint = (!self.new_worktree_name.is_empty())
+                    .then(|| {
+                        ctx.repositories
+                            .selected_backend(self.backend)
+                            .map(|r| r.resolve_base(&self.new_worktree_name))
+                    })
+                    .flatten();
+                ModalFlow::Consumed
+            }
             _ => {
                 let result = self.handle_action(action);
                 if result == EventState::Consumed {
@@ -225,7 +243,7 @@ impl Modal for CreateWorktreeComponent {
                         None
                     } else {
                         ctx.repositories
-                            .selected_repository()
+                            .selected_backend(self.backend)
                             .map(|r| r.resolve_base(&self.new_worktree_name))
                     };
                 }
@@ -235,7 +253,7 @@ impl Modal for CreateWorktreeComponent {
     }
 
     fn help(&self) -> Vec<HelpEntry> {
-        vec![
+        let mut entries = vec![
             HelpEntry::Section(KEYS_SECTION),
             HelpEntry::bind("Enter", "Create worktree").hint("Enter", "create"),
             HelpEntry::bind("F1", "Show this help")
@@ -247,7 +265,12 @@ impl Modal for CreateWorktreeComponent {
                 .essential(),
             HelpEntry::bind("Backspace", "Delete character"),
             HelpEntry::bind("Ctrl+C", "Quit"),
-        ]
+        ];
+        // Only a colocated repository has a backend to switch between.
+        if self.colocated {
+            entries.push(HelpEntry::bind("Tab", "Switch backend (git / jj)").hint("Tab", "backend"));
+        }
+        entries
     }
 }
 

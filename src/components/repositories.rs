@@ -351,6 +351,19 @@ impl RepositoriesComponent {
         self.selected_id()
     }
 
+    /// The selected repository driven by a specific `backend`, for a colocated
+    /// repository where the create prompt lets the user choose git or jj. Falls
+    /// back to whatever backend owns the id when the chosen one is not open on
+    /// it, so a single-backend repository always resolves.
+    pub fn selected_backend(&mut self, backend: Backend) -> Option<&dyn Vcs> {
+        let id = self.selected_id()?;
+        self.repositories
+            .iter()
+            .find(|b| b.repo().id == id && b.backend() == backend)
+            .or_else(|| self.repositories.iter().find(|b| b.repo().id == id))
+            .map(|b| b.as_ref())
+    }
+
     pub fn selected_repository(&mut self) -> Option<&dyn Vcs> {
         let index = self.selected_index?;
         // Copy the borrow out of the temporary Vec: its elements already point

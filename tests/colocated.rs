@@ -14,7 +14,15 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
+use std::time::Duration;
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use shanti::app::App;
+use shanti::cli::Args;
+use shanti::events::AppEvent;
+use shanti::jobs::Worker;
 use shanti::vcs::{self, backends_at, discover, Backend, Vcs};
 use tempfile::{tempdir, TempDir};
 
@@ -131,6 +139,85 @@ fn backend_of(backends: &[Box<dyn Vcs>], backend: Backend) -> &dyn Vcs {
         .find(|open| open.backend() == backend)
         .unwrap_or_else(|| panic!("no {backend} backend was opened"))
         .as_ref()
+}
+
+/// Boots an `App` over the fixture and runs its startup scan to completion.
+///
+/// No frame is drawn, so the layout stays single-pane: `n` opens the picker,
+/// whose selection builds the same create prompt the two-pane `n` does — the
+/// one place the git-or-jj choice is exercised.
+fn boot_app(repos_dir: &Path, spaces_dir: &Path) -> (App, Receiver<AppEvent>) {
+    let args = Args::for_dirs(
+        spaces_dir.to_string_lossy().into_owned(),
+        vec![repos_dir.to_string_lossy().into_owned()],
+    );
+    let mut app = App::with_args(
+        args,
+        Arc::new(|_| Err(color_eyre::eyre::eyre!("no PR lookup was stubbed"))),
+    );
+    let (sender, results) = mpsc::channel();
+    app.attach_worker(Worker::with_threads(sender, 1));
+    while app.is_scanning() {
+        match results.recv_timeout(Duration::from_secs(10)) {
+            Ok(AppEvent::Job(result)) => app.handle_job(result),
+            other => panic!("expected a job result, got {other:?}"),
+        }
+    }
+    (app, results)
+}
+
+fn ch(c: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+}
+
+fn typed(app: &mut App, text: &str) {
+    for c in text.chars() {
+        app.handle_key(ch(c));
+    }
+}
+
+/// The create prompt on a colocated repository lets the user pick the backend:
+/// Tab switches it, and the space that results is that backend's own kind.
+#[test]
+fn the_create_prompt_chooses_git_or_jj_on_a_colocated_repository() {
+    let Some(fixture) = Colocated::new() else {
+        return;
+    };
+
+    // Default: the owner (jj) makes a jj workspace.
+    {
+        let (mut app, _results) = boot_app(&fixture.repos_dir, &fixture.spaces_dir);
+        app.handle_key(ch('n')); // the picker
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // pick the repo
+        typed(&mut app, "via-jj");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // create
+
+        let dest = fixture.dest("via-jj");
+        assert!(
+            dest.join(".jj").exists(),
+            "the default backend must make a jj workspace at {dest:?}"
+        );
+    }
+
+    // Tab once: git makes a git worktree instead.
+    {
+        let (mut app, _results) = boot_app(&fixture.repos_dir, &fixture.spaces_dir);
+        app.handle_key(ch('n'));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)); // switch to git
+        typed(&mut app, "via-git");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let dest = fixture.dest("via-git");
+        assert!(
+            dest.join(".git").exists(),
+            "Tab must switch to git and make a git worktree at {dest:?}"
+        );
+        assert!(
+            !dest.join(".jj").exists(),
+            "a git worktree is not a jj workspace"
+        );
+    }
 }
 
 /// jj owns a colocated repository, but git can still drive it — and must, for

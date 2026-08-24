@@ -12,7 +12,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::{cli, hooks::HookPlan, keymap::InputMode, vcs};
+use crate::{cli, hooks::HookPlan, keymap::InputMode, vcs, vcs::Backend};
 
 use super::{
     notify::Notifications, worktrees::SpaceEntry, Action, EventState, HelpEntry,
@@ -42,16 +42,30 @@ pub struct AppContext<'a> {
 }
 
 impl AppContext<'_> {
-    /// Creates a space named `name` in the selected repository and shows it.
-    ///
-    /// Lives on the context because two flows need it — the name prompt and the
-    /// PR flow — and both must apply the same layout policy and go through the
-    /// same backend. Reporting is left to the caller: only it knows whether
-    /// success is worth a message of its own.
+    /// Creates a space named `name` in the selected repository, through the
+    /// repository's own (owner) backend, and shows it. Used by the PR flow,
+    /// which never chooses a backend.
     pub fn create_space(&mut self, name: &str) -> eyre::Result<()> {
-        let repo = self
+        let backend = self
             .repositories
             .selected_repository()
+            .map(|r| r.backend())
+            .ok_or_else(|| eyre!("no repository is selected"))?;
+        self.create_space_via(name, backend)
+    }
+
+    /// Creates a space named `name` through a specific `backend`.
+    ///
+    /// Lives on the context because two flows need it — the name prompt and the
+    /// PR flow — and both must apply the same layout policy. The `backend` is how
+    /// a colocated repository, open under both git and jj, is told which kind of
+    /// space to make; a single-backend repository has only one to choose.
+    /// Reporting is left to the caller: only it knows whether success is worth a
+    /// message of its own.
+    pub fn create_space_via(&mut self, name: &str, backend: Backend) -> eyre::Result<()> {
+        let repo = self
+            .repositories
+            .selected_backend(backend)
             .ok_or_else(|| eyre!("no repository is selected"))?;
         let repo_name = repo.repo().name.clone();
         let repo_path = repo.repo().path.clone();
