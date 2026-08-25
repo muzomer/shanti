@@ -21,6 +21,7 @@
 //! run_fetch = true
 //! backend = "jujutsu"
 //! editor = "nvim"
+//! theme = "catppuccin-mocha"
 //!
 //! # Runs after every space, in every repository.
 //! [hooks]
@@ -33,7 +34,7 @@
 //! run = ["cargo fetch"]
 //! ```
 //!
-//! This module only *reads* the file. It is the weakest of the three
+//! Reading is the bulk of this module. It is the weakest of the three
 //! configuration layers, so the file's values are handed to [`crate::cli`],
 //! which decides whether they win and then normalises whatever did.
 
@@ -87,6 +88,13 @@ pub struct Config {
     pub backend: Backend,
     /// Command used to open a worktree in an editor, e.g. `nvim` or `code`.
     pub editor: Option<String>,
+    /// Colour scheme, named from the catalogue in [`crate::theme::scheme`].
+    ///
+    /// Kept as a plain string rather than an enum: the catalogue is the one
+    /// list of valid names, and mirroring it into a serde enum here would give
+    /// a typo a parser error that names neither the schemes nor this file.
+    /// [`Config::validate`] checks it instead, once, on load.
+    pub theme: Option<String>,
     /// Hooks run after *every* space is created, whatever its repository.
     pub hooks: Hooks,
     /// Per-repository settings, keyed by the repository's name or its absolute
@@ -182,8 +190,27 @@ impl Config {
         let config: Self = toml::from_str(&contents)
             .wrap_err_with(|| format!("Invalid configuration file {}", path.display()))?;
 
+        config.validate(path)?;
         debug!("Loaded configuration from {}: {:?}", path.display(), config);
         Ok(config)
+    }
+
+    /// Rejects values that parse as their type but name nothing real.
+    ///
+    /// Serde can only say "this is a string"; whether that string is a scheme
+    /// is a question only the catalogue can answer. Doing it here means a bad
+    /// name is caught when the file is read — at startup, with the file named —
+    /// rather than at the first frame that needs a colour.
+    fn validate(&self, path: &Path) -> eyre::Result<()> {
+        if let Some(name) = &self.theme {
+            crate::theme::scheme::find(name).map_err(|error| {
+                eyre::eyre!(error).wrap_err(format!(
+                    "Invalid configuration file {}: key `theme`",
+                    path.display()
+                ))
+            })?;
+        }
+        Ok(())
     }
 }
 
@@ -222,6 +249,7 @@ mod tests {
             run_fetch = true
             backend = "jujutsu"
             editor = "nvim"
+            theme = "catppuccin-mocha"
             "#,
         );
         let config = Config::load_from(&path).unwrap();
@@ -233,6 +261,7 @@ mod tests {
         assert!(config.run_fetch);
         assert_eq!(config.backend, Backend::Jujutsu);
         assert_eq!(config.editor.as_deref(), Some("nvim"));
+        assert_eq!(config.theme.as_deref(), Some("catppuccin-mocha"));
     }
 
     #[test]
@@ -342,6 +371,31 @@ mod tests {
         let (_dir, path) = write_config("[hooks]\ncopyy = [\".env\"]\n");
         let error = format!("{:?}", Config::load_from(&path).unwrap_err());
         assert!(error.contains("copyy"), "{error}");
+    }
+
+    /// A theme is only a string to serde, so the load has to be what rejects a
+    /// name that is not in the catalogue — and the message has to teach the
+    /// user the names they could have written instead.
+    #[test]
+    fn config_unknown_theme_lists_the_valid_schemes() {
+        let (_dir, path) = write_config(r#"theme = "dracula""#);
+        let error = format!("{:?}", Config::load_from(&path).unwrap_err());
+        assert!(error.contains("theme"), "{error}");
+        assert!(error.contains("dracula"), "{error}");
+        for scheme in crate::theme::scheme::ALL {
+            assert!(error.contains(scheme.name), "{error}");
+        }
+    }
+
+    /// Names come out of a file a human typed, so the leniency the catalogue
+    /// promises has to survive the load.
+    #[test]
+    fn config_theme_name_may_differ_in_case() {
+        let (_dir, path) = write_config(r#"theme = "Catppuccin-Latte""#);
+        assert_eq!(
+            Config::load_from(&path).unwrap().theme.as_deref(),
+            Some("Catppuccin-Latte")
+        );
     }
 
     #[test]

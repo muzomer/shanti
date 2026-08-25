@@ -35,6 +35,7 @@ use tracing::{debug, warn};
 
 use crate::config::{Backend, Config};
 use crate::hooks::HookSettings;
+use crate::theme::{scheme, Scheme};
 
 /// The raw command line, before any merging or path resolution.
 ///
@@ -68,6 +69,10 @@ struct Cli {
     /// Whether to run git fetch for each repo. Default: false
     #[arg(short = 'f', long = "run-fetch", env = "SHANTI_RUN_FETCH")]
     run_fetch: bool,
+
+    /// Colour scheme to use, e.g. `tokyo-night` or `catppuccin-latte`
+    #[arg(long = "theme", value_name = "NAME", env = "SHANTI_THEME")]
+    theme: Option<String>,
 
     /// Configuration file to read instead of the default location
     #[arg(long = "config", value_name = "FILE")]
@@ -126,6 +131,7 @@ pub struct Origins {
     pub run_fetch: Origin,
     pub backend: Origin,
     pub editor: Origin,
+    pub theme: Origin,
     /// Where the *on/off* of hooks came from: the command line or the
     /// environment when they were switched off, the file otherwise. The lists
     /// themselves have only ever one source, and it is the file.
@@ -142,6 +148,7 @@ struct Sources {
     worktrees_dir: Option<Origin>,
     repos_dirs: Option<Origin>,
     run_fetch: Option<Origin>,
+    theme: Option<Origin>,
 }
 
 impl Sources {
@@ -150,6 +157,7 @@ impl Sources {
             worktrees_dir: clap_origin(matches, "worktrees_dir"),
             repos_dirs: clap_origin(matches, "repos_dirs"),
             run_fetch: clap_origin(matches, "run_fetch"),
+            theme: clap_origin(matches, "theme"),
         }
     }
 }
@@ -180,6 +188,13 @@ pub struct Args {
     pub backend: Backend,
     /// Command used to open a worktree in an editor.
     pub editor: Option<String>,
+    /// The colour scheme in force for this run.
+    ///
+    /// Resolved to a catalogue entry rather than kept as the string the user
+    /// wrote: validation belongs to the layer that decides the winner, so no
+    /// later reader — the startup `theme::set`, the picker, `--show-config` —
+    /// can be handed a name that turns out not to exist.
+    pub theme: &'static Scheme,
     /// Where each of the above came from.
     pub origins: Origins,
     /// Configuration file consulted, whether or not it existed.
@@ -228,12 +243,14 @@ impl Args {
             run_fetch: false,
             backend: Backend::default(),
             editor: None,
+            theme: default_scheme(),
             origins: Origins {
                 worktrees_dir: Origin::Default,
                 repos_dirs: Origin::Default,
                 run_fetch: Origin::Default,
                 backend: Origin::Default,
                 editor: Origin::Default,
+                theme: Origin::Default,
                 hooks: Origin::Default,
             },
             config_path: PathBuf::new(),
@@ -310,6 +327,7 @@ impl Args {
             self.editor.as_deref().unwrap_or("<unset>"),
             origins.editor,
         ));
+        out.push_str(&setting("theme", self.theme.name, origins.theme));
         // Counts, not the commands themselves: the report answers "is anything
         // going to run?", and a user who wants to know *what* has the file open.
         out.push_str(&setting("hooks", &self.hooks_summary(), origins.hooks));
@@ -421,6 +439,25 @@ fn resolve(cli: Cli, sources: Sources, config: Config, config_path: PathBuf) -> 
         None => (false, Origin::Default),
     };
 
+    // --- theme -------------------------------------------------------------
+    // An empty value carries no choice, so it falls through to the next layer
+    // exactly like an empty `SHANTI_REPOS_DIR` does.
+    let cli_theme = cli.theme.filter(|name| !name.trim().is_empty());
+    let (theme_name, theme_origin) = match (sources.theme, cli_theme) {
+        (Some(origin), Some(name)) => (Some(name), origin),
+        _ => match config.theme.clone() {
+            Some(name) => (Some(name), Origin::ConfigFile),
+            None => (None, Origin::Default),
+        },
+    };
+    // The file was already checked on load; this catches the flag and the
+    // environment, and labels the error with the layer the name came from.
+    let theme = match &theme_name {
+        Some(name) => scheme::find(name)
+            .map_err(|error| eyre!("{}: {error}", label("--theme", theme_origin)))?,
+        None => default_scheme(),
+    };
+
     // --- settings the command line does not expose yet ---------------------
     let backend_origin = if config.backend == Backend::default() {
         Origin::Default
@@ -439,6 +476,7 @@ fn resolve(cli: Cli, sources: Sources, config: Config, config_path: PathBuf) -> 
         run_fetch: fetch_origin,
         backend: backend_origin,
         editor: editor_origin,
+        theme: theme_origin,
         hooks: hooks_origin,
     };
     debug!(?origins, "Resolved the configuration sources");
@@ -465,11 +503,21 @@ fn resolve(cli: Cli, sources: Sources, config: Config, config_path: PathBuf) -> 
         run_fetch,
         backend: config.backend,
         editor: config.editor,
+        theme,
         origins,
         config_path,
         show_config: cli.show_config,
         hooks,
     })
+}
+
+/// The scheme shanti starts with when no layer names one.
+///
+/// `expect` rather than a fallback: [`scheme::DEFAULT`] naming something the
+/// catalogue does not contain is a bug in the catalogue, and one its own tests
+/// already forbid.
+fn default_scheme() -> &'static Scheme {
+    scheme::find(scheme::DEFAULT).expect("the default scheme is in the catalogue")
 }
 
 /// Names the setting the way the user wrote it, so an error points at the file
@@ -606,6 +654,7 @@ mod tests {
             "SHANTI_REPOS_DIR",
             "SHANTI_WORKTREES_DIR",
             "SHANTI_RUN_FETCH",
+            "SHANTI_THEME",
         ] {
             std::env::remove_var(name);
         }
@@ -814,6 +863,116 @@ mod tests {
         assert_eq!(args.origins.worktrees_dir, Origin::ConfigFile);
     }
 
+    // --- theme, the same four layers ---------------------------------------
+
+    #[test]
+    fn the_theme_defaults_to_the_catalogue_default() {
+        let dir = temp();
+        let args = resolve_with(&["shanti"], config_with(&[dir.path()], dir.path())).unwrap();
+
+        assert_eq!(args.theme.name, scheme::DEFAULT);
+        assert_eq!(args.origins.theme, Origin::Default);
+    }
+
+    #[test]
+    fn the_theme_in_the_config_file_beats_the_default() {
+        let dir = temp();
+        let config = Config {
+            theme: Some("gruvbox-dark".to_string()),
+            ..config_with(&[dir.path()], dir.path())
+        };
+
+        let args = resolve_with(&["shanti"], config).unwrap();
+
+        assert_eq!(args.theme.name, "gruvbox-dark");
+        assert_eq!(args.origins.theme, Origin::ConfigFile);
+    }
+
+    #[test]
+    fn the_theme_environment_variable_beats_the_config_file() {
+        let dir = temp();
+        let config = Config {
+            theme: Some("gruvbox-dark".to_string()),
+            ..config_with(&[dir.path()], dir.path())
+        };
+
+        let args =
+            resolve_with_env(&[("SHANTI_THEME", "catppuccin-latte")], &["shanti"], config).unwrap();
+
+        assert_eq!(args.theme.name, "catppuccin-latte");
+        assert_eq!(args.origins.theme, Origin::Environment);
+    }
+
+    #[test]
+    fn the_theme_flag_beats_the_environment() {
+        let dir = temp();
+        let config = Config {
+            theme: Some("gruvbox-dark".to_string()),
+            ..config_with(&[dir.path()], dir.path())
+        };
+
+        let args = resolve_with_env(
+            &[("SHANTI_THEME", "catppuccin-latte")],
+            &["shanti", "--theme", "ansi"],
+            config,
+        )
+        .unwrap();
+
+        assert_eq!(args.theme.name, "ansi");
+        assert_eq!(args.origins.theme, Origin::CommandLine);
+    }
+
+    /// An empty variable is not a choice, so it must not shadow the file — the
+    /// same rule the directory settings follow.
+    #[test]
+    fn an_empty_theme_variable_falls_through_to_the_config_file() {
+        let dir = temp();
+        let config = Config {
+            theme: Some("gruvbox-dark".to_string()),
+            ..config_with(&[dir.path()], dir.path())
+        };
+
+        let args = resolve_with_env(&[("SHANTI_THEME", "")], &["shanti"], config).unwrap();
+
+        assert_eq!(args.theme.name, "gruvbox-dark");
+        assert_eq!(args.origins.theme, Origin::ConfigFile);
+    }
+
+    /// A name typed on the command line has to fail at startup, naming the
+    /// layer it came from and every name that would have worked.
+    #[test]
+    fn an_unknown_theme_is_a_startup_error_listing_the_valid_ones() {
+        let dir = temp();
+        let error = resolve_with(
+            &["shanti", "--theme", "dracula"],
+            config_with(&[dir.path()], dir.path()),
+        )
+        .unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(message.contains("--theme"), "{message}");
+        assert!(message.contains("dracula"), "{message}");
+        for entry in scheme::ALL {
+            assert!(message.contains(entry.name), "{message}");
+        }
+    }
+
+    /// The error has to point at the layer the user must edit, not at a flag
+    /// they never typed.
+    #[test]
+    fn an_unknown_theme_in_the_environment_names_the_environment() {
+        let dir = temp();
+        let error = resolve_with_env(
+            &[("SHANTI_THEME", "dracula")],
+            &["shanti"],
+            config_with(&[dir.path()], dir.path()),
+        )
+        .unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(message.contains("from the environment"), "{message}");
+    }
+
     // --- normalisation applies to every layer ------------------------------
 
     #[test]
@@ -1018,6 +1177,7 @@ mod tests {
         let config = Config {
             backend: Backend::Jujutsu,
             editor: Some("nvim".to_string()),
+            theme: Some("gruvbox-dark".to_string()),
             ..config_with(&[from_config.path()], from_config.path())
         };
 
@@ -1059,6 +1219,10 @@ mod tests {
         );
         assert!(
             report.contains("editor         = nvim  (config file)"),
+            "{report}"
+        );
+        assert!(
+            report.contains("theme          = gruvbox-dark  (config file)"),
             "{report}"
         );
     }

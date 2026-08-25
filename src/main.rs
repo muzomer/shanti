@@ -1,4 +1,4 @@
-use shanti::{app, cli, github, logs, run_app, Outcome};
+use shanti::{app, cli, github, logs, run_app, theme, Outcome};
 use std::{io, process::ExitCode};
 
 use color_eyre::eyre::{Result, WrapErr};
@@ -45,6 +45,11 @@ fn session() -> Result<Outcome> {
         print!("{}", args.report());
         return Ok(Outcome::Quit);
     }
+
+    // The one place the resolved scheme is installed: `cli` has already decided
+    // which layer won, so this runs once, before the first frame is drawn, and
+    // every widget simply reads the palette in force.
+    theme::set(args.theme.theme());
 
     let mut app = app::App::with_args(args, github::live_fetcher());
     let mut terminal = setup_terminal().wrap_err("failed to set up the terminal")?;
