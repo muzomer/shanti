@@ -446,6 +446,11 @@ pub fn worktrees_bindings() -> Vec<HelpEntry> {
             .aside(),
         HelpEntry::bind("R", "Rescan the repos dirs for new repositories"),
         HelpEntry::bind("f", "Fetch the selected repository's remotes"),
+        // An aside in the footer: choosing a scheme is a once-in-a-while act,
+        // but it has to be discoverable from the interface it changes.
+        HelpEntry::bind("t", "Choose a colour scheme")
+            .hint("t", "theme")
+            .aside(),
         HelpEntry::bind("d", "Delete with confirmation")
             .hint("d", "delete")
             .destructive(),

@@ -53,6 +53,10 @@ fn resolve_normal(key: KeyEvent) -> Option<Action> {
             Some(Action::Rescan)
         }
         (KeyCode::Char('f'), KeyModifiers::NONE) => Some(Action::FetchSelected),
+        // 't' for theme. Unshifted, because picking a scheme is something a
+        // user does while looking at the interface rather than a rare
+        // administrative act, and it was the last free mnemonic in this table.
+        (KeyCode::Char('t'), KeyModifiers::NONE) => Some(Action::OpenThemePicker),
         (KeyCode::Esc, KeyModifiers::NONE) => Some(Action::ClosePopup),
         (KeyCode::Char('/'), KeyModifiers::NONE) | (KeyCode::Char('i'), KeyModifiers::NONE) => {
             Some(Action::EnterInsertMode)
@@ -152,6 +156,20 @@ mod tests {
                 "{c} was stolen from the filter"
             );
         }
+    }
+
+    /// The scheme picker's key is a plain letter, so the guard every plain
+    /// letter needs: it must stay a character while a filter is being typed.
+    #[test]
+    fn the_theme_key_opens_the_picker_but_stays_literal_in_a_filter() {
+        assert_eq!(
+            resolve(InputMode::Normal, key(KeyCode::Char('t'))),
+            Some(Action::OpenThemePicker)
+        );
+        assert_eq!(
+            resolve(InputMode::Insert, key(KeyCode::Char('t'))),
+            Some(Action::InsertChar('t'))
+        );
     }
 
     /// Why Insert mode needs a help key of its own: `?` belongs to the text

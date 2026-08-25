@@ -272,6 +272,19 @@ impl Args {
         self
     }
 
+    /// The same configuration writing to a configuration file of the caller's
+    /// choosing.
+    ///
+    /// [`Args::for_dirs`] leaves the path empty, because it consults no
+    /// configuration layer. The theme picker *writes* one, though, so a test
+    /// that presses Enter in it needs somewhere harmless to write: this is how
+    /// it points that write at its own temp directory instead of the user's
+    /// real `~/.config/shanti/config.toml`.
+    pub fn with_config_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config_path = path.into();
+        self
+    }
+
     /// Loads the configuration file named by the parsed command line and merges
     /// everything into the effective configuration.
     fn from_matches(matches: &ArgMatches) -> Result<Self> {

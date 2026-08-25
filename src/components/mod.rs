@@ -9,6 +9,7 @@ mod pr_worktree;
 mod prompt;
 mod repositories;
 mod select_directory;
+mod theme_picker;
 mod worktrees;
 
 pub use confirm::ConfirmComponent;
@@ -25,6 +26,7 @@ pub use pr_worktree::{resume_pr_flow, PrCommand, PrRequests, PrStep, PrWorktreeC
 pub use repositories::{
     repositories_pane_bindings, spaces_of, RepositoriesComponent, RepositoriesModal,
 };
+pub use theme_picker::ThemeModal;
 pub use worktrees::{Activity, SpaceEntry, WorktreesComponent};
 
 // Components carry no palette of their own: every colour they draw comes from
@@ -49,6 +51,8 @@ pub enum Action {
     OpenRepositories,
     OpenPrWorktree,
     OpenPrWorktreeAutoClone,
+    /// Open the colour scheme picker.
+    OpenThemePicker,
     ClosePopup,
     /// Re-read what is already known: every discovered repository's spaces and
     /// their status. Disk only — no repos dir is walked and no remote is

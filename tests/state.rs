@@ -35,6 +35,7 @@ use shanti::events::AppEvent;
 use shanti::github::PrInfo;
 use shanti::hooks::HookSettings;
 use shanti::jobs::Worker;
+use shanti::theme::{self, scheme};
 use shanti::{EventState, ModalKind};
 use tempfile::{tempdir, TempDir};
 
@@ -2321,4 +2322,86 @@ fn the_help_lists_refresh_and_fetch() {
     ] {
         assert!(screen.contains(expected), "missing {expected:?}:\n{screen}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// The colour scheme picker (shanti-n6m.5)
+// ---------------------------------------------------------------------------
+
+/// The whole picker in one test, on purpose.
+///
+/// The preview is a *process-global* palette swap — that is what makes it a
+/// preview of the real interface rather than of a swatch — so two tests driving
+/// it in parallel would read each other's colours. Keeping open, preview, Esc
+/// and Enter in a single test keeps the sequence deterministic, and the test
+/// leaves the default palette installed for whatever runs next.
+#[test]
+fn the_theme_picker_previews_restores_and_persists() {
+    let mut f = Fixture::new();
+    // The picker writes to the configuration file named by `Args`, so the test
+    // points that at its own temp directory. Nothing here can reach the user's
+    // real `~/.config/shanti/config.toml`.
+    let config_path = f.worktrees_dir.path().join("config.toml");
+    f.args = f.args.clone().with_config_path(&config_path);
+    f.reload();
+
+    let original = theme::current();
+
+    // Open, and move: one keystroke of preview must repaint the whole app.
+    assert_eq!(f.press_char('t'), CONSUMED);
+    assert_eq!(f.modal(), Some(ModalKind::Theme));
+    assert_eq!(f.press_char('j'), CONSUMED);
+    let previewed = theme::current();
+    assert_ne!(
+        previewed, original,
+        "moving the cursor should have installed a different palette"
+    );
+
+    // Esc puts back exactly what was there, and writes nothing.
+    assert_eq!(f.press(key(KeyCode::Esc)), CONSUMED);
+    assert_eq!(f.modal(), None);
+    assert_eq!(
+        theme::current(),
+        original,
+        "Esc must restore the scheme the picker opened with"
+    );
+    assert!(
+        !config_path.exists(),
+        "cancelling must not touch the configuration file"
+    );
+
+    // Enter keeps what is on screen and writes its name down, so the next run
+    // starts with it.
+    f.press_char('t');
+    f.press_char('j');
+    let chosen = theme::current();
+    assert_eq!(f.press(key(KeyCode::Enter)), CONSUMED);
+    assert_eq!(f.modal(), None);
+    assert_eq!(theme::current(), chosen, "Enter keeps the previewed scheme");
+
+    let saved = std::fs::read_to_string(&config_path).expect("the picker should have written it");
+    let name = saved
+        .lines()
+        .find_map(|line| line.strip_prefix("theme = "))
+        .unwrap_or_else(|| panic!("no theme key in:\n{saved}"))
+        .trim_matches('"');
+    assert_eq!(
+        scheme::theme(name).expect("a name from the catalogue"),
+        chosen,
+        "the saved name must be the scheme that is on screen"
+    );
+
+    theme::set(original);
+}
+
+/// The binding has to be findable from the interface it changes.
+#[test]
+fn the_help_lists_the_theme_picker() {
+    let mut f = Fixture::new();
+    f.press_char('?');
+    let screen = f.screen();
+    assert!(
+        screen.contains("Choose a colour scheme"),
+        "the theme binding is missing from the help:\n{screen}"
+    );
 }

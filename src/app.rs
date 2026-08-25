@@ -17,7 +17,7 @@ use crate::{
         repositories_pane_bindings, resume_pr_flow, spaces_of, worktrees_bindings, Action,
         Activity, AppContext, ConfirmComponent, CreateWorktreeComponent, EventState, HelpComponent,
         Modal, ModalFlow, ModalKind, Notifications, PrCommand, PrRequests, PrStep,
-        PrWorktreeComponent, RepositoriesComponent, RepositoriesModal, SpaceEntry,
+        PrWorktreeComponent, RepositoriesComponent, RepositoriesModal, SpaceEntry, ThemeModal,
         WorktreesComponent, MIN_HEIGHT, MIN_WIDTH,
     },
     github,
@@ -730,6 +730,13 @@ impl App {
             // handler — in the single-pane view it has nowhere to go.
             if action == Action::FocusNext {
                 return self.switch_pane();
+            }
+            // The scheme picker is about the whole interface, not about either
+            // pane, so it opens the same way from both rather than being
+            // repeated in each pane's handler.
+            if action == Action::OpenThemePicker {
+                self.modals.push(Box::new(ThemeModal::new()));
+                return EventState::Consumed;
             }
             return if self.two_pane && self.focus_pane == Pane::Repositories {
                 self.handle_repositories_action(action)

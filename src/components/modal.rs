@@ -133,6 +133,7 @@ pub enum ModalKind {
     Help,
     PrWorktree,
     SelectReposDir,
+    Theme,
 }
 
 pub trait Modal {
@@ -409,6 +410,12 @@ mod tests {
             frame_at(size, |frame, full| {
                 let area = picker.area(full);
                 picker.draw(frame, area);
+            });
+
+            let mut picker_theme = super::super::ThemeModal::new();
+            frame_at(size, |frame, full| {
+                let area = Modal::area(&picker_theme, full);
+                picker_theme.draw(frame, area);
             });
 
             let mut help = HelpComponent::new(worktrees_bindings());

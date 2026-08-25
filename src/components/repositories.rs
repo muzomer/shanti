@@ -541,6 +541,9 @@ pub fn repositories_pane_bindings() -> Vec<HelpEntry> {
         HelpEntry::bind("n", "New space here").hint("n", "new"),
         HelpEntry::bind("i", "Enter filter mode").hint("i", "filter"),
         HelpEntry::bind("Tab", "Focus spaces").hint("Tab", "spaces"),
+        HelpEntry::bind("t", "Choose a colour scheme")
+            .hint("t", "theme")
+            .aside(),
         HelpEntry::bind("? / F1", "Show this help")
             .hint("?", "help")
             .aside(),

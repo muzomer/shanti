@@ -150,6 +150,22 @@ pub fn current() -> Theme {
     slot().read().map_or_else(|e| *e.into_inner(), |t| *t)
 }
 
+/// Serialises the tests that install a palette.
+///
+/// The palette is process-global by design (see the module docs), so two tests
+/// swapping it in parallel would read each other's colours. Every test that
+/// calls [`set`] takes this first, so the globality that is a feature at
+/// runtime is not a source of flakes in the suite.
+#[cfg(test)]
+pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+    // A panicking test must not take every later one down with it: the data
+    // behind the lock is `()`, so there is no invariant left broken.
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Install a palette. The single mutation point for the whole process.
 pub fn set(theme: Theme) {
     match slot().write() {
@@ -327,6 +343,7 @@ mod tests {
     /// colours taken when the module was written.
     #[test]
     fn styles_follow_the_installed_theme() {
+        let _guard = test_lock();
         let swapped = Theme {
             accent: Color::Rgb(1, 2, 3),
             ..Theme::tokyo_night()
