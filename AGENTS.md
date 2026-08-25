@@ -17,12 +17,18 @@ Rust TUI for creating and managing **spaces** — git worktrees and jujutsu work
 ## UI & Design Guidelines (Ratatui)
 
 - Avoid generic plain-text or default block layouts.
-- **Colour lives in `src/theme.rs` and nowhere else.** No component names a raw
-  `Color`; it names the _meaning_ (`theme::title()`, `theme::muted()`,
-  `theme::selected_row()`, `theme::border_destructive()`, …). The palette is a
-  runtime `Theme` value in one process-global slot, installed by `theme::set`
-  and defaulting to Tokyo Night (night variant); `theme::tone(Tone)` is the
-  single mapping from a domain `Tone` to a colour.
+- **Colour lives in `src/theme/` and nowhere else.** No component names a raw
+  `Color`, and none names a constant either: it calls the accessor for the
+  _meaning_ (`theme::title()`, `theme::muted()`, `theme::selected_row()`,
+  `theme::border_destructive()`, …). The palette is a runtime `Theme` value held
+  in one process-global slot — `theme::set` is the only mutation point, and
+  every accessor reads the slot, so a scheme can change while the process runs.
+  `theme::tone(Tone)` is the single mapping from a domain `Tone` to a colour.
+  The hues themselves live only in the scheme modules (`theme/tokyo_night.rs`,
+  `theme/catppuccin.rs`, `theme/gruvbox.rs`, `theme/ansi.rs`), each one a
+  `Theme` constructor, catalogued in `theme/scheme.rs`. Tokyo Night (night
+  variant) is the default; adding a scheme means adding a constructor and an
+  entry in `scheme::ALL`, never touching a component.
 - Styling: bold accent colours for active headers, dimmed text for secondary
   detail, a high-contrast background band for the selected row.
 - Layout: constraint-based layouts (`Layout`) with strict minimums/percentages so
@@ -55,7 +61,13 @@ src/
   events.rs                      # AppEvent / EventSource: keys, paste, ticks and jobs on one channel
   jobs/mod.rs                    # Job / JobResult / Worker: the bounded pool that runs slow work
   keymap.rs                      # key → Action resolution; InputMode (Normal/Insert)
-  theme.rs                       # the one place a colour is chosen (Tokyo Night) + tone() mapping
+  theme/
+    mod.rs                       # the one place a colour is chosen: Theme, the global slot, set(), accessors, tone()
+    scheme.rs                    # the catalogue: Scheme { name, label, appearance }, ALL, DEFAULT, find/theme
+    tokyo_night.rs               # tokyo-night (default), tokyo-night-storm, tokyo-night-day
+    catppuccin.rs                # catppuccin-mocha, catppuccin-latte
+    gruvbox.rs                   # gruvbox-dark
+    ansi.rs                      # ansi: the terminal's own 16 colours, no hue of its own
   github.rs                      # PR URL parsing, PrFetcher, PR lookup, repository cloning
   hooks.rs                       # post-create hooks: HookSettings -> HookPlan -> HookReport
   logs.rs                        # tracing setup
@@ -68,6 +80,7 @@ src/
     create_worktree.rs           # popup text input for a new space name
     pr_worktree.rs               # popup text input for a GitHub PR URL, and the flow behind it
     select_directory.rs          # popup to pick one of the repos dirs (used when cloning)
+    theme_picker.rs              # ThemeModal: the colour scheme picker, previewing each scheme live
     confirm.rs                   # generic yes/no dialog, deferring the "yes" to a callback
     help.rs                      # context-sensitive keybinding help popup; HelpEntry
     notify.rs                    # notifications: severity, expiry, and the single message slot
@@ -191,6 +204,14 @@ tests/
   argv, no environment and no configuration file, so tests can point an `App` at
   their own temp directories and their own PR lookup without disturbing anything
   else. `App::new()` is the thin wrapper that resolves the real configuration.
+- **The colour scheme** is chosen once at startup and then at will: `main.rs`
+  installs `args.theme` with `theme::set`, and `t` opens `ThemeModal`
+  (`components/theme_picker.rs`), which *is* the preview — moving the cursor
+  calls `theme::set`, so the next frame repaints everything in the highlighted
+  scheme. `Enter` persists the name through `config::persist_theme` (the only
+  writer of the user's configuration file, rewriting the single `theme` key);
+  `Esc` restores the `Theme` value the modal captured when it opened. A failed
+  write is a notification, never a rollback: the scheme stays active for the run.
 - **GitHub integration** (`github.rs`): `p` opens a PR URL prompt; `P` does the
   same and clones the repository first if it is missing. Lookups go through
   `PrFetcher` (`Arc<dyn Fn(&PrUrl) -> Result<PrInfo>>`) — `github::live_fetcher()`
@@ -209,6 +230,7 @@ where each value came from (`--show-config` prints the winner and its origin).
 | `SHANTI_REPOS_DIR`     | `--repos-dir`     | Colon-separated directories containing repositories              |
 | `SHANTI_WORKTREES_DIR` | `--worktrees-dir` | Directory where spaces are created                               |
 | `SHANTI_RUN_FETCH`     | `--run-fetch`     | Fetch every repository at startup                                |
+| `SHANTI_THEME`         | `--theme`         | Colour scheme to use, e.g. `catppuccin-latte`                    |
 | `SHANTI_CONFIG`        | `--config`        | Directory holding `config.toml` (the flag names the file itself) |
 | `SHANTI_JJ_BIN`        | —                 | Path to the `jj` binary when it is not on `PATH`                 |
 | `SHANTI_DATA`          | —                 | Directory for shanti's log file                                  |
@@ -217,8 +239,10 @@ where each value came from (`--show-config` prints the winner and its origin).
 | `GITHUB_TOKEN`         | —                 | Read-only token for the GitHub PR flow                           |
 
 The file keys `backend` and `editor` are parsed and reported but nothing acts on
-them yet: the backend is decided from the repository on disk. The `[hooks]` and
-`[repos.<name>.hooks]` tables *do* act — see **Post-create hooks** above.
+them yet: the backend is decided from the repository on disk. The `theme` key,
+the `[hooks]` and the `[repos.<name>.hooks]` tables *do* act — `theme` names a
+scheme from `theme::scheme::ALL` and is installed once at startup, and the hooks
+are described under **Post-create hooks** above.
 
 ## Conventions
 

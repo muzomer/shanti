@@ -22,6 +22,7 @@
 - **Status indicators** — every space shows two glyphs: one for its relationship to the upstream, one for its local state. See [Status indicators](#status-indicators).
 - **Create spaces from PR links** — paste a GitHub PR URL and shanti clones the repo and creates a space from the PR branch (requires `gh` CLI or read-only `GITHUB_TOKEN`).
 - **Configuration file** — a TOML file under `~/.config/shanti/`, layered with environment variables and CLI flags.
+- **Colour schemes** — seven built-in schemes, light and dark, plus one that follows your terminal's own colours. Press `t` to try them on the real interface and keep the one you like. See [Colour schemes](#colour-schemes).
 - **Vi-style navigation**
 
 # Rationale
@@ -143,6 +144,7 @@ Run `cd $(shanti)` in `bash`/`zsh` or `cd (shanti)` in `fish` shell from any dir
 - `-f`, `--run-fetch`: fetch every repository at startup (or set `SHANTI_RUN_FETCH`).
   Meant for scripted use; interactively, `f` fetches just the repository you are
   looking at, when you want it.
+- `--theme <NAME>`: the colour scheme to use, e.g. `tokyo-night` or `catppuccin-latte` (or set `SHANTI_THEME`). An unknown name is an error listing the ones that work.
 - `--config <FILE>`: read this configuration file instead of the default one.
 - `--show-config`: print the effective configuration, and where each value came from, then exit.
 - `--no-hooks`: skip the [post-create hooks](#post-create-hooks) for this run (or set `SHANTI_NO_HOOKS` to any non-empty value).
@@ -163,6 +165,7 @@ Run `cd $(shanti)` in `bash`/`zsh` or `cd (shanti)` in `fish` shell from any dir
 | `r` | refresh: re-read every known repository's spaces and status (no network) |
 | `R` | rescan the repos dirs, picking up repositories added or removed since launch |
 | `f` | fetch the remotes of the selected space's repository, and only that one |
+| `t` | choose a colour scheme, previewed live (`Enter` saves it, `Esc` restores the previous one) |
 | `d` / `D` | delete with confirmation / force delete |
 | `Enter` | print the path of the selected space and exit |
 | `?` | help |
@@ -188,6 +191,7 @@ repos_dirs     = /home/you/src  (command line)
 run_fetch      = false  (built-in default)
 backend        = git  (built-in default)
 editor         = <unset>  (built-in default)
+theme          = tokyo-night  (built-in default)
 hooks          = 1 file(s) copied, 2 command(s), 1 repo(s) with their own  (config file)
 ```
 
@@ -199,11 +203,53 @@ TOML, at `<config dir>/config.toml`. The config directory is `$XDG_CONFIG_HOME/s
 repos_dirs = ["~/src", "~/work"]
 worktrees_dir = "~/worktrees"
 run_fetch = true
+theme = "catppuccin-mocha"
 ```
 
 `~` is expanded, and paths are resolved the same way no matter which layer they were written in.
 
+`theme` names one of the built-in colour schemes; `SHANTI_THEME` and `--theme` override it, in that order. See [Colour schemes](#colour-schemes) for the list and for the picker that writes this key for you.
+
 Two further keys, `backend` (`"git"` / `"jujutsu"`) and `editor`, are accepted by the file and shown by `--show-config`, but nothing acts on them yet: the backend is decided from the repository on disk, and there is no editor integration.
+
+## Colour schemes
+
+Seven schemes ship with `shanti`. The **name** is what you write down — in the file, the environment variable or the flag; the label is only what the picker shows you.
+
+| name | label | appearance |
+| --- | --- | --- |
+| `tokyo-night` | Tokyo Night | dark — the default |
+| `tokyo-night-storm` | Tokyo Night Storm | dark |
+| `tokyo-night-day` | Tokyo Night Day | light |
+| `catppuccin-mocha` | Catppuccin Mocha | dark |
+| `catppuccin-latte` | Catppuccin Latte | light |
+| `gruvbox-dark` | Gruvbox Dark | dark |
+| `ansi` | Terminal (ANSI 16) | follows your terminal |
+
+`ansi` names no colours of its own: it asks for your terminal's 16, so it stays readable whatever your terminal is themed as — and it is the scheme to use on a terminal that remaps colours anyway.
+
+Three layers choose the scheme at startup, later winning, exactly like every other setting:
+
+```toml
+# ~/.config/shanti/config.toml
+theme = "catppuccin-mocha"
+```
+
+```bash
+SHANTI_THEME=gruvbox-dark shanti     # beats the file
+shanti --theme tokyo-night-day       # beats the environment
+```
+
+A name is matched ignoring case and surrounding spaces, so `Catppuccin-Latte` works. An unknown name is an error that lists the names that do work, and `shanti --show-config` prints the winning scheme with the layer it came from.
+
+### The picker
+
+`t` opens the scheme picker. Moving through the list repaints the whole application — panes, glyphs, borders and the popup itself — in the scheme under the cursor, so you judge a scheme on the interface you actually use rather than on a row of swatches. Each row says whether the scheme is light or dark, because a dark scheme previewed on a light terminal is a moment of unreadable screen.
+
+- `Enter` keeps the previewed scheme and writes the `theme` key back to your configuration file. Only that one key is rewritten: the rest of the file — comments, blank lines, the `[hooks]` tables — is left exactly as you wrote it, and a file that does not exist yet is created.
+- `Esc` restores the scheme that was in force when you opened the picker.
+
+If the file cannot be written, the scheme still stays active for the rest of the run and a notification says why the next run will not start with it. Note that a saved key is still only the file layer: `SHANTI_THEME` or `--theme` will keep overriding it on the next run.
 
 ## Post-create hooks
 
@@ -235,6 +281,7 @@ Hooks are only ever read from **your own** configuration file. `shanti` never ru
 | `SHANTI_REPOS_DIR`     | `--repos-dir`     | Colon-separated directories containing repositories                |
 | `SHANTI_WORKTREES_DIR` | `--worktrees-dir` | Directory where spaces are created                                 |
 | `SHANTI_RUN_FETCH`     | `--run-fetch`     | Fetch every repository at startup                                  |
+| `SHANTI_THEME`         | `--theme`         | Colour scheme to use, e.g. `catppuccin-latte`                      |
 | `SHANTI_CONFIG`        | `--config`        | Directory holding `config.toml` (the flag names the file itself)   |
 | `SHANTI_JJ_BIN`        | —                 | Path to the `jj` binary, when it is not on `PATH`                  |
 | `SHANTI_DATA`          | —                 | Directory for shanti's log file (default `~/.local/state/shanti`)  |
@@ -256,5 +303,6 @@ A clone made this way is always a plain **git** clone, even if you use jj everyw
 - [x] Create spaces from remote branches.
 - [x] Jujutsu workspaces alongside git worktrees.
 - [x] Configuration file.
+- [x] Selectable, persisted colour schemes.
 - [ ] Create PRs from spaces.
 - [ ] Add metadata to spaces, e.g. JIRA links, PR links ...etc.
