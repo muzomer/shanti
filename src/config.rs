@@ -37,6 +37,13 @@
 //! Reading is the bulk of this module. It is the weakest of the three
 //! configuration layers, so the file's values are handed to [`crate::cli`],
 //! which decides whether they win and then normalises whatever did.
+//!
+//! [`persist_theme`] is the one exception, and the only writer in the whole
+//! codebase. The rule it obeys: **the file belongs to the user**. Shanti owns
+//! exactly one key in it — `theme`, the scheme the picker changed — and edits
+//! that key in place with `toml_edit`, leaving every comment, blank line,
+//! ordering choice and key shanti does not model byte-identical. Serialising a
+//! [`Config`] back out would be shorter and would quietly delete all of it.
 
 use std::{
     collections::BTreeMap,
@@ -45,6 +52,7 @@ use std::{
 
 use color_eyre::eyre::{self, Context};
 use serde::{Deserialize, Serialize};
+use toml_edit::{value, DocumentMut};
 use tracing::debug;
 
 /// File name looked up inside the configuration directory.
@@ -212,6 +220,84 @@ impl Config {
         }
         Ok(())
     }
+}
+
+/// Record `name` as the `theme` key of the configuration file at `path`.
+///
+/// This is the only place shanti writes to the user's configuration, so it is
+/// deliberately narrow: it parses the existing document, replaces or appends
+/// the single top-level `theme` key, and writes the document back. Nothing
+/// else in the file moves — a round-trip through [`Config`] would drop the
+/// user's comments, their formatting and any key this struct does not model.
+///
+/// The name is not validated here. The caller already holds a
+/// [`crate::theme::scheme::Scheme`] it took from the catalogue, so the only way
+/// to reach this function is with a name that exists.
+///
+/// Failure is reported, never fatal: the scheme is already applied in memory,
+/// and a config file that could not be written costs the user the choice at
+/// the *next* start and nothing now.
+pub fn persist_theme(path: &Path, name: &str) -> eyre::Result<()> {
+    let existing = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        // No file yet is the normal first-run case: start from an empty
+        // document and let the atomic write create it.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(error).wrap_err_with(|| {
+                format!("Could not read the configuration file {}", path.display())
+            });
+        }
+    };
+
+    let mut document: DocumentMut = existing.parse().wrap_err_with(|| {
+        format!(
+            "Could not update the configuration file {}: it is not valid TOML",
+            path.display()
+        )
+    })?;
+
+    // Indexing assigns in place when the key is already there, and appends to
+    // the root table when it is not — toml_edit renders root key/values ahead
+    // of any `[table]`, so appending can never land the key inside `[hooks]`.
+    document["theme"] = value(name);
+
+    write_atomically(path, &document.to_string())
+        .wrap_err_with(|| format!("Could not write the configuration file {}", path.display()))
+}
+
+/// Write `contents` to `path` so that `path` is never seen half-written.
+///
+/// A neighbouring temporary file plus a rename, because rename within one
+/// directory is atomic: a crash or a full disk leaves either the old file or
+/// the new one, never a truncated config the next start would refuse to parse.
+fn write_atomically(path: &Path, contents: &str) -> eyre::Result<()> {
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
+    if let Some(dir) = dir {
+        std::fs::create_dir_all(dir)
+            .wrap_err_with(|| format!("Could not create the directory {}", dir.display()))?;
+    }
+
+    // Same directory as the target: a rename across filesystems is not atomic
+    // and would fail outright, which is exactly what a system temp dir risks.
+    let file_name = path
+        .file_name()
+        .unwrap_or_else(|| CONFIG_FILE_NAME.as_ref());
+    let mut temp = path.to_path_buf();
+    temp.set_file_name(format!(
+        ".{}.{}.tmp",
+        file_name.to_string_lossy(),
+        std::process::id()
+    ));
+
+    std::fs::write(&temp, contents)?;
+    if let Err(error) = std::fs::rename(&temp, path) {
+        // Leaving a stray dotfile next to the config would be a second, quieter
+        // failure, so clean up before reporting the first.
+        let _ = std::fs::remove_file(&temp);
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -396,6 +482,128 @@ mod tests {
             Config::load_from(&path).unwrap().theme.as_deref(),
             Some("Catppuccin-Latte")
         );
+    }
+
+    /// The whole point of `toml_edit`: a user's file is theirs. Comments, blank
+    /// lines, ordering and tables shanti does not model must come back out
+    /// byte-identical, with only the one owned key changed.
+    #[test]
+    fn persist_theme_preserves_comments_blank_lines_and_tables() {
+        let original = "\
+# Where my repositories live.
+repos_dirs = [\"/src\"]
+
+run_fetch = true # fetch on start
+
+# Runs after every space.
+[hooks]
+copy = [\".envrc\"]
+run = [\"direnv allow\"]
+";
+        let (_dir, path) = write_config(original);
+        persist_theme(&path, "catppuccin-mocha").unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        // Every original line survives, in its original order.
+        assert!(
+            written.contains("# Where my repositories live."),
+            "{written}"
+        );
+        assert!(
+            written.contains("run_fetch = true # fetch on start"),
+            "{written}"
+        );
+        assert!(written.contains("# Runs after every space."), "{written}");
+        assert!(written.contains("\n\n"), "blank lines were lost: {written}");
+        assert!(written.contains("[hooks]"), "{written}");
+        // The only difference is the added key.
+        assert!(
+            written.contains("theme = \"catppuccin-mocha\""),
+            "{written}"
+        );
+        // A root key appended after a `[table]` would otherwise land inside it.
+        let theme_at = written.find("theme =").unwrap();
+        assert!(theme_at < written.find("[hooks]").unwrap(), "{written}");
+        // And the file still parses as the config it was.
+        let config = Config::load_from(&path).unwrap();
+        assert_eq!(config.theme.as_deref(), Some("catppuccin-mocha"));
+        assert_eq!(config.hooks.copy, vec![PathBuf::from(".envrc")]);
+    }
+
+    #[test]
+    fn persist_theme_creates_a_missing_file_and_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        // Two levels deep: neither the file nor its directory exists yet.
+        let path = dir
+            .path()
+            .join("nested")
+            .join("shanti")
+            .join(CONFIG_FILE_NAME);
+        persist_theme(&path, "gruvbox-dark").unwrap();
+
+        assert_eq!(
+            Config::load_from(&path).unwrap().theme.as_deref(),
+            Some("gruvbox-dark")
+        );
+    }
+
+    #[test]
+    fn persist_theme_replaces_an_existing_key_in_place() {
+        let (_dir, path) =
+            write_config("run_fetch = true\ntheme = \"tokyo-night\"\neditor = \"nvim\"\n");
+        persist_theme(&path, "catppuccin-latte").unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            written, "run_fetch = true\ntheme = \"catppuccin-latte\"\neditor = \"nvim\"\n",
+            "the key moved instead of being replaced where it stood"
+        );
+        assert_eq!(written.matches("theme").count(), 1, "{written}");
+    }
+
+    /// Writing can fail for reasons shanti does not control — a read-only home,
+    /// a full disk. The scheme is already applied in memory, so the failure has
+    /// to come back as a value the caller can show, never a panic or an exit.
+    #[test]
+    fn persist_theme_reports_a_write_failure_instead_of_panicking() {
+        let dir = tempfile::tempdir().unwrap();
+        // A regular file where the config *directory* should be: creating the
+        // directory fails, and with it the write.
+        let blocker = dir.path().join("not-a-dir");
+        std::fs::write(&blocker, "").unwrap();
+        let path = blocker.join(CONFIG_FILE_NAME);
+
+        let error = format!("{:?}", persist_theme(&path, "tokyo-night").unwrap_err());
+        assert!(error.contains(&path.display().to_string()), "{error}");
+        // Nothing was left behind next to the blocker.
+        assert!(blocker.is_file());
+    }
+
+    /// A file shanti cannot parse must not be flattened into a one-key file:
+    /// refusing keeps whatever the user was mid-way through editing.
+    #[test]
+    fn persist_theme_refuses_to_overwrite_an_unparseable_file() {
+        let (_dir, path) = write_config("this is not = = toml\n");
+        assert!(persist_theme(&path, "tokyo-night").is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "this is not = = toml\n"
+        );
+    }
+
+    /// The temporary file is an implementation detail: it must never survive a
+    /// successful write and be picked up as clutter in the config directory.
+    #[test]
+    fn persist_theme_leaves_no_temporary_file_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+        persist_theme(&path, "tokyo-night").unwrap();
+
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from(CONFIG_FILE_NAME)]);
     }
 
     #[test]
