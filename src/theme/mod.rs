@@ -1,17 +1,17 @@
 //! The one place a colour is chosen.
 //!
-//! # Palette: Tokyo Night (the "night" variant)
+//! # The palette is one of several
 //!
-//! `CLAUDE.md` asks for a dark palette from the Tokyo Night or Catppuccin Mocha
-//! families. Tokyo Night wins here for one concrete reason: the smallest colour
-//! target in this UI is a single status glyph — one character wide — and Tokyo
-//! Night keeps the severity hues far apart at that size. Its warning orange
-//! (`#ff9e64`) and its danger red (`#f7768e`) sit roughly 40° apart in hue with
-//! clearly different saturation, so `↑ ahead` never reads as `✘ gone` at a
-//! glance. Catppuccin Mocha's peach and red are both low-chroma pastels and blur
-//! into each other at one character. Tokyo Night's near-black base (`#1a1b26`)
-//! also leaves room for a genuinely high-contrast selection band, which the
-//! pastel family does not.
+//! The hues themselves live in the scheme modules beside this one
+//! (`tokyo_night`, `catppuccin`, `gruvbox`, `ansi`), each a [`Theme`]
+//! constructor and nothing else, catalogued in [`scheme`]. Tokyo Night
+//! ("night") is the default and the reason the others are shaped the way they
+//! are: the smallest colour target in this UI is a status glyph one character
+//! wide, and Tokyo Night keeps the severity hues far apart at that size — its
+//! warning orange (`#ff9e64`) and its danger red (`#f7768e`) sit roughly 40°
+//! apart with clearly different saturation, so `↑ ahead` never reads as
+//! `✘ gone`. Every scheme added later has to earn the same separation, by
+//! whatever means its own family allows; `scheme`'s tests hold it to that.
 //!
 //! # Semantic names only
 //!
@@ -44,6 +44,14 @@ use std::sync::{OnceLock, RwLock};
 use ratatui::style::{Color, Modifier, Style};
 
 use crate::vcs::Tone;
+
+mod ansi;
+mod catppuccin;
+mod gruvbox;
+pub mod scheme;
+mod tokyo_night;
+
+pub use scheme::{Appearance, Scheme, UnknownScheme};
 
 /// A complete palette: the base tokens every style in the UI is built from.
 ///
@@ -100,31 +108,6 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// Tokyo Night, the "night" variant — the palette documented at the top of
-    /// this module, and what the application looks like out of the box.
-    pub const fn tokyo_night() -> Self {
-        Self {
-            background: Color::Rgb(0x1a, 0x1b, 0x26),
-            surface: Color::Rgb(0x29, 0x2e, 0x42),
-            surface_selected: Color::Rgb(0x3d, 0x59, 0xa1),
-
-            accent: Color::Rgb(0x7a, 0xa2, 0xf7),
-            accent_dim: Color::Rgb(0x39, 0x4b, 0x70),
-
-            text_primary: Color::Rgb(0xc0, 0xca, 0xf5),
-            text_secondary: Color::Rgb(0xa9, 0xb1, 0xd6),
-            text_muted: Color::Rgb(0x56, 0x5f, 0x89),
-
-            success: Color::Rgb(0x9e, 0xce, 0x6a),
-            info: Color::Rgb(0x7d, 0xcf, 0xff),
-            warning: Color::Rgb(0xff, 0x9e, 0x64),
-            danger: Color::Rgb(0xf7, 0x76, 0x8e),
-
-            destructive: Color::Rgb(0xdb, 0x4b, 0x4b),
-            destructive_surface: Color::Rgb(0x37, 0x22, 0x2c),
-        }
-    }
-
     /// Where a status [`Tone`] becomes a colour — the only such mapping.
     ///
     /// The domain model says how severe a glyph is; the severity tokens above
@@ -327,4 +310,31 @@ pub fn warning_text() -> Style {
 /// An error message.
 pub fn danger_text() -> Style {
     Style::new().fg(danger()).add_modifier(Modifier::BOLD)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The default palette is what the application shipped with; a scheme
+    /// added later must not change what a user who picked nothing sees.
+    #[test]
+    fn default_is_tokyo_night() {
+        assert_eq!(Theme::default(), Theme::tokyo_night());
+    }
+
+    /// Composed styles must follow the installed palette, not a copy of the
+    /// colours taken when the module was written.
+    #[test]
+    fn styles_follow_the_installed_theme() {
+        let swapped = Theme {
+            accent: Color::Rgb(1, 2, 3),
+            ..Theme::tokyo_night()
+        };
+        set(swapped);
+        assert_eq!(title().fg, Some(Color::Rgb(1, 2, 3)));
+
+        set(Theme::tokyo_night());
+        assert_eq!(title().fg, Some(Theme::tokyo_night().accent));
+    }
 }
