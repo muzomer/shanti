@@ -28,6 +28,7 @@ use super::{
 };
 use crate::theme;
 use crate::{
+    components::notify::Severity,
     github::{self, PrFetcher, PrInfo, PrUrl},
     jobs::{Completion, Job},
     keymap::InputMode,
@@ -247,7 +248,46 @@ fn after_clone(
         }
     }
 
-    open_worktree_for_pr(ctx, info, auto)
+    let flow = open_worktree_for_pr(ctx, info, auto);
+
+    // The silent auto-clone path (`P` with a single configured repos dir) shows
+    // neither the "clone with git?" confirm dialog nor the directory picker —
+    // there is nothing to confirm and nothing to pick — so this is the only
+    // chance to tell a jj user their brand-new repository is a plain git clone.
+    // It lives here, in the clone's *result* handler, on purpose: shanti-hml.4
+    // moves the clone onto a background worker, and there it arrives as a job
+    // result rather than inline, so a notification set here survives the move
+    // while anything wired into the synchronous key handler would not.
+    if let Some(notice) = git_clone_notice(url, auto, &ctx.args.repos_dirs) {
+        // One slot, newest wins: an advisory about the clone's shape must not
+        // paint over a real problem raised while opening the worktree — a failed
+        // `create_space` or a merged-branch warning is the more urgent news.
+        let urgent = matches!(
+            ctx.notify.current().map(|n| n.severity),
+            Some(Severity::Warning | Severity::Error)
+        );
+        if !urgent {
+            ctx.notify.info(notice);
+        }
+    }
+
+    flow
+}
+
+/// The line shown after a clone lands, or `None` when the user was already told
+/// the clone uses git.
+///
+/// Only the silent path needs it: with the confirm dialog and the directory
+/// picker both naming git (and the picker carrying the `jj git init --colocate`
+/// hint), the sole path that says nothing is `P` auto-clone into a single repos
+/// dir, where neither prompt appears.
+fn git_clone_notice(url: &PrUrl, auto: bool, repos_dirs: &[String]) -> Option<String> {
+    (auto && repos_dirs.len() == 1).then(|| {
+        format!(
+            "Cloned {} with git — run `jj git init --colocate` in it for jj",
+            url.repo
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -720,6 +760,39 @@ mod tests {
         );
         // Minutes of clone are unreadable without something moving.
         assert_ne!(screen, screen_of(modal.as_mut()), "the spinner must turn");
+    }
+
+    /// The silent path — `P` auto-clone into the one configured repos dir —
+    /// shows no confirm dialog and no picker, so the clone's result handler is
+    /// where the user finally learns the repository is a plain git clone and how
+    /// to colocate it.
+    #[test]
+    fn a_silent_auto_clone_announces_the_git_clone_and_the_jj_escape_hatch() {
+        let notice = git_clone_notice(&a_url(), true, &["/tmp/repos".to_string()])
+            .expect("the silent path must say something");
+        assert!(
+            notice.contains("widget") && notice.contains("git"),
+            "the notice must name the repository and that git was used:\n{notice}"
+        );
+        assert!(
+            notice.contains("jj git init --colocate"),
+            "the notice must tell a jj user how to colocate:\n{notice}"
+        );
+    }
+
+    /// Every other path already tells the user: the confirm dialog and the
+    /// picker both name git, so a second notice would be noise.
+    #[test]
+    fn the_paths_that_prompt_stay_silent_afterwards() {
+        // Not auto: the confirm dialog was shown.
+        assert!(git_clone_notice(&a_url(), false, &["/tmp/repos".to_string()]).is_none());
+        // Auto but several dirs: the picker was shown.
+        assert!(git_clone_notice(
+            &a_url(),
+            true,
+            &["/tmp/one".to_string(), "/tmp/two".to_string()],
+        )
+        .is_none());
     }
 
     /// Escape during a clone is the only way out, so it has to reach the loop:
