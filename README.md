@@ -19,6 +19,7 @@
 - **Manage spaces** — create, delete, and navigate git worktrees and jujutsu workspaces across different repositories.
 - **Two-pane layout** — repositories on the left, the highlighted repository's spaces on the right. It opens focused on the repositories pane (find the repository first); `Tab` moves focus to the spaces beside it, and `n` creates a space in the highlighted repository with no picker. A narrow terminal folds back to a single list.
 - **Both backends, one list** — shanti detects per repository whether it is driven by git or by jj; a repository colocated with both appears once, and each space says which backend owns it.
+- **Detail pane** — under the spaces list, everything the row has no room for: the last commit made in the highlighted space and how long ago, how far it stands from its upstream, its full path, and the pull request it was created from. See [The detail pane](#the-detail-pane).
 - **Status indicators** — every space shows two glyphs: one for its relationship to the upstream, one for its local state. See [Status indicators](#status-indicators).
 - **Create spaces from PR links** — paste a GitHub PR URL and shanti clones the repo and creates a space from the PR branch (requires `gh` CLI or read-only `GITHUB_TOKEN`).
 - **Configuration file** — a TOML file under `~/.config/shanti/`, layered with environment variables and CLI flags.
@@ -125,6 +126,25 @@ Each space shows two glyphs. The first is its relationship to the upstream and m
 | `·` | either | not checked yet |
 
 The same legend is in the in-app help popup (`?`).
+
+## The detail pane
+
+Below the spaces list, the pane describes whichever space is highlighted:
+
+| field | what it says |
+| --- | --- |
+| `Latest` | subject of the last commit — or, under jj, the description of the working-copy change. `(no description)` when there is none, `·` when it has not been read |
+| `When` | how long ago that was, in one coarse unit: `now`, `40m ago`, `5h ago`, `3d ago`, `7w ago` |
+| `Remote` | the upstream in words, with counts: `2 ahead, 1 behind — diverged`, `no upstream — never pushed`, `upstream is gone` |
+| `Local` | the local half of the status, spelled out: `uncommitted changes`, `the change has conflicts` |
+| `Path` | where the space lives, truncated from the left when it is long — the end is the part that identifies it |
+| `PR` | the pull request the space was created from, for spaces made with `p` or `P`. Blank for spaces made by hand |
+
+Moving the cursor redraws it immediately: every field comes from the same snapshot the list is already holding, so nothing here reads the disk.
+
+The PR is remembered in `<data dir>/spaces.toml`, a file shanti writes for itself. Deleting it costs nothing but the `PR` line; entries for spaces that no longer exist are dropped whenever the file is rewritten.
+
+On a short terminal the pane is hidden rather than squeezed: the list keeps its minimum height first.
 
 # Installation
 
@@ -284,7 +304,7 @@ Hooks are only ever read from **your own** configuration file. `shanti` never ru
 | `SHANTI_THEME`         | `--theme`         | Colour scheme to use, e.g. `catppuccin-latte`                      |
 | `SHANTI_CONFIG`        | `--config`        | Directory holding `config.toml` (the flag names the file itself)   |
 | `SHANTI_JJ_BIN`        | —                 | Path to the `jj` binary, when it is not on `PATH`                  |
-| `SHANTI_DATA`          | —                 | Directory for shanti's log file (default `~/.local/state/shanti`)  |
+| `SHANTI_DATA`          | —                 | Directory for shanti's log file and `spaces.toml` (default `~/.local/state/shanti`) |
 | `SHANTI_LOGLEVEL`      | —                 | Log level, e.g. `debug` (`RUST_LOG` takes precedence)              |
 | `SHANTI_NO_HOOKS`      | `--no-hooks`      | Skip every post-create hook for this run (any non-empty value)     |
 | `GITHUB_TOKEN`         | —                 | Read-only token for the GitHub PR flow                             |
@@ -305,4 +325,4 @@ A clone made this way is always a plain **git** clone, even if you use jj everyw
 - [x] Configuration file.
 - [x] Selectable, persisted colour schemes.
 - [ ] Create PRs from spaces.
-- [ ] Add metadata to spaces, e.g. JIRA links, PR links ...etc.
+- [x] Add metadata to spaces — the detail pane, with the PR each space came from.

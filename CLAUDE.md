@@ -71,6 +71,7 @@ src/
   github.rs                      # PR URL parsing, PrFetcher, PR lookup, repository cloning
   hooks.rs                       # post-create hooks: HookSettings -> HookPlan -> HookReport
   logs.rs                        # tracing setup
+  space_meta.rs                  # what shanti remembers about a space: the PR it came from
   dirs.rs                        # data/config directory resolution
   components/
     mod.rs                       # Action and EventState enums; re-exports
@@ -133,6 +134,12 @@ tests/
   divergent, since jj auto-commits). Each `StatusGlyph` carries a symbol, a
   plain-English `meaning`, and a semantic **`Tone`**
   (`Muted`/`Ok`/`Info`/`Warn`/`Danger`) — the domain model never names a colour.
+- **`SpaceTip`** (`vcs/tip.rs`) is the last commit — or jj change — made in a
+  space: a subject and a Unix timestamp, read by each backend while it is
+  already listing (git peels the branch it has open, jj adds two fields to the
+  workspace template), so no space costs an extra round trip. The age is derived
+  at render time, never stored: a snapshot holding "3 hours ago" is wrong the
+  moment it is taken.
 - **`vcs::delete`** turns a `SpaceStatus` into a `DeletionRisk`, so the UI can
   pick a proportionate confirmation. Safety is decided by
   `SpaceStatus::has_unsaved_work` / `RemoteState::has_unpushed_work` and never
@@ -212,6 +219,19 @@ tests/
   writer of the user's configuration file, rewriting the single `theme` key);
   `Esc` restores the `Theme` value the modal captured when it opened. A failed
   write is a notification, never a rollback: the scheme stays active for the run.
+- **The detail pane** (`components/detail.rs`) is a plain function, not a modal:
+  it draws the highlighted space's tip, remote counts, local state, path and PR
+  from the snapshot the list already holds, so moving the cursor costs a
+  re-render and no I/O. `app.rs::split_off_detail` decides whether it appears —
+  the list keeps `MIN_HEIGHT` first, and below that the pane is hidden rather
+  than clipped. The keybinding footer lives on the spaces list's own bottom
+  border, which is now above the pane rather than at the screen's edge.
+- **What shanti remembers** (`space_meta.rs`): a space made from a pull request
+  came from a URL that no backend records. `SpaceMeta` keeps it in
+  `<data dir>/spaces.toml` — a **cache**, not a source of truth: an unreadable
+  file reads as "remember nothing", a failed write never fails the space
+  creation, and entries whose directory is gone are dropped on the next write.
+  `AppContext::remember_pr` is how a flow records one.
 - **GitHub integration** (`github.rs`): `p` opens a PR URL prompt; `P` does the
   same and clones the repository first if it is missing. Lookups go through
   `PrFetcher` (`Arc<dyn Fn(&PrUrl) -> Result<PrInfo>>`) — `github::live_fetcher()`
@@ -233,7 +253,7 @@ where each value came from (`--show-config` prints the winner and its origin).
 | `SHANTI_THEME`         | `--theme`         | Colour scheme to use, e.g. `catppuccin-latte`                    |
 | `SHANTI_CONFIG`        | `--config`        | Directory holding `config.toml` (the flag names the file itself) |
 | `SHANTI_JJ_BIN`        | —                 | Path to the `jj` binary when it is not on `PATH`                 |
-| `SHANTI_DATA`          | —                 | Directory for shanti's log file                                  |
+| `SHANTI_DATA`          | —                 | Directory for shanti's log file and `spaces.toml`               |
 | `SHANTI_LOGLEVEL`      | —                 | Log level, e.g. `debug` (`RUST_LOG` takes precedence)            |
 | `SHANTI_NO_HOOKS`      | `--no-hooks`      | Skip every post-create hook for this run (any non-empty value)   |
 | `GITHUB_TOKEN`         | —                 | Read-only token for the GitHub PR flow                           |
