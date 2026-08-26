@@ -271,7 +271,7 @@ pub fn persist_theme(path: &Path, name: &str) -> eyre::Result<()> {
 /// A neighbouring temporary file plus a rename, because rename within one
 /// directory is atomic: a crash or a full disk leaves either the old file or
 /// the new one, never a truncated config the next start would refuse to parse.
-fn write_atomically(path: &Path, contents: &str) -> eyre::Result<()> {
+pub(crate) fn write_atomically(path: &Path, contents: &str) -> eyre::Result<()> {
     let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
     if let Some(dir) = dir {
         std::fs::create_dir_all(dir)

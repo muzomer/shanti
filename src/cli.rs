@@ -199,6 +199,11 @@ pub struct Args {
     pub origins: Origins,
     /// Configuration file consulted, whether or not it existed.
     pub config_path: PathBuf,
+    /// File where shanti records what it remembers about the spaces it made —
+    /// today, the pull request each one came from. Resolved here rather than in
+    /// `App` so construction stays free of the environment: a test hands in its
+    /// own path, or leaves it empty and nothing is written at all.
+    pub state_path: PathBuf,
     /// The user asked for the configuration to be printed instead of the UI.
     pub show_config: bool,
     /// What to run after a space is created, already resolved.
@@ -254,6 +259,7 @@ impl Args {
                 hooks: Origin::Default,
             },
             config_path: PathBuf::new(),
+            state_path: PathBuf::new(),
             show_config: false,
             // No configuration layer was consulted, so there is nothing to run.
             // `disabled()` rather than `from_config(Config::default())`: the
@@ -280,6 +286,11 @@ impl Args {
     /// that presses Enter in it needs somewhere harmless to write: this is how
     /// it points that write at its own temp directory instead of the user's
     /// real `~/.config/shanti/config.toml`.
+    pub fn with_state_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.state_path = path.into();
+        self
+    }
+
     pub fn with_config_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.config_path = path.into();
         self
@@ -519,6 +530,13 @@ fn resolve(cli: Cli, sources: Sources, config: Config, config_path: PathBuf) -> 
         theme,
         origins,
         config_path,
+        // The data directory, not the config one: this file is shanti's own
+        // bookkeeping, not something a user is meant to edit. A home directory
+        // that cannot be resolved costs the memory, not the start — the store
+        // treats an empty path as "remember nothing".
+        state_path: crate::dirs::get_data_dir()
+            .map(|dir| dir.join(crate::space_meta::FILE_NAME))
+            .unwrap_or_default(),
         show_config: cli.show_config,
         hooks,
     })

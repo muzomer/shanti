@@ -156,7 +156,7 @@ pub fn resume_pr_flow(
 /// The PR is known. Either its repository is here, or it has to be cloned first.
 fn after_lookup(ctx: &mut AppContext, url: PrUrl, info: PrInfo, flow: Flow) -> ModalFlow {
     if ctx.repositories.select_repository_by_name(&url.repo) {
-        return open_worktree_for_pr(ctx, info, flow.auto);
+        return open_worktree_for_pr(ctx, &url, info, flow.auto);
     }
 
     if flow.auto {
@@ -248,7 +248,7 @@ fn after_clone(
         }
     }
 
-    let flow = open_worktree_for_pr(ctx, info, auto);
+    let flow = open_worktree_for_pr(ctx, url, info, auto);
 
     // The silent auto-clone path (`P` with a single configured repos dir) shows
     // neither the "clone with git?" confirm dialog nor the directory picker —
@@ -599,7 +599,12 @@ const MERGED_BRANCH_WARNING: &str = "PR is merged, branch may be deleted on remo
 
 /// Final step of the PR flow: select the existing worktree, create one outright
 /// (auto mode), or hand over to the branch-name prompt.
-fn open_worktree_for_pr(ctx: &mut AppContext, pr_info: github::PrInfo, auto: bool) -> ModalFlow {
+fn open_worktree_for_pr(
+    ctx: &mut AppContext,
+    url: &github::PrUrl,
+    pr_info: github::PrInfo,
+    auto: bool,
+) -> ModalFlow {
     // The PR branch may have been pushed since the last fetch; without this it is
     // invisible to the backend and the space is silently based on trunk instead.
     // A failed refresh only costs a stale view of the remotes, so it is not fatal.
@@ -627,8 +632,16 @@ fn open_worktree_for_pr(ctx: &mut AppContext, pr_info: github::PrInfo, auto: boo
             // gone from the text — the severity now says that in colour, and
             // repeating it cost characters the half-width status zone does not
             // have.
-            Ok(()) if pr_info.is_merged => ctx.notify.warn(MERGED_BRANCH_WARNING),
-            Ok(()) => ctx.notify.clear(),
+            Ok(path) => {
+                // Remembered here and not before: this is the first moment a
+                // space exists for the URL to belong to.
+                ctx.remember_pr(&path, &url.to_url());
+                if pr_info.is_merged {
+                    ctx.notify.warn(MERGED_BRANCH_WARNING)
+                } else {
+                    ctx.notify.clear()
+                }
+            }
             Err(e) => ctx.notify.error(format!("{:#}", e)),
         }
         return ModalFlow::Close;
@@ -658,6 +671,9 @@ fn open_worktree_for_pr(ctx: &mut AppContext, pr_info: github::PrInfo, auto: boo
         pr_info.is_merged.then(|| MERGED_BRANCH_WARNING.to_string()),
     );
     prompt.base_branch_hint = base_branch_hint;
+    // The prompt records the PR itself, once the user confirms: a URL the user
+    // typed and then escaped out of belongs to no space.
+    prompt.pr_url = Some(url.to_url());
     ModalFlow::Replace(Box::new(prompt))
 }
 
@@ -714,6 +730,7 @@ mod tests {
                     notify: &mut Notifications::default(),
                     args: &args,
                     pending_hooks: &mut Vec::new(),
+                    meta: &mut crate::space_meta::SpaceMeta::in_memory(),
                 };
                 modal.draw(frame, area, &mut ctx);
             })
@@ -812,6 +829,7 @@ mod tests {
             notify: &mut Notifications::default(),
             args: &args,
             pending_hooks: &mut Vec::new(),
+            meta: &mut crate::space_meta::SpaceMeta::in_memory(),
         };
 
         assert!(matches!(

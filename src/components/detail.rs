@@ -28,7 +28,7 @@ use crate::vcs::{RemoteState, Space};
 /// Fixed rather than counted from the fields present: the PR line is there for
 /// some spaces and not others, and a pane that changed height as the cursor
 /// moved would shove the list up and down under the reader's eyes.
-const FIELD_ROWS: u16 = 5;
+const FIELD_ROWS: u16 = 6;
 
 /// The pane's full height, borders included.
 pub const HEIGHT: u16 = FIELD_ROWS + 2;
@@ -47,7 +47,7 @@ pub fn fits(area: Rect) -> bool {
 ///
 /// `now` is passed in rather than read here so the age is derived from one
 /// clock reading per frame — and so a test can pin it.
-pub fn draw(frame: &mut Frame, area: Rect, space: Option<&Space>, now: i64) {
+pub fn draw(frame: &mut Frame, area: Rect, space: Option<&Space>, pr: Option<&str>, now: i64) {
     let block = Block::bordered()
         // Rounded, like the panes it sits under: the two borders meet, and one
         // square corner beside a round one reads as a different kind of widget.
@@ -69,7 +69,7 @@ pub fn draw(frame: &mut Frame, area: Rect, space: Option<&Space>, now: i64) {
     };
 
     let width = inner.width as usize;
-    let lines: Vec<Line> = fields(space, now)
+    let lines: Vec<Line> = fields(space, pr, now)
         .into_iter()
         .map(|(label, value, style)| field_line(label, value, style, width))
         .collect();
@@ -77,11 +77,15 @@ pub fn draw(frame: &mut Frame, area: Rect, space: Option<&Space>, now: i64) {
 }
 
 /// The pane's rows, in reading order: what was done, then how it stands against
-/// the remote and against the working copy, then where it is.
+/// the remote and against the working copy, then where it is and what it is for.
 ///
 /// Exactly [`FIELD_ROWS`] entries, always — a field with nothing to say renders
 /// as a blank value rather than disappearing, so every row keeps its place.
-fn fields(space: &Space, now: i64) -> Vec<(&'static str, String, ratatui::style::Style)> {
+fn fields(
+    space: &Space,
+    pr: Option<&str>,
+    now: i64,
+) -> Vec<(&'static str, String, ratatui::style::Style)> {
     let (latest, when) = match &space.tip {
         Some(tip) => {
             let age = tip.age(now);
@@ -113,6 +117,11 @@ fn fields(space: &Space, now: i64) -> Vec<(&'static str, String, ratatui::style:
             space.path.to_string_lossy().into_owned(),
             theme::secondary(),
         ),
+        // Always drawn, blank when there is none: the row is what keeps the
+        // pane's height fixed, and a space made by hand simply has no PR to
+        // name. Its own colour, because it is the one field that came from
+        // outside the repository.
+        ("PR", pr.unwrap_or_default().to_string(), theme::info_text()),
     ]
 }
 
@@ -194,9 +203,13 @@ mod tests {
     }
 
     fn screen(space: Option<&Space>, height: u16) -> String {
+        screen_with_pr(space, None, height)
+    }
+
+    fn screen_with_pr(space: Option<&Space>, pr: Option<&str>, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(60, height)).unwrap();
         terminal
-            .draw(|frame| draw(frame, frame.area(), space, 1_000_000))
+            .draw(|frame| draw(frame, frame.area(), space, pr, 1_000_000))
             .unwrap();
         terminal
             .backend()
@@ -267,6 +280,24 @@ mod tests {
         let screen = screen(None, HEIGHT);
         assert!(screen.contains("Detail"), "{screen}");
         assert!(!screen.contains("Path"), "{screen}");
+    }
+
+    /// The one field that does not come from the repository: a space made from a
+    /// pull request says which one, and a space made by hand leaves the row
+    /// blank rather than shortening the pane under the cursor.
+    #[test]
+    fn a_space_made_from_a_pull_request_names_it() {
+        let space = a_space(SpaceStatus::git(RemoteState::in_sync(), false), None);
+        let with = screen_with_pr(Some(&space), Some("https://github.com/o/r/pull/7"), HEIGHT);
+        assert!(with.contains("PR"), "{with}");
+        assert!(with.contains("/pull/7"), "{with}");
+
+        let without = screen(Some(&space), HEIGHT);
+        assert!(
+            without.contains("PR"),
+            "the row keeps its place:\n{without}"
+        );
+        assert!(!without.contains("pull/"), "{without}");
     }
 
     /// A long path must lose its head, not its tail: the tail is the part that

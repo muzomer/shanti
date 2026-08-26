@@ -6,13 +6,17 @@
 //! therefore means adding a `Modal` implementation, not another field and
 //! another match arm on `App`.
 
+use std::path::{Path, PathBuf};
+
 use color_eyre::eyre::{self, eyre};
 use ratatui::{
     layout::{Constraint, Flex, Layout, Rect},
     Frame,
 };
 
-use crate::{cli, hooks::HookPlan, keymap::InputMode, vcs, vcs::Backend};
+use tracing::debug;
+
+use crate::{cli, hooks::HookPlan, keymap::InputMode, space_meta::SpaceMeta, vcs, vcs::Backend};
 
 use super::{
     notify::Notifications, worktrees::SpaceEntry, Action, EventState, HelpEntry,
@@ -39,13 +43,17 @@ pub struct AppContext<'a> {
     /// handler is exactly the freeze the job pool exists to prevent — so it
     /// leaves the plan here and `App` submits it as soon as the stack settles.
     pub pending_hooks: &'a mut Vec<HookPlan>,
+    /// What shanti remembers about the spaces it made, so a flow that knows
+    /// something no backend can tell — which pull request a space is for — has
+    /// somewhere to put it.
+    pub meta: &'a mut SpaceMeta,
 }
 
 impl AppContext<'_> {
     /// Creates a space named `name` in the selected repository, through the
     /// repository's own (owner) backend, and shows it. Used by the PR flow,
     /// which never chooses a backend.
-    pub fn create_space(&mut self, name: &str) -> eyre::Result<()> {
+    pub fn create_space(&mut self, name: &str) -> eyre::Result<PathBuf> {
         let backend = self
             .repositories
             .selected_repository()
@@ -62,7 +70,7 @@ impl AppContext<'_> {
     /// space to make; a single-backend repository has only one to choose.
     /// Reporting is left to the caller: only it knows whether success is worth a
     /// message of its own.
-    pub fn create_space_via(&mut self, name: &str, backend: Backend) -> eyre::Result<()> {
+    pub fn create_space_via(&mut self, name: &str, backend: Backend) -> eyre::Result<PathBuf> {
         let repo = self
             .repositories
             .selected_backend(backend)
@@ -80,12 +88,27 @@ impl AppContext<'_> {
             self.pending_hooks.push(plan);
         }
 
+        // The path is returned rather than the whole space: it is the key
+        // everything outside `vcs` files a space under — what the shell is
+        // handed on Enter, and what [`SpaceMeta`] remembers a pull request by.
+        let path = space.path.clone();
         self.worktrees.add(SpaceEntry {
             repo_name,
             repo_path,
             space,
         });
-        Ok(())
+        Ok(path)
+    }
+
+    /// Remember which pull request a space came from.
+    ///
+    /// A failed write is logged and dropped rather than returned: the space
+    /// exists and works, and refusing to open it because a cache file could not
+    /// be written would trade the whole feature for its footnote.
+    pub fn remember_pr(&mut self, path: &Path, url: &str) {
+        if let Err(error) = self.meta.remember_pr(path, url) {
+            debug!(space = %path.display(), %error, "could not record the pull request of a space");
+        }
     }
 }
 

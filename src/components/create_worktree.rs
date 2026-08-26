@@ -34,6 +34,13 @@ pub struct CreateWorktreeComponent {
     colocated: bool,
     pub base_branch_hint: Option<String>,
     pub warning: Option<String>,
+    /// The pull request this prompt was opened for, when it was.
+    ///
+    /// Carried through the prompt rather than recorded when the flow opened it,
+    /// because the space does not exist until the user presses Enter here — and
+    /// a PR the user then abandoned must not be remembered against a space that
+    /// was never made.
+    pub pr_url: Option<String>,
 }
 
 impl CreateWorktreeComponent {
@@ -46,6 +53,7 @@ impl CreateWorktreeComponent {
             colocated,
             base_branch_hint: None,
             warning: None,
+            pr_url: None,
         }
     }
 
@@ -65,6 +73,7 @@ impl CreateWorktreeComponent {
             colocated,
             base_branch_hint: None,
             warning,
+            pr_url: None,
         }
     }
 
@@ -210,7 +219,12 @@ impl Modal for CreateWorktreeComponent {
                     match ctx.create_space_via(&self.new_worktree_name, self.backend) {
                         // The new row is the success message; all that is left
                         // to do is retire a failure the user has since fixed.
-                        Ok(()) => ctx.notify.clear(),
+                        Ok(path) => {
+                            if let Some(url) = &self.pr_url {
+                                ctx.remember_pr(&path, url);
+                            }
+                            ctx.notify.clear()
+                        }
                         Err(e) => ctx.notify.error(format!("{:#}", e)),
                     }
                 }

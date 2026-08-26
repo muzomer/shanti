@@ -24,6 +24,7 @@ use crate::{
     hooks::{self, HookOutcome, HookPlan, HookReport},
     jobs::{Completion, Job, JobId, JobResult, Worker},
     keymap::{self, InputMode},
+    space_meta::SpaceMeta,
     vcs::{now_seconds, BoxedVcs, Consequence, DeletionRisk, RepoId, Space},
 };
 
@@ -154,6 +155,11 @@ pub struct App {
     /// submitted. Drained by [`App::pump_hooks`] the moment the stack settles,
     /// so it is only ever non-empty inside one key press.
     pending_hooks: Vec<HookPlan>,
+    /// What shanti remembers about the spaces it made — which pull request each
+    /// came from. Loaded once at construction and lent to every modal, so the
+    /// detail pane can answer "why does this space exist?" without asking the
+    /// disk on every frame.
+    space_meta: SpaceMeta,
     /// The hook jobs still running; a subset of `outstanding`.
     ///
     /// Counted for the indicator: `npm install` runs for minutes, and a user
@@ -202,6 +208,10 @@ impl App {
         let scan_roots = args.repos_dirs.iter().map(PathBuf::from).collect();
 
         Self {
+            // Reads the one file the caller named, and nothing else: an `Args`
+            // with no state path (the test seam) gives a store that remembers
+            // in memory and writes nowhere.
+            space_meta: SpaceMeta::load(args.state_path.clone()),
             worktrees_component: WorktreesComponent::new(Vec::new()),
             repositories_component: RepositoriesComponent::new(Vec::new()),
             notifications: Notifications::default(),
@@ -671,6 +681,10 @@ impl App {
         // filtered. One clock reading goes with it, so every age in the pane is
         // measured from the same instant.
         let selected_space = self.worktrees_component.selected_space();
+        let selected_pr = selected_space
+            .as_ref()
+            .and_then(|space| self.space_meta.pr_of(&space.path))
+            .map(str::to_owned);
         let now = now_seconds();
 
         let Self {
@@ -681,6 +695,7 @@ impl App {
             args,
             focus_pane,
             pending_hooks,
+            space_meta,
             ..
         } = self;
 
@@ -707,7 +722,13 @@ impl App {
                 notifications.current(),
             );
             if let Some(detail_area) = detail_area {
-                detail::draw(frame, detail_area, selected_space.as_ref(), now);
+                detail::draw(
+                    frame,
+                    detail_area,
+                    selected_space.as_ref(),
+                    selected_pr.as_deref(),
+                    now,
+                );
             }
         } else {
             // The single-pane view keeps its muted border — interactive, but not
@@ -722,7 +743,13 @@ impl App {
                 notifications.current(),
             );
             if let Some(detail_area) = detail_area {
-                detail::draw(frame, detail_area, selected_space.as_ref(), now);
+                detail::draw(
+                    frame,
+                    detail_area,
+                    selected_space.as_ref(),
+                    selected_pr.as_deref(),
+                    now,
+                );
             }
         }
 
@@ -734,6 +761,7 @@ impl App {
             // Drawing creates nothing, so nothing is ever left here by a draw;
             // the field is part of the context, not of this call.
             pending_hooks,
+            meta: space_meta,
         };
         // Bottom-to-top: each modal clears its own area, so the one on top wins.
         for modal in modals.iter_mut() {
@@ -901,6 +929,7 @@ impl App {
             modals,
             args,
             pending_hooks,
+            space_meta,
             ..
         } = self;
 
@@ -911,6 +940,7 @@ impl App {
                 notify: notifications,
                 args,
                 pending_hooks,
+                meta: space_meta,
             };
             match modals.last_mut() {
                 Some(modal) => modal.handle(action, &mut ctx),
@@ -992,6 +1022,7 @@ impl App {
             notifications,
             args,
             pending_hooks,
+            space_meta,
             ..
         } = self;
         let next = {
@@ -1001,6 +1032,7 @@ impl App {
                 notify: notifications,
                 args,
                 pending_hooks,
+                meta: space_meta,
             };
             resume_pr_flow(&mut ctx, flow.step, outcome)
         };

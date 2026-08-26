@@ -19,6 +19,20 @@ pub struct PrInfo {
     pub is_merged: bool,
 }
 
+impl PrUrl {
+    /// The canonical URL this was parsed from.
+    ///
+    /// Rebuilt rather than kept, so what is remembered against a space is one
+    /// canonical form — a URL pasted with a `#discussion` fragment or a trailing
+    /// slash files under the same key as the plain one.
+    pub fn to_url(&self) -> String {
+        format!(
+            "https://github.com/{}/{}/pull/{}",
+            self.owner, self.repo, self.number
+        )
+    }
+}
+
 /// Parses a GitHub PR URL of the form:
 /// `https://github.com/{owner}/{repo}/pull/{number}`
 pub fn parse_pr_url(url: &str) -> eyre::Result<PrUrl> {

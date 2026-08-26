@@ -2500,3 +2500,51 @@ fn detail_pane(screen: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+/// The PR a space came from is the one piece of context no backend records, so
+/// shanti keeps it itself — and the detail pane is where it comes back out.
+#[test]
+fn a_space_created_from_a_pr_remembers_which_pr() {
+    let mut f = Fixture::new();
+    // Points the memory at this test's own temp directory: nothing here can
+    // reach the file under the user's real data directory.
+    let state_path = f.worktrees_dir.path().join("spaces.toml");
+    f.args = f.args.clone().with_state_path(&state_path);
+    f.reload();
+    f.stub_pr_branch("feature-from-pr", false);
+
+    f.press_char('p');
+    submit_pr(&mut f, "https://github.com/acme/alpha/pull/7");
+    // The lookup lands on the name prompt, already filled with the PR's branch.
+    assert_eq!(f.modal(), Some(ModalKind::CreateWorktree));
+    f.press(key(KeyCode::Enter));
+
+    let screen = f.screen();
+    assert!(
+        screen.contains("/pull/7"),
+        "the pane should name the PR the space came from:\n{screen}"
+    );
+    assert!(
+        state_path.is_file(),
+        "and it should survive this run, not just this frame"
+    );
+}
+
+/// A space made by hand has no PR, and the row stays blank rather than borrowing
+/// the last one shown.
+#[test]
+fn a_space_created_by_hand_shows_no_pr() {
+    let mut f = Fixture::new();
+    let state_path = f.worktrees_dir.path().join("spaces.toml");
+    f.args = f.args.clone().with_state_path(&state_path);
+    f.reload();
+
+    f.press_char('n');
+    f.press_char('g');
+    f.press(key(KeyCode::Enter));
+    f.type_str("feature-by-hand");
+    f.press(key(KeyCode::Enter));
+
+    let screen = f.screen();
+    assert!(!screen.contains("pull/"), "no PR was involved:\n{screen}");
+}

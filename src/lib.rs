@@ -2,13 +2,14 @@ pub mod app;
 pub mod cli;
 mod components;
 pub mod config;
-mod dirs;
+pub(crate) mod dirs;
 pub mod events;
 pub mod github;
 pub mod hooks;
 pub mod jobs;
 pub mod keymap;
 pub mod logs;
+pub mod space_meta;
 pub mod theme;
 pub mod vcs;
 
