@@ -2062,16 +2062,30 @@ fn screen_at(f: &mut Fixture, width: u16, height: u16) -> String {
         .join("\n")
 }
 
-/// The bottom row, where the status zone and the footer share one border.
+/// The border row carrying the mode indicator and the keybinding footer.
+///
+/// No longer simply the screen's last row: the detail pane sits below the spaces
+/// list, so the list's own bottom border — the border the footer is drawn on —
+/// is now mid-screen. The mode indicator is what identifies it, because the
+/// status zone is always drawn there and nowhere else.
 fn bottom_row(screen: &str) -> String {
-    screen.lines().last().unwrap_or_default().to_owned()
+    screen
+        .lines()
+        .find(|line| line.contains(" NORMAL ") || line.contains(" INSERT "))
+        .or_else(|| screen.lines().last())
+        .unwrap_or_default()
+        .to_owned()
 }
 
 #[test]
 fn the_space_list_names_its_keys_without_opening_help() {
     let mut f = Fixture::new().wide();
-    let bottom = bottom_row(&f.screen());
+    let screen = f.screen();
 
+    // Whole screen, not one row: in the two-pane view each pane carries its own
+    // footer on its own border — navigation on the repositories side, the
+    // space actions on the spaces side — and between them they must still name
+    // every key without the help popup being opened.
     for hint in [
         "[j/k] move",
         "[n] new",
@@ -2080,13 +2094,14 @@ fn the_space_list_names_its_keys_without_opening_help() {
         "[?] help",
     ] {
         assert!(
-            bottom.contains(hint),
-            "the footer should carry {hint}:\n{bottom}"
+            screen.contains(hint),
+            "the footers should carry {hint}:\n{screen}"
         );
     }
-    // The status zone keeps its own end of the same border.
+    // The status zone keeps its own end of the spaces pane's border.
+    let bottom = bottom_row(&screen);
     assert!(
-        bottom.contains(" NORMAL "),
+        bottom.contains(" NORMAL ") && bottom.contains("[?] help"),
         "the mode indicator and the footer must coexist:\n{bottom}"
     );
 }
@@ -2404,4 +2419,84 @@ fn the_help_lists_the_theme_picker() {
         screen.contains("Choose a colour scheme"),
         "the theme binding is missing from the help:\n{screen}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The detail pane (shanti-nbt.7)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_detail_pane_describes_the_highlighted_space() {
+    let mut f = Fixture::new();
+    let screen = f.screen();
+
+    // Every field comes from the snapshot the list already holds: the subject of
+    // the last commit, its age, where the space stands against the remote, what
+    // the working copy looks like, and the path the user would `cd` to.
+    assert!(screen.contains("Detail"), "{screen}");
+    assert!(screen.contains("init"), "the commit subject:\n{screen}");
+    assert!(
+        screen.contains("never pushed"),
+        "the remote half:\n{screen}"
+    );
+    assert!(screen.contains("feature-one"), "the path:\n{screen}");
+}
+
+/// The pane is a detail *of the selection*, so it has to follow it. Both spaces
+/// here are git worktrees of the same repository, which makes the path the field
+/// that must change.
+#[test]
+fn moving_the_selection_moves_the_detail_pane_with_it() {
+    let mut f = Fixture::new();
+
+    f.press_char('n');
+    f.press_char('g');
+    f.press(key(KeyCode::Enter));
+    f.type_str("feature-two");
+    f.press(key(KeyCode::Enter));
+
+    let first = f.screen();
+    f.press_char('j');
+    let second = f.screen();
+
+    assert_ne!(
+        detail_pane(&first),
+        detail_pane(&second),
+        "the pane must redraw for the newly highlighted space"
+    );
+    // Which of the two the cursor lands on is the list's business — creating a
+    // space leaves the cursor on it, and `j` wraps — so what is asserted here is
+    // that each frame's pane describes the row that frame highlights.
+    let (first, second) = (detail_pane(&first), detail_pane(&second));
+    assert!(
+        first.contains("feature-two") && second.contains("feature-one"),
+        "each pane should describe its own frame's highlighted space:\n{first}\n---\n{second}"
+    );
+}
+
+/// Hidden rather than clipped: the list keeps its floor, and a short terminal
+/// loses the detail instead of losing rows of the list it is a detail of.
+#[test]
+fn a_short_terminal_drops_the_pane_and_keeps_the_list() {
+    let mut f = Fixture::new();
+    let screen = screen_at(&mut f, SINGLE_W, 12);
+
+    assert!(
+        !screen.contains("Detail"),
+        "the pane must be gone:\n{screen}"
+    );
+    assert!(
+        screen.contains("Worktrees"),
+        "the list must survive:\n{screen}"
+    );
+}
+
+/// The rows of the pane, so a test can compare two frames' worth of detail
+/// without the list above them counting as a difference.
+fn detail_pane(screen: &str) -> String {
+    screen
+        .lines()
+        .skip_while(|line| !line.contains("Detail"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }

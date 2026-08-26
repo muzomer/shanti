@@ -1,5 +1,6 @@
 mod confirm;
 mod create_worktree;
+pub mod detail;
 mod filter;
 mod help;
 mod list;

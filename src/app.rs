@@ -14,7 +14,7 @@ use tracing::{debug, warn};
 use crate::{
     cli,
     components::{
-        repositories_pane_bindings, resume_pr_flow, spaces_of, worktrees_bindings, Action,
+        detail, repositories_pane_bindings, resume_pr_flow, spaces_of, worktrees_bindings, Action,
         Activity, AppContext, ConfirmComponent, CreateWorktreeComponent, EventState, HelpComponent,
         Modal, ModalFlow, ModalKind, Notifications, PrCommand, PrRequests, PrStep,
         PrWorktreeComponent, RepositoriesComponent, RepositoriesModal, SpaceEntry, ThemeModal,
@@ -24,7 +24,7 @@ use crate::{
     hooks::{self, HookOutcome, HookPlan, HookReport},
     jobs::{Completion, Job, JobId, JobResult, Worker},
     keymap::{self, InputMode},
-    vcs::{BoxedVcs, Consequence, DeletionRisk, RepoId, Space},
+    vcs::{now_seconds, BoxedVcs, Consequence, DeletionRisk, RepoId, Space},
 };
 
 /// Which of the two panes holds the keyboard, when both are on screen.
@@ -48,6 +48,26 @@ const REPOS_PANE_MIN: u16 = 28;
 /// Whether the frame has room for two panes side by side. Below the sum of the
 /// two pane minimums — or under the shared height floor — the layout drops to
 /// the single spaces list rather than draw two columns too narrow to use.
+/// Take the detail pane's rows off the bottom of the spaces area, when there are
+/// rows to spare.
+///
+/// The list has the first claim: it keeps its own [`MIN_HEIGHT`] floor and the
+/// pane appears only out of what is left, so a short terminal loses the detail
+/// rather than losing rows of the list it is a detail *of*. Deciding it here,
+/// beside the two-pane rule, keeps every layout choice in the one place that
+/// knows the terminal's size.
+fn split_off_detail(area: Rect) -> (Rect, Option<Rect>) {
+    if !detail::fits(area) {
+        return (area, None);
+    }
+    let [list, pane] = Layout::vertical([
+        Constraint::Min(MIN_HEIGHT),
+        Constraint::Length(detail::HEIGHT),
+    ])
+    .areas(area);
+    (list, Some(pane))
+}
+
 fn two_pane_fits(area: Rect) -> bool {
     area.height >= MIN_HEIGHT && area.width >= REPOS_PANE_MIN + MIN_WIDTH
 }
@@ -646,6 +666,12 @@ impl App {
         if self.worktrees_component.set_repo_scope(scope) {
             self.worktrees_component.select_first();
         }
+        // Read once per frame, before the fields are borrowed apart: the detail
+        // pane needs the highlighted space, and asking for it needs the list
+        // filtered. One clock reading goes with it, so every age in the pane is
+        // measured from the same instant.
+        let selected_space = self.worktrees_component.selected_space();
+        let now = now_seconds();
 
         let Self {
             worktrees_component,
@@ -671,25 +697,33 @@ impl App {
             let repos_focused = stack_empty && *focus_pane == Pane::Repositories;
             let spaces_focused = stack_empty && *focus_pane == Pane::Spaces;
             repositories_component.draw_pane(frame, left, mode, repos_focused);
+            let (list, detail_area) = split_off_detail(right);
             worktrees_component.draw(
                 frame,
-                right,
+                list,
                 mode,
                 spaces_focused,
                 spaces_focused,
                 notifications.current(),
             );
+            if let Some(detail_area) = detail_area {
+                detail::draw(frame, detail_area, selected_space.as_ref(), now);
+            }
         } else {
             // The single-pane view keeps its muted border — interactive, but not
             // one of two panes competing for a focus marker.
+            let (list, detail_area) = split_off_detail(full_area);
             worktrees_component.draw(
                 frame,
-                full_area,
+                list,
                 mode,
                 stack_empty,
                 false,
                 notifications.current(),
             );
+            if let Some(detail_area) = detail_area {
+                detail::draw(frame, detail_area, selected_space.as_ref(), now);
+            }
         }
 
         let mut ctx = AppContext {

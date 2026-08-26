@@ -240,6 +240,13 @@ pub fn tone(tone: Tone) -> Color {
 
 // --- Composed styles ---------------------------------------------------------
 
+/// Text carrying a status [`Tone`], for the places that spell a status out in
+/// words rather than in a glyph. Goes through [`tone`] like everything else, so
+/// there is still exactly one tone-to-colour mapping.
+pub fn tone_text(tone_of: Tone) -> Style {
+    Style::new().fg(tone(tone_of))
+}
+
 /// The application canvas behind the main panel.
 pub fn canvas() -> Style {
     Style::new().bg(background())
