@@ -33,6 +33,7 @@ pub mod jj;
 mod repo;
 mod space;
 pub mod status;
+mod tip;
 
 use std::path::{Path, PathBuf};
 
@@ -46,6 +47,7 @@ pub use discover::{backend_at, backends_at, discover, Discovered};
 pub use repo::{Repo, RepoId};
 pub use space::Space;
 pub use status::{JjLocal, LocalState, RemoteState, SpaceStatus, StatusGlyph, Tone};
+pub use tip::{now_seconds, SpaceTip};
 
 use crate::hooks::{HookPlan, HookSettings, HookTarget};
 use git::GitBackend;

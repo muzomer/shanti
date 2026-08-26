@@ -15,7 +15,7 @@ use tracing::debug;
 use super::cmd::JjCli;
 use super::status;
 use super::template::{Record, Template};
-use crate::vcs::JjLocal;
+use crate::vcs::{JjLocal, SpaceTip};
 
 /// The fields shanti reads for every workspace, as jj template expressions.
 ///
@@ -37,6 +37,13 @@ pub const WORKSPACES: Template = Template::new(&[
     ("conflicted", "target.conflict()"),
     ("divergent", "target.divergent()"),
     ("bookmarks", status::WORKSPACE_BOOKMARKS),
+    ("subject", "target.description().first_line()"),
+    // Unix seconds, not jj's `.ago()`: the listing outlives many frames, so the
+    // age has to be derived when it is drawn rather than frozen when it is read.
+    (
+        "committed_at",
+        "target.committer().timestamp().format(\"%s\")",
+    ),
 ]);
 
 /// One row of `jj workspace list`.
@@ -55,11 +62,21 @@ pub struct Workspace {
     /// Local bookmarks sitting on the workspace's head, in jj's order. Empty
     /// for the ordinary jj workspace, which carries no bookmark at all.
     pub bookmarks: Vec<String>,
+    /// The working-copy commit's description and date.
+    ///
+    /// Optional because only the timestamp can fail to parse, and a workspace
+    /// whose date jj rendered unexpectedly is still a workspace: the detail goes
+    /// missing, the space does not.
+    pub tip: Option<SpaceTip>,
 }
 
 impl Workspace {
     /// Build a workspace from a record rendered by [`WORKSPACES`].
     pub fn from_record(record: &Record) -> eyre::Result<Self> {
+        // The subject is a template field like any other and is read strictly.
+        // Only the timestamp is allowed to be unreadable, and an unreadable one
+        // costs the tip rather than the whole row — see [`Workspace::tip`].
+        let subject = record.get("subject")?;
         Ok(Self {
             name: record.get("name")?.to_owned(),
             root: PathBuf::from(record.get("root")?),
@@ -69,6 +86,11 @@ impl Workspace {
                 divergent: record.boolean("divergent")?,
             },
             bookmarks: record.list("bookmarks")?,
+            tip: record
+                .get("committed_at")?
+                .parse::<i64>()
+                .ok()
+                .map(|committed_at| SpaceTip::new(subject, committed_at)),
         })
     }
 }
@@ -174,8 +196,17 @@ mod tests {
 
     #[test]
     fn a_row_becomes_a_workspace() {
-        let line = ["feature", "/w/feature", "false", "true", "false", "feature"]
-            .join(&FIELD_SEPARATOR.to_string());
+        let line = [
+            "feature",
+            "/w/feature",
+            "false",
+            "true",
+            "false",
+            "feature",
+            "wire the pane up",
+            "1000000",
+        ]
+        .join(&FIELD_SEPARATOR.to_string());
         let records = record(&line).unwrap();
         let workspace = Workspace::from_record(&records[0]).unwrap();
 
@@ -190,14 +221,62 @@ mod tests {
             }
         );
         assert_eq!(workspace.bookmarks, ["feature"]);
+        assert_eq!(
+            workspace.tip,
+            Some(SpaceTip::new("wire the pane up", 1_000_000))
+        );
+    }
+
+    /// jj's working-copy commit is usually undescribed, and a date shanti cannot
+    /// read is a jj it does not recognise. Neither may cost the row: the detail
+    /// goes missing, the workspace still lists.
+    #[test]
+    fn an_unreadable_date_costs_the_tip_and_nothing_else() {
+        let undescribed = [
+            "feature",
+            "/w/feature",
+            "true",
+            "false",
+            "false",
+            "",
+            "",
+            "1000000",
+        ]
+        .join(&FIELD_SEPARATOR.to_string());
+        let workspace = Workspace::from_record(&record(&undescribed).unwrap()[0]).unwrap();
+        assert_eq!(workspace.tip, Some(SpaceTip::new("", 1_000_000)));
+
+        let undated = [
+            "feature",
+            "/w/feature",
+            "true",
+            "false",
+            "false",
+            "",
+            "hi",
+            "yesterday",
+        ]
+        .join(&FIELD_SEPARATOR.to_string());
+        let workspace = Workspace::from_record(&record(&undated).unwrap()[0]).unwrap();
+        assert_eq!(workspace.name, "feature");
+        assert_eq!(workspace.tip, None);
     }
 
     /// The common case: a workspace nobody has bookmarked. It must read as no
     /// bookmarks, not as one bookmark with an empty name.
     #[test]
     fn a_workspace_on_no_bookmark_lists_none() {
-        let line = ["feature", "/w/feature", "true", "false", "false", ""]
-            .join(&FIELD_SEPARATOR.to_string());
+        let line = [
+            "feature",
+            "/w/feature",
+            "true",
+            "false",
+            "false",
+            "",
+            "",
+            "1000000",
+        ]
+        .join(&FIELD_SEPARATOR.to_string());
         let records = record(&line).unwrap();
         assert!(Workspace::from_record(&records[0])
             .unwrap()
@@ -207,8 +286,17 @@ mod tests {
 
     #[test]
     fn a_non_boolean_flag_is_an_error_rather_than_a_false() {
-        let line = ["feature", "/w/feature", "yes", "false", "false", ""]
-            .join(&FIELD_SEPARATOR.to_string());
+        let line = [
+            "feature",
+            "/w/feature",
+            "yes",
+            "false",
+            "false",
+            "",
+            "",
+            "1000000",
+        ]
+        .join(&FIELD_SEPARATOR.to_string());
         let records = record(&line).unwrap();
         let error = Workspace::from_record(&records[0]).unwrap_err().to_string();
 

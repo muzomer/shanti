@@ -282,6 +282,7 @@ impl JjBackend {
             workspace.root.clone(),
             SpaceStatus::jj(remote, workspace.local),
         )
+        .with_tip(workspace.tip.clone())
     }
 }
 

@@ -6,7 +6,7 @@ use git2::{Cred, RemoteCallbacks};
 use std::{fs, path::Path};
 use tracing::{debug, error};
 
-use crate::vcs::{Backend, RemoteState, Repo, Space, SpaceStatus, Vcs};
+use crate::vcs::{Backend, RemoteState, Repo, Space, SpaceStatus, SpaceTip, Vcs};
 
 use super::worktree::remove_worktree;
 
@@ -42,6 +42,21 @@ fn remote_state_of_branch(repo: &git2::Repository, branch: &git2::Branch) -> Rem
         // fact.
         None => RemoteState::Unknown,
     }
+}
+
+/// The commit `branch` points at, as the backend-neutral [`SpaceTip`].
+///
+/// Free of extra I/O: the branch is already open here, and peeling it reads
+/// objects the repository has in hand. Every failure — a branch with no target,
+/// an unborn branch on a freshly created worktree — is `None` rather than an
+/// error, because a space with no readable head is still a space worth listing.
+fn tip_of_branch(branch: &git2::Branch) -> Option<SpaceTip> {
+    let commit = branch.get().peel_to_commit().ok()?;
+    // `summary` is git's own first line, already stripped of the trailing
+    // newline; a message that is not valid UTF-8 reads as no subject rather
+    // than as lossy mojibake.
+    let subject = commit.summary().unwrap_or_default();
+    Some(SpaceTip::new(subject, commit.time().seconds()))
 }
 
 /// How many files in the worktree at `worktree_path` hold work no commit has,
@@ -296,6 +311,7 @@ impl GitBackend {
             path,
             SpaceStatus::git(remote, dirty),
         )
+        .with_tip(branch.and_then(tip_of_branch))
     }
 }
 

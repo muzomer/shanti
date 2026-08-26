@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{Backend, RepoId, SpaceStatus};
+use super::{Backend, RepoId, SpaceStatus, SpaceTip};
 
 /// A checked-out place to work, belonging to exactly one [`Repo`](super::Repo).
 ///
@@ -34,6 +34,12 @@ pub struct Space {
     /// keep spaces across frames and a background refresh can replace them
     /// wholesale later.
     pub status: SpaceStatus,
+    /// The last commit made here, when the backend could read one.
+    ///
+    /// `None` means "not read", never "no commits": a space whose head cannot
+    /// be resolved — a brand-new worktree on an unborn branch, a jj listing that
+    /// predates the field — still lists, with the detail simply absent.
+    pub tip: Option<SpaceTip>,
 }
 
 impl Space {
@@ -52,7 +58,18 @@ impl Space {
             name: name.into(),
             path: path.into(),
             status,
+            tip: None,
         }
+    }
+
+    /// The same space, carrying the head commit the backend just read.
+    ///
+    /// A builder step rather than another argument to [`Space::new`]: the tip is
+    /// the one part a backend may legitimately fail to read, and every existing
+    /// call site that has no tip to offer should stay unchanged.
+    pub fn with_tip(mut self, tip: Option<SpaceTip>) -> Self {
+        self.tip = tip;
+        self
     }
 
     /// Whether the space still exists on disk.
