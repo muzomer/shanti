@@ -21,12 +21,11 @@
 //! and a test may hold as many live fixtures as it likes.
 
 use std::path::Path;
-use std::process::Command;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{backend::TestBackend, Terminal};
 use shanti::app::{App, Pane};
 use shanti::cli::Args;
@@ -34,10 +33,12 @@ use shanti::config::{Config, Hooks};
 use shanti::events::AppEvent;
 use shanti::github::PrInfo;
 use shanti::hooks::HookSettings;
-use shanti::jobs::Worker;
 use shanti::theme::{self, scheme};
 use shanti::{EventState, ModalKind};
 use tempfile::{tempdir, TempDir};
+
+mod common;
+use common::{boot, booting, ch, ctrl, git, init_repo, key};
 
 // The real values `App::handle_key` returns, now that `EventState` is exported
 // from the crate root. Assertions compare against the enum, not its Debug text.
@@ -440,82 +441,6 @@ impl Fixture {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Builds an app and runs its startup scan to completion.
-///
-/// Startup is asynchronous: `App::with_args` reads nothing from disk and the
-/// list is filled by scan jobs. A test that wants a populated list therefore has
-/// to pump results the way `run_app` does — which is also what keeps every test
-/// below on the streaming path rather than on a synchronous one nobody ships.
-fn boot(args: &Args) -> (App, Receiver<AppEvent>) {
-    let (mut app, results) = booting(args);
-    while app.is_scanning() {
-        match results.recv_timeout(Duration::from_secs(10)) {
-            Ok(AppEvent::Job(result)) => app.handle_job(result),
-            Ok(other) => panic!("expected a job result, got {other:?}"),
-            Err(error) => panic!("the startup scan never finished: {error}"),
-        }
-    }
-    (app, results)
-}
-
-/// The same app with its scan still in flight — the state the user sees first.
-fn booting(args: &Args) -> (App, Receiver<AppEvent>) {
-    // The default lookup fails loudly: a PR test that forgot to stub sees an
-    // error message rather than silently reaching out to github.com.
-    let mut app = App::with_args(
-        args.clone(),
-        Arc::new(|_| Err(color_eyre::eyre::eyre!("no PR lookup was stubbed"))),
-    );
-    let (sender, results) = mpsc::channel();
-    // One thread, so the scan of the first repos dir finishes before the second
-    // one starts: a test that stops half way through a stream then knows which
-    // half it has.
-    app.attach_worker(Worker::with_threads(sender, 1));
-    (app, results)
-}
-
-fn ch(c: char) -> KeyEvent {
-    KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
-}
-
-fn key(code: KeyCode) -> KeyEvent {
-    KeyEvent::new(code, KeyModifiers::NONE)
-}
-
-fn ctrl(c: char) -> KeyEvent {
-    KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
-}
-
-fn git(cwd: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        // Keep the developer's global/system git config out of the fixture.
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .env("GIT_AUTHOR_NAME", "shanti test")
-        .env("GIT_AUTHOR_EMAIL", "test@example.com")
-        .env("GIT_COMMITTER_NAME", "shanti test")
-        .env("GIT_COMMITTER_EMAIL", "test@example.com")
-        .output()
-        .expect("git is required to run these tests");
-    assert!(
-        output.status.success(),
-        "git {:?} failed: {}",
-        args,
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-fn init_repo(repos_dir: &Path, name: &str) {
-    let path = repos_dir.join(name);
-    std::fs::create_dir_all(&path).expect("could not create repo dir");
-    git(&path, &["init", "-q", "-b", "main"]);
-    std::fs::write(path.join("README.md"), "fixture\n").expect("could not write README");
-    git(&path, &["add", "README.md"]);
-    git(&path, &["commit", "-q", "-m", "init"]);
-}
 
 fn add_worktree(repos_dir: &Path, repo: &str, worktrees_dir: &Path, branch: &str) {
     let repo_path = repos_dir.join(repo);

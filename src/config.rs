@@ -92,7 +92,14 @@ pub struct Config {
     pub worktrees_dir: Option<PathBuf>,
     /// Whether to fetch every repository at startup.
     pub run_fetch: bool,
-    /// Backend preferred when creating a workspace in a new repository.
+    /// Backend preferred for a repository that genuinely offers a choice.
+    ///
+    /// Nothing reads this yet, and the scope it will have is narrower than the
+    /// name suggests: for a repository driven by one backend there is no choice
+    /// to express — `vcs::discover` reads the layout on disk and that is the
+    /// answer. The only repository with a real choice is a **colocated** one,
+    /// where git and jj can both drive the working copy, so this is the default
+    /// for that case rather than a global preference.
     pub backend: Backend,
     /// Command used to open a worktree in an editor, e.g. `nvim` or `code`.
     pub editor: Option<String>,

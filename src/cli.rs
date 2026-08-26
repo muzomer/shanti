@@ -341,12 +341,12 @@ impl Args {
             &self.run_fetch.to_string(),
             origins.run_fetch,
         ));
-        out.push_str(&setting(
+        out.push_str(&reserved_setting(
             "backend",
             &format!("{:?}", self.backend).to_lowercase(),
             origins.backend,
         ));
-        out.push_str(&setting(
+        out.push_str(&reserved_setting(
             "editor",
             self.editor.as_deref().unwrap_or("<unset>"),
             origins.editor,
@@ -379,6 +379,22 @@ impl Args {
 
 fn setting(name: &str, value: &str, origin: Origin) -> String {
     format!("{name:<14} = {value}  ({origin})\n")
+}
+
+/// Same as [`setting`], for a key the file accepts but nothing acts on yet.
+///
+/// The marker is what keeps the report honest. `backend` and `editor` are
+/// parsed, validated and given an origin exactly like the keys that work, so
+/// without it `--show-config` is the one surface that tells a user their value
+/// took effect — the report exists to answer "why is it using that?", and a key
+/// that answers it with a value nothing reads is the report lying.
+///
+/// They are marked rather than removed because [`Config`] is
+/// `deny_unknown_fields`: dropping a field would turn an existing file that
+/// names it into a *startup error*, which is a far worse answer to a key that
+/// merely does nothing.
+fn reserved_setting(name: &str, value: &str, origin: Origin) -> String {
+    format!("{name:<14} = {value}  ({origin}) [not yet used]\n")
 }
 
 /// Merges the three layers and normalises every path that survives.
@@ -1245,11 +1261,11 @@ mod tests {
             "{report}"
         );
         assert!(
-            report.contains("backend        = jujutsu  (config file)"),
+            report.contains("backend        = jujutsu  (config file) [not yet used]"),
             "{report}"
         );
         assert!(
-            report.contains("editor         = nvim  (config file)"),
+            report.contains("editor         = nvim  (config file) [not yet used]"),
             "{report}"
         );
         assert!(

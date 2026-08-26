@@ -4,8 +4,8 @@
 //! request, and cloning a repository that is not here yet — and neither may run
 //! on the key handler. So the flow is cut in half at every slow step:
 //!
-//! * the half *before* the job raises a [`PrCommand`] on [`PrRequests`], leaves
-//!   the modal in its waiting state and returns to the loop immediately;
+//! * the half *before* the job leaves a [`BackgroundWork::Routed`] on the
+//!   context, leaves the modal in its waiting state and returns to the loop;
 //! * the half *after* it is [`resume_pr_flow`], which the loop calls once the answer has
 //!   landed, with the same [`AppContext`] a key handler would have had.
 //!
@@ -13,7 +13,7 @@
 //! the job, so nothing about a flow in progress is held by `App` beyond the job
 //! id it must be able to cancel.
 
-use std::{cell::RefCell, path::PathBuf, rc::Rc};
+use std::path::PathBuf;
 
 use color_eyre::eyre;
 use ratatui::{layout::Rect, Frame};
@@ -23,8 +23,8 @@ use super::{
     footer_entries, popup_area,
     prompt::{prompt_width, FooterEntry, Prompt, PROMPT_HEIGHT},
     select_directory::SelectDirectoryComponent,
-    Action, AppContext, ConfirmCallback, ConfirmComponent, EventState, Extent, HelpEntry, Modal,
-    ModalFlow, ModalKind, SelectCallback, KEYS_SECTION,
+    Action, AppContext, BackgroundWork, ConfirmCallback, ConfirmComponent, EventState, Extent,
+    HelpEntry, Modal, ModalFlow, ModalKind, SelectCallback, KEYS_SECTION,
 };
 use crate::theme;
 use crate::{
@@ -45,51 +45,6 @@ const SPINNER: [&str; 10] = [
     "\u{2807}", "\u{280f}",
 ];
 
-// ---------------------------------------------------------------------------
-// The seam between the flow and the loop that owns the worker
-// ---------------------------------------------------------------------------
-
-/// What the PR flow asks the loop to do on its behalf.
-///
-/// A modal cannot reach the worker — [`AppContext`] deliberately lends it UI
-/// state and nothing else — so it says what it wants and the loop does it. This
-/// is the only direction that needs a channel: the answer comes back through
-/// [`resume_pr_flow`], which the loop calls with the step it was handed.
-pub enum PrCommand {
-    /// Run this job; when it finishes, hand the result to [`resume_pr_flow`] with this
-    /// step.
-    Run { job: Job, step: PrStep },
-    /// The modal that was waiting is gone. Whatever is out is no longer wanted.
-    Abandon,
-}
-
-/// The one-slot channel a PR flow raises its commands on.
-///
-/// One slot, not a queue, because the flow has exactly one job out at a time and
-/// a command that supersedes another says so by replacing it. Cloned freely: the
-/// handle travels through the confirm and picker callbacks so that the step
-/// which finally starts the clone can still reach the loop.
-///
-/// A component built without one (see [`PrWorktreeComponent::new`]) raises into
-/// a slot nobody drains, which is only ever the case in a rendering test.
-#[derive(Clone, Default)]
-pub struct PrRequests(Rc<RefCell<Option<PrCommand>>>);
-
-impl PrRequests {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    fn raise(&self, command: PrCommand) {
-        *self.0.borrow_mut() = Some(command);
-    }
-
-    /// Takes whatever the flow has raised since this was last called.
-    pub fn take(&self) -> Option<PrCommand> {
-        self.0.borrow_mut().take()
-    }
-}
-
 /// The parts of a flow that outlive each of its steps.
 ///
 /// Carried rather than looked up again because a step resumes on the far side of
@@ -101,7 +56,6 @@ struct Flow {
     /// What the user typed, so a failed lookup can put them back in front of it.
     typed: String,
     fetch: PrFetcher,
-    requests: PrRequests,
 }
 
 /// Which slow step a flow is waiting on, and what its answer is about.
@@ -186,14 +140,14 @@ fn after_lookup(ctx: &mut AppContext, url: PrUrl, info: PrInfo, flow: Flow) -> M
 fn clone_flow(ctx: &mut AppContext, url: PrUrl, info: PrInfo, flow: Flow) -> ModalFlow {
     if ctx.args.repos_dirs.len() > 1 {
         let on_select: SelectCallback<String> =
-            Box::new(move |_ctx, dir| clone_into(dir, url, info, flow));
+            Box::new(move |ctx, dir| clone_into(ctx, dir, url, info, flow));
         return ModalFlow::Replace(Box::new(SelectDirectoryComponent::new(
             ctx.args.repos_dirs.clone(),
             on_select,
         )));
     }
     let dir = ctx.args.repos_dirs[0].clone();
-    clone_into(dir, url, info, flow)
+    clone_into(ctx, dir, url, info, flow)
 }
 
 /// Starts the clone and puts a modal on screen that says so.
@@ -202,9 +156,15 @@ fn clone_flow(ctx: &mut AppContext, url: PrUrl, info: PrInfo, flow: Flow) -> Mod
 /// because it is still the same question being answered — and because the user
 /// must be able to walk away from a clone the same way they walk away from a
 /// lookup, with Escape.
-fn clone_into(repos_dir: String, url: PrUrl, info: PrInfo, flow: Flow) -> ModalFlow {
+fn clone_into(
+    ctx: &mut AppContext,
+    repos_dir: String,
+    url: PrUrl,
+    info: PrInfo,
+    flow: Flow,
+) -> ModalFlow {
     let message = format!("Cloning {}/{} into {}", url.owner, url.repo, repos_dir);
-    flow.requests.raise(PrCommand::Run {
+    ctx.run_in_background(BackgroundWork::Routed {
         job: Job::CloneRepository {
             owner: url.owner.clone(),
             repo: url.repo.clone(),
@@ -298,7 +258,8 @@ fn git_clone_notice(url: &PrUrl, auto: bool, repos_dirs: &[String]) -> Option<St
 ///
 /// The job's id is *not* here: only `App` can mint one and only `App` can cancel
 /// one, so it keeps the id and this keeps the half the user can see. Closing the
-/// modal raises [`PrCommand::Abandon`], which is how the two halves stay in step.
+/// modal leaves a [`BackgroundWork::Abandon`], which is how the two halves stay
+/// in step.
 struct Waiting {
     /// Said in the status row, so the wait names what it is waiting for.
     message: String,
@@ -314,7 +275,6 @@ pub struct PrWorktreeComponent {
     /// Where PR data comes from. Injected so the steps that only exist after a
     /// successful fetch can be exercised without talking to GitHub.
     fetch: PrFetcher,
-    requests: PrRequests,
     /// `Some` while a job is out: the field is frozen and a spinner turns.
     waiting: Option<Waiting>,
 }
@@ -323,8 +283,9 @@ impl PrWorktreeComponent {
     /// `auto_clone` skips both the "clone this repo?" prompt and the branch-name
     /// prompt, going straight from a PR URL to a created worktree.
     ///
-    /// The component starts with a detached request slot; [`Self::sending_to`]
-    /// is what connects it to the loop that can actually run its jobs.
+    /// Its background work is deferred through the [`AppContext`] every modal is
+    /// handed, so there is nothing to wire up: the loop drains it once the stack
+    /// settles.
     pub fn new(auto_clone: bool, fetch: PrFetcher) -> Self {
         Self {
             character_index: 0,
@@ -332,15 +293,8 @@ impl PrWorktreeComponent {
             error: None,
             auto_clone,
             fetch,
-            requests: PrRequests::new(),
             waiting: None,
         }
-    }
-
-    /// Points this prompt's background work at `requests`.
-    pub fn sending_to(mut self, requests: PrRequests) -> Self {
-        self.requests = requests;
-        self
     }
 
     /// The prompt as it looked when a lookup was started, plus why it failed.
@@ -364,7 +318,6 @@ impl PrWorktreeComponent {
             error: None,
             auto_clone: flow.auto,
             fetch: flow.fetch,
-            requests: flow.requests,
             waiting: None,
         }
     }
@@ -374,7 +327,6 @@ impl PrWorktreeComponent {
             auto: self.auto_clone,
             typed: self.input.clone(),
             fetch: self.fetch.clone(),
-            requests: self.requests.clone(),
         }
     }
 
@@ -491,7 +443,7 @@ impl PrWorktreeComponent {
     /// pressed a second time is ignored rather than starting a second lookup:
     /// the first one is what this modal describes, and two answers to one
     /// question would race for the same screen.
-    fn submit(&mut self) -> ModalFlow {
+    fn submit(&mut self, ctx: &mut AppContext) -> ModalFlow {
         if self.waiting.is_some() {
             return ModalFlow::Consumed;
         }
@@ -505,7 +457,7 @@ impl PrWorktreeComponent {
         };
 
         let message = format!("Looking up {}/{} #{}", url.owner, url.repo, url.number);
-        self.requests.raise(PrCommand::Run {
+        ctx.run_in_background(BackgroundWork::Routed {
             job: Job::FetchPullRequest {
                 fetcher: self.fetch.clone(),
                 url: url.clone(),
@@ -548,14 +500,14 @@ impl Modal for PrWorktreeComponent {
         InputMode::Insert
     }
 
-    fn handle(&mut self, action: Action, _ctx: &mut AppContext) -> ModalFlow {
+    fn handle(&mut self, action: Action, ctx: &mut AppContext) -> ModalFlow {
         match action {
-            Action::Select => self.submit(),
+            Action::Select => self.submit(ctx),
             Action::ClosePopup | Action::ExitInsertMode => {
                 // Leaving is what cancels: the loop cannot see that this modal
                 // is gone, so it is told before it goes.
                 if self.waiting.is_some() {
-                    self.requests.raise(PrCommand::Abandon);
+                    ctx.run_in_background(BackgroundWork::Abandon);
                 }
                 ModalFlow::Close
             }
@@ -657,7 +609,7 @@ fn open_worktree_for_pr(
     });
     let (repo_name, backend, colocated, base_branch_hint) = match selected {
         Some((name, id, backend, base)) => {
-            let colocated = ctx.repositories.backends_of(&id).len() > 1;
+            let colocated = ctx.repositories.store().backends_of(&id).len() > 1;
             (name, backend, colocated, Some(base))
         }
         None => (String::new(), Backend::Git, false, None),
@@ -687,12 +639,11 @@ mod tests {
     use crate::components::{Notifications, RepositoriesComponent, WorktreesComponent};
     use crate::jobs::JobKind;
 
-    fn a_flow(requests: &PrRequests) -> Flow {
+    fn a_flow() -> Flow {
         Flow {
             auto: false,
             typed: "https://github.com/acme/widget/pull/7".to_string(),
             fetch: Arc::new(|_| unreachable!("no lookup in these tests")),
-            requests: requests.clone(),
         }
     }
 
@@ -729,7 +680,7 @@ mod tests {
                     repositories: &mut repositories,
                     notify: &mut Notifications::default(),
                     args: &args,
-                    pending_hooks: &mut Vec::new(),
+                    background: &mut Vec::new(),
                     meta: &mut crate::space_meta::SpaceMeta::in_memory(),
                 };
                 modal.draw(frame, area, &mut ctx);
@@ -753,17 +704,31 @@ mod tests {
     /// this one shells out to `git clone`, which the suite has no business doing.
     #[test]
     fn choosing_a_destination_starts_a_clone_job_and_says_so() {
-        let requests = PrRequests::new();
-        let next = clone_into(
-            "/tmp/repos".to_string(),
-            a_url(),
-            an_info(),
-            a_flow(&requests),
-        );
+        let mut worktrees = WorktreesComponent::new(Vec::new());
+        let mut repositories = RepositoriesComponent::new(Vec::new());
+        let args = an_args();
+        let mut background = Vec::new();
+        let next = {
+            let mut ctx = AppContext {
+                worktrees: &mut worktrees,
+                repositories: &mut repositories,
+                notify: &mut Notifications::default(),
+                args: &args,
+                background: &mut background,
+                meta: &mut crate::space_meta::SpaceMeta::in_memory(),
+            };
+            clone_into(
+                &mut ctx,
+                "/tmp/repos".to_string(),
+                a_url(),
+                an_info(),
+                a_flow(),
+            )
+        };
 
-        let raised = requests.take().expect("the clone must have been raised");
-        let PrCommand::Run { job, .. } = raised else {
-            panic!("cloning should raise a job, not an abandon");
+        let raised = background.pop().expect("the clone must have been raised");
+        let BackgroundWork::Routed { job, .. } = raised else {
+            panic!("cloning should raise routed work, not an abandon");
         };
         assert_eq!(job.kind(), JobKind::CloneRepository);
 
@@ -816,26 +781,27 @@ mod tests {
     /// closing the modal alone would leave the job running with nobody waiting.
     #[test]
     fn escaping_a_wait_asks_the_loop_to_abandon_the_job() {
-        let requests = PrRequests::new();
-        let mut modal =
-            PrWorktreeComponent::waiting(a_flow(&requests), "Cloning acme/widget".to_string());
+        let mut modal = PrWorktreeComponent::waiting(a_flow(), "Cloning acme/widget".to_string());
 
         let mut worktrees = WorktreesComponent::new(Vec::new());
         let mut repositories = RepositoriesComponent::new(Vec::new());
         let args = an_args();
-        let mut ctx = AppContext {
-            worktrees: &mut worktrees,
-            repositories: &mut repositories,
-            notify: &mut Notifications::default(),
-            args: &args,
-            pending_hooks: &mut Vec::new(),
-            meta: &mut crate::space_meta::SpaceMeta::in_memory(),
-        };
+        let mut background = Vec::new();
+        {
+            let mut ctx = AppContext {
+                worktrees: &mut worktrees,
+                repositories: &mut repositories,
+                notify: &mut Notifications::default(),
+                args: &args,
+                background: &mut background,
+                meta: &mut crate::space_meta::SpaceMeta::in_memory(),
+            };
 
-        assert!(matches!(
-            modal.handle(Action::ClosePopup, &mut ctx),
-            ModalFlow::Close
-        ));
-        assert!(matches!(requests.take(), Some(PrCommand::Abandon)));
+            assert!(matches!(
+                modal.handle(Action::ClosePopup, &mut ctx),
+                ModalFlow::Close
+            ));
+        }
+        assert!(matches!(background.pop(), Some(BackgroundWork::Abandon)));
     }
 }

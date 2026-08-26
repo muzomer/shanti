@@ -209,8 +209,8 @@ worktrees_dir  = /home/you/worktrees  (config file)
 repos_dirs     = /home/you/src  (command line)
                  /home/you/work
 run_fetch      = false  (built-in default)
-backend        = git  (built-in default)
-editor         = <unset>  (built-in default)
+backend        = git  (built-in default) [not yet used]
+editor         = <unset>  (built-in default) [not yet used]
 theme          = tokyo-night  (built-in default)
 hooks          = 1 file(s) copied, 2 command(s), 1 repo(s) with their own  (config file)
 ```
@@ -230,7 +230,7 @@ theme = "catppuccin-mocha"
 
 `theme` names one of the built-in colour schemes; `SHANTI_THEME` and `--theme` override it, in that order. See [Colour schemes](#colour-schemes) for the list and for the picker that writes this key for you.
 
-Two further keys, `backend` (`"git"` / `"jujutsu"`) and `editor`, are accepted by the file and shown by `--show-config`, but nothing acts on them yet: the backend is decided from the repository on disk, and there is no editor integration.
+Two further keys, `backend` (`"git"` / `"jujutsu"`) and `editor`, are accepted by the file but nothing acts on them yet: the backend is decided from the repository on disk, and there is no editor integration. `--show-config` marks them `[not yet used]` so the report never implies a value took effect. They are still accepted rather than rejected, so a file that already names them keeps working.
 
 ## Colour schemes
 

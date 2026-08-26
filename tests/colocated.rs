@@ -26,6 +26,9 @@ use shanti::jobs::Worker;
 use shanti::vcs::{self, backends_at, discover, Backend, Vcs};
 use tempfile::{tempdir, TempDir};
 
+mod common;
+use common::ch;
+
 /// A colocated repository, and the directory that owns it.
 ///
 /// The `TempDir` is a field on purpose: dropping it deletes the repository, so a
@@ -164,10 +167,6 @@ fn boot_app(repos_dir: &Path, spaces_dir: &Path) -> (App, Receiver<AppEvent>) {
         }
     }
     (app, results)
-}
-
-fn ch(c: char) -> KeyEvent {
-    KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
 }
 
 fn typed(app: &mut App, text: &str) {

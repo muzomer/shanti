@@ -175,37 +175,52 @@ pub fn set(theme: Theme) {
 }
 
 // --- Base tokens -------------------------------------------------------------
+//
+// The palette's raw hues, and the layer everything below is built from. They are
+// **private on purpose**, which is what turns the module rule into something the
+// compiler enforces rather than something a reviewer has to catch:
+//
+// > No component names a raw `Color`, and none names a constant either: it calls
+// > the accessor for the _meaning_.
+//
+// A component asking for `title()` or `selected_row()` is asking for a role, and
+// the role is free to change hue when a scheme changes. A component that could
+// ask for `accent()` would be naming a hue, and no scheme could then move it.
+// Keeping these crate-private means that mistake cannot be written.
+//
+// A new *semantic* accessor belongs in this module, next to the ones below, and
+// may use these freely.
 
 /// The application's base canvas.
-pub fn background() -> Color {
+fn background() -> Color {
     current().background
 }
 /// A raised surface: popup fills and anything above the canvas.
-pub fn surface() -> Color {
+fn surface() -> Color {
     current().surface
 }
 /// The selection band.
-pub fn surface_selected() -> Color {
+fn surface_selected() -> Color {
     current().surface_selected
 }
 /// The colour of attention.
-pub fn accent() -> Color {
+fn accent() -> Color {
     current().accent
 }
 /// The accent at rest.
-pub fn accent_dim() -> Color {
+fn accent_dim() -> Color {
     current().accent_dim
 }
 /// The thing the user is actually reading.
-pub fn text_primary() -> Color {
+fn text_primary() -> Color {
     current().text_primary
 }
 /// Supporting detail beside the primary text.
-pub fn text_secondary() -> Color {
+fn text_secondary() -> Color {
     current().text_secondary
 }
 /// Present but deliberately quiet.
-pub fn text_muted() -> Color {
+fn text_muted() -> Color {
     current().text_muted
 }
 /// Everything is as it should be.

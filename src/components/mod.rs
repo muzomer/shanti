@@ -19,11 +19,11 @@ pub use help::{
     footer_entries, worktrees_bindings, HelpComponent, HelpEntry, FILTER_SECTION, KEYS_SECTION,
 };
 pub use modal::{
-    fits, gutter, place_cursor, popup_area, AppContext, ConfirmCallback, Extent, Modal, ModalFlow,
-    ModalKind, SelectCallback, MIN_HEIGHT, MIN_WIDTH,
+    fits, gutter, place_cursor, popup_area, AppContext, BackgroundWork, ConfirmCallback, Extent,
+    Modal, ModalFlow, ModalKind, SelectCallback, MIN_HEIGHT, MIN_WIDTH,
 };
 pub use notify::Notifications;
-pub use pr_worktree::{resume_pr_flow, PrCommand, PrRequests, PrStep, PrWorktreeComponent};
+pub use pr_worktree::{resume_pr_flow, PrStep, PrWorktreeComponent};
 pub use repositories::{
     repositories_pane_bindings, spaces_of, RepositoriesComponent, RepositoriesModal,
 };

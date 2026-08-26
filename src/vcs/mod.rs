@@ -33,6 +33,7 @@ pub mod jj;
 mod repo;
 mod space;
 pub mod status;
+mod store;
 mod tip;
 
 use std::path::{Path, PathBuf};
@@ -42,11 +43,18 @@ use rayon::prelude::*;
 use tracing::{debug, error};
 
 pub use backend::Backend;
-pub use delete::{AtRisk, Consequence, DeletionRisk, Removed};
+// `AtRisk` and `Removed` are deliberately *not* re-exported. They are the
+// readings a `DeletionRisk` is assembled from, and every caller outside this
+// module wants them already phrased in the owning backend's vocabulary —
+// `losses()` and `removals()` do that. Publishing the raw variants would invite
+// a second place that turns a reading into a sentence, which is exactly the
+// drift rule 2 of this module's own doc comment exists to prevent.
+pub use delete::{Consequence, DeletionRisk};
 pub use discover::{backend_at, backends_at, discover, Discovered};
 pub use repo::{Repo, RepoId};
 pub use space::Space;
 pub use status::{JjLocal, LocalState, RemoteState, SpaceStatus, StatusGlyph, Tone};
+pub use store::RepoStore;
 pub use tip::{now_seconds, SpaceTip};
 
 use crate::hooks::{HookPlan, HookSettings, HookTarget};

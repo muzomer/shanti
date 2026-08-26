@@ -856,7 +856,7 @@ impl WorktreesComponent {
         };
 
         let space = &self.spaces[index].space;
-        let backend = repos.backend_for(space).ok_or_else(|| {
+        let backend = repos.store().backend_for(space).ok_or_else(|| {
             eyre!(
                 "no open repository for the space {:?}; it cannot be deleted",
                 space.name

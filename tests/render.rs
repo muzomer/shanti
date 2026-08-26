@@ -44,18 +44,18 @@
 
 use std::path::Path;
 use std::process::Command;
-use std::sync::mpsc::{self, Receiver};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::mpsc::Receiver;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::TestBackend, Terminal};
 use shanti::app::App;
 use shanti::cli::Args;
 use shanti::events::AppEvent;
-use shanti::jobs::Worker;
 use shanti::vcs::jj::JjCli;
 use tempfile::{tempdir, TempDir};
+
+mod common;
+use common::{boot, booting, git, init_repo};
 
 /// The size floor the interface declares (`components::MIN_WIDTH`/`MIN_HEIGHT`).
 ///
@@ -503,27 +503,6 @@ fn spine(row: &str) -> Option<usize> {
 // Building repositories
 // ---------------------------------------------------------------------------
 
-fn git(cwd: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        // Keep the developer's global/system git config out of the fixture.
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .env("GIT_AUTHOR_NAME", "shanti test")
-        .env("GIT_AUTHOR_EMAIL", "test@example.com")
-        .env("GIT_COMMITTER_NAME", "shanti test")
-        .env("GIT_COMMITTER_EMAIL", "test@example.com")
-        .output()
-        .expect("git is required to run these tests");
-    assert!(
-        output.status.success(),
-        "git {:?} failed: {}",
-        args,
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
 /// Runs a jj setup command in `dir` and returns its stdout.
 ///
 /// Deliberately not routed through `JjCli`: fixtures need setup subcommands and
@@ -549,15 +528,6 @@ fn jj_in(program: &Path, dir: &Path, args: &[&str]) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout).into_owned()
-}
-
-fn init_repo(repos_dir: &Path, name: &str) {
-    let path = repos_dir.join(name);
-    std::fs::create_dir_all(&path).expect("could not create repo dir");
-    git(&path, &["init", "-q", "-b", "main"]);
-    std::fs::write(path.join("README.md"), "fixture\n").expect("could not write README");
-    git(&path, &["add", "README.md"]);
-    git(&path, &["commit", "-q", "-m", "init"]);
 }
 
 /// Commits a new file in `dir`, so the branch checked out there gains a commit.
@@ -627,31 +597,6 @@ fn put_in_state(repo_path: &Path, target: &Path, wt: &Wt) -> Option<TempDir> {
 // ---------------------------------------------------------------------------
 // Booting
 // ---------------------------------------------------------------------------
-
-/// Builds an app and runs its startup scan to completion, the way the real loop
-/// does: one job result in, one redraw.
-fn boot(args: &Args) -> (App, Receiver<AppEvent>) {
-    let (mut app, results) = booting(args);
-    while app.is_scanning() {
-        match results.recv_timeout(Duration::from_secs(30)) {
-            Ok(AppEvent::Job(result)) => app.handle_job(result),
-            Ok(other) => panic!("expected a job result, got {other:?}"),
-            Err(error) => panic!("the startup scan never finished: {error}"),
-        }
-    }
-    (app, results)
-}
-
-/// The same app with its scan still in flight — the state the user sees first.
-fn booting(args: &Args) -> (App, Receiver<AppEvent>) {
-    let mut app = App::with_args(
-        args.clone(),
-        Arc::new(|_| Err(color_eyre::eyre::eyre!("no PR lookup was stubbed"))),
-    );
-    let (sender, results) = mpsc::channel();
-    app.attach_worker(Worker::with_threads(sender, 1));
-    (app, results)
-}
 
 // ---------------------------------------------------------------------------
 // Status glyphs

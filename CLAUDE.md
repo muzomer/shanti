@@ -99,10 +99,13 @@ src/
     jj/                          # the jj backend: backend.rs (JjBackend), cmd.rs (JjCli), base.rs,
                                  #   status.rs, template.rs, version.rs, workspace.rs, testing.rs
 tests/
+  common/mod.rs                  # fixtures shared by the suites: git, init_repo, boot/booting, keys
   state.rs                       # App state machine driven through real key events
+  render.rs                      # what a frame actually paints, asserted cell by cell
   git_backend.rs                 # git backend end to end, against real repositories on disk
   jj_backend.rs                  # jj backend end to end (skips when jj is missing)
   colocated.rs                   # a repository with both .git and .jj
+docs/adr/                        # decisions that are hard to reverse; read before contradicting one
 ```
 
 ## Key Concepts
@@ -213,7 +216,7 @@ tests/
   else. `App::new()` is the thin wrapper that resolves the real configuration.
 - **The colour scheme** is chosen once at startup and then at will: `main.rs`
   installs `args.theme` with `theme::set`, and `t` opens `ThemeModal`
-  (`components/theme_picker.rs`), which *is* the preview — moving the cursor
+  (`components/theme_picker.rs`), which _is_ the preview — moving the cursor
   calls `theme::set`, so the next frame repaints everything in the highlighted
   scheme. `Enter` persists the name through `config::persist_theme` (the only
   writer of the user's configuration file, rewriting the single `theme` key);
@@ -245,22 +248,22 @@ Four layers, later wins: built-in defaults → configuration file → environmen
 variables → command line flags. `cli.rs` decides the precedence and records
 where each value came from (`--show-config` prints the winner and its origin).
 
-| Variable               | CLI flag          | Description                                                     |
-| ---------------------- | ----------------- | --------------------------------------------------------------- |
+| Variable               | CLI flag          | Description                                                      |
+| ---------------------- | ----------------- | ---------------------------------------------------------------- |
 | `SHANTI_REPOS_DIR`     | `--repos-dir`     | Colon-separated directories containing repositories              |
 | `SHANTI_WORKTREES_DIR` | `--worktrees-dir` | Directory where spaces are created                               |
 | `SHANTI_RUN_FETCH`     | `--run-fetch`     | Fetch every repository at startup                                |
 | `SHANTI_THEME`         | `--theme`         | Colour scheme to use, e.g. `catppuccin-latte`                    |
 | `SHANTI_CONFIG`        | `--config`        | Directory holding `config.toml` (the flag names the file itself) |
 | `SHANTI_JJ_BIN`        | —                 | Path to the `jj` binary when it is not on `PATH`                 |
-| `SHANTI_DATA`          | —                 | Directory for shanti's log file and `spaces.toml`               |
+| `SHANTI_DATA`          | —                 | Directory for shanti's log file and `spaces.toml`                |
 | `SHANTI_LOGLEVEL`      | —                 | Log level, e.g. `debug` (`RUST_LOG` takes precedence)            |
 | `SHANTI_NO_HOOKS`      | `--no-hooks`      | Skip every post-create hook for this run (any non-empty value)   |
 | `GITHUB_TOKEN`         | —                 | Read-only token for the GitHub PR flow                           |
 
 The file keys `backend` and `editor` are parsed and reported but nothing acts on
 them yet: the backend is decided from the repository on disk. The `theme` key,
-the `[hooks]` and the `[repos.<name>.hooks]` tables *do* act — `theme` names a
+the `[hooks]` and the `[repos.<name>.hooks]` tables _do_ act — `theme` names a
 scheme from `theme::scheme::ALL` and is installed once at startup, and the hooks
 are described under **Post-create hooks** above.
 
@@ -316,6 +319,7 @@ cp -rf source dest          # NOT: cp -r source dest
 >
 > The H1 title necessarily differs between the two, so this divergence is
 > deliberate: <!-- bd-doctor-divergence: ok -->
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6cd5cc61 -->
 
 ## Beads Issue Tracker

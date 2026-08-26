@@ -1,6 +1,3 @@
-use std::collections::HashSet;
-use std::path::PathBuf;
-
 use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
     Config, Matcher, Utf32Str,
@@ -8,7 +5,7 @@ use nucleo_matcher::{
 
 use super::list::ItemOrder;
 use crate::theme;
-use crate::vcs::{Backend, BoxedVcs, Repo, RepoId, Space, Vcs};
+use crate::vcs::{Backend, BoxedVcs, RepoId, RepoStore, Vcs};
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::Style,
@@ -40,7 +37,10 @@ use tracing::error;
 /// heterogeneous: git and jj repositories sit side by side and nothing above
 /// this type asks which is which.
 pub struct RepositoriesComponent {
-    repositories: Vec<BoxedVcs>,
+    /// Every open backend. The widget owns a store rather than a bare vector, so
+    /// "which backend owns this?" is answered by [`RepoStore`] and this type is
+    /// left with the cursor, the filter and the focus — see `src/vcs/store.rs`.
+    store: RepoStore,
     filter: FilterComponent,
     state: ListState,
     selected_index: Option<usize>,
@@ -60,7 +60,7 @@ struct Chrome<'a> {
 impl RepositoriesComponent {
     pub fn new(repositories: Vec<BoxedVcs>) -> Self {
         Self {
-            repositories,
+            store: RepoStore::new(repositories),
             filter: FilterComponent::new(),
             state: ListState::default().with_selected(Some(0)),
             selected_index: Some(0),
@@ -294,7 +294,7 @@ impl RepositoriesComponent {
     }
 
     pub fn add_repository(&mut self, repo: BoxedVcs) {
-        self.repositories.push(repo);
+        self.store.add(repo);
     }
 
     /// Swaps the whole backend set, keeping the user on the repository they had
@@ -305,21 +305,8 @@ impl RepositoriesComponent {
     /// are no longer on disk.
     pub fn replace_backends(&mut self, repositories: Vec<BoxedVcs>) {
         let anchor = self.selected_id();
-        self.repositories = repositories;
+        self.store.replace(repositories);
         self.restore_selection(anchor);
-    }
-
-    /// Drops every backend open on `id`, and says how many that was.
-    ///
-    /// Every backend, not one: a colocated repository is open twice under the
-    /// same id, and leaving half of it behind would leave the picker offering a
-    /// repository that can no longer list its spaces.
-    pub fn remove(&mut self, id: &RepoId) -> usize {
-        let anchor = self.selected_id();
-        let before = self.repositories.len();
-        self.repositories.retain(|backend| &backend.repo().id != id);
-        self.restore_selection(anchor);
-        before - self.repositories.len()
     }
 
     /// Merges a batch of freshly opened backends into the list.
@@ -328,15 +315,8 @@ impl RepositoriesComponent {
     /// itself, so overlapping repos dirs — or a second scan — cannot show the
     /// same repository twice.
     pub fn add_repositories(&mut self, repositories: Vec<BoxedVcs>) {
-        let arriving: HashSet<RepoId> = repositories
-            .iter()
-            .map(|backend| backend.repo().id.clone())
-            .collect();
-        for id in &arriving {
-            self.remove(id);
-        }
         let anchor = self.selected_id();
-        self.repositories.extend(repositories);
+        self.store.merge(repositories);
         self.restore_selection(anchor);
     }
 
@@ -382,11 +362,7 @@ impl RepositoriesComponent {
     /// it, so a single-backend repository always resolves.
     pub fn selected_backend(&mut self, backend: Backend) -> Option<&dyn Vcs> {
         let id = self.selected_id()?;
-        self.repositories
-            .iter()
-            .find(|b| b.repo().id == id && b.backend() == backend)
-            .or_else(|| self.repositories.iter().find(|b| b.repo().id == id))
-            .map(|b| b.as_ref())
+        self.store.backend_of(&id, backend)
     }
 
     pub fn selected_repository(&mut self) -> Option<&dyn Vcs> {
@@ -397,62 +373,10 @@ impl RepositoriesComponent {
         Some(selected.as_ref())
     }
 
-    /// The backend that owns `space`, if it is still open.
-    ///
-    /// A [`Space`] is an inert snapshot; every action on one — deleting it above
-    /// all — has to go back through the repository it came from, and this list is
-    /// the only place those live.
-    pub fn backend_for(&self, space: &Space) -> Option<&dyn Vcs> {
-        self.repositories
-            .iter()
-            // The pair, not the id alone: a colocated repository is open twice,
-            // once per backend, and both copies share an id (it is derived from
-            // the path). Matching on the id alone would hand a git worktree's
-            // deletion to jj, which knows nothing about it.
-            .find(|backend| backend.repo().id == space.repo && backend.backend() == space.backend)
-            .map(|backend| backend.as_ref())
-    }
-
-    /// The snapshot of the repository `id`, from whichever backend owns it.
-    ///
-    /// The name and root a row is labelled with, recovered from an id alone —
-    /// which is all a background result carries back. Any backend will do: a
-    /// colocated repository is open twice and both copies describe the same
-    /// directory.
-    pub fn repository(&self, id: &RepoId) -> Option<&Repo> {
-        self.repositories
-            .iter()
-            .map(|backend| backend.repo())
-            .find(|repo| &repo.id == id)
-    }
-
-    /// Every repository on screen, once each, as something a job can be given.
-    ///
-    /// Deduplicated by id rather than listed per backend: a colocated
-    /// repository is open twice and has one directory, and re-reading it twice
-    /// would cost twice as much to produce the same rows.
-    pub fn repository_paths(&self) -> Vec<PathBuf> {
-        let mut seen: HashSet<&RepoId> = HashSet::new();
-        self.repositories
-            .iter()
-            .map(|backend| backend.repo())
-            .filter(|repo| seen.insert(&repo.id))
-            .map(|repo| repo.path.clone())
-            .collect()
-    }
-
-    /// Every backend open on the repository `id`, in the order they were opened
-    /// — the owner first.
-    ///
-    /// More than one means a colocated repository, which is the only case the UI
-    /// has to explain: "new space" there is ambiguous, and the create prompt
-    /// says which backend it settled on.
-    pub fn backends_of(&self, id: &RepoId) -> Vec<Backend> {
-        self.repositories
-            .iter()
-            .filter(|backend| &backend.repo().id == id)
-            .map(|backend| backend.backend())
-            .collect()
+    /// The open repositories, for a caller that wants a domain answer rather
+    /// than a row. The seam that stops a new view depending on this widget.
+    pub fn store(&self) -> &RepoStore {
+        &self.store
     }
 
     /// One entry per repository, for the picker.
@@ -462,21 +386,7 @@ impl RepositoriesComponent {
     /// one, which is also what makes a new space on a colocated repo a jj
     /// workspace by default — shanti-12z.5's rule that jj owns such a repo.
     fn repository_choices(&self) -> Vec<&BoxedVcs> {
-        let mut chosen: Vec<&BoxedVcs> = Vec::with_capacity(self.repositories.len());
-        for candidate in &self.repositories {
-            match chosen
-                .iter_mut()
-                .find(|kept| kept.repo().id == candidate.repo().id)
-            {
-                Some(kept) => {
-                    if candidate.backend() == Backend::Jj {
-                        *kept = candidate;
-                    }
-                }
-                None => chosen.push(candidate),
-            }
-        }
-        chosen
+        self.store.choices()
     }
 
     /// Every space of every repository, and the names of the repositories that
@@ -497,7 +407,7 @@ impl RepositoriesComponent {
     /// contain.
     #[cfg(test)]
     fn collect_spaces(&self) -> (Vec<SpaceEntry>, Vec<String>) {
-        spaces_of(&self.repositories)
+        spaces_of(self.store.backends())
     }
 }
 
@@ -680,7 +590,7 @@ impl Modal for RepositoriesModal {
                     // is the owner — so what it hands over here *is* the default
                     // backend for a new space.
                     Some((name, id, backend)) => {
-                        let colocated = ctx.repositories.backends_of(&id).len() > 1;
+                        let colocated = ctx.repositories.store().backends_of(&id).len() > 1;
                         (name, backend, colocated)
                     }
                     None => (String::new(), Backend::Git, false),
@@ -763,7 +673,7 @@ pub fn repositories_bindings() -> Vec<HelpEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vcs::{Repo, SpaceStatus};
+    use crate::vcs::{Repo, Space, SpaceStatus};
     use color_eyre::eyre;
     use std::path::{Path, PathBuf};
 
@@ -862,6 +772,7 @@ mod tests {
 
         for entry in &spaces {
             let backend = repos
+                .store()
                 .backend_for(&entry.space)
                 .unwrap_or_else(|| panic!("no backend for the space {:?}", entry.space.name));
             assert_eq!(
@@ -892,7 +803,7 @@ mod tests {
             SpaceStatus::unknown(Backend::Git),
         );
 
-        assert!(repos.backend_for(&orphan).is_none());
+        assert!(repos.store().backend_for(&orphan).is_none());
     }
 
     /// The picker asks which *repository*, so a colocated one appears once — as
@@ -924,7 +835,9 @@ mod tests {
     #[test]
     fn backends_of_reports_every_backend_open_on_a_repository() {
         assert_eq!(
-            colocated().backends_of(&RepoId::from_path("/repos/shanti")),
+            colocated()
+                .store()
+                .backends_of(&RepoId::from_path("/repos/shanti")),
             vec![Backend::Jj, Backend::Git]
         );
     }
@@ -944,18 +857,9 @@ mod tests {
             .collect();
         assert_eq!(listed.len(), 1);
         assert!(repos
+            .store()
             .backends_of(&RepoId::from_path("/repos/shanti"))
             .is_empty());
-    }
-
-    /// Removing a colocated repository must take both of its backends: leaving
-    /// one behind leaves the picker offering half a repository.
-    #[test]
-    fn removing_a_repository_drops_every_backend_it_was_open_as() {
-        let mut repos = colocated();
-        assert_eq!(repos.remove(&RepoId::from_path("/repos/shanti")), 2);
-        assert!(repos.filtered_items().is_empty());
-        assert_eq!(repos.remove(&RepoId::from_path("/repos/shanti")), 0);
     }
 
     /// The same repository arriving from two overlapping repos dirs is one row,
@@ -972,7 +876,10 @@ mod tests {
 
         assert_eq!(repos.filtered_items().len(), 1, "the picker doubled a repo");
         assert_eq!(
-            repos.backends_of(&RepoId::from_path("/repos/shanti")).len(),
+            repos
+                .store()
+                .backends_of(&RepoId::from_path("/repos/shanti"))
+                .len(),
             2,
             "each backend should be open exactly once"
         );

@@ -186,12 +186,6 @@ impl DeletionRisk {
         self.consequence
     }
 
-    /// The individual readings behind the verdict, for callers that want them
-    /// unphrased.
-    pub fn items(&self) -> &[AtRisk] {
-        &self.at_risk
-    }
-
     /// Fill in the number of uncommitted files, which the status snapshot does
     /// not carry.
     ///
@@ -381,7 +375,7 @@ mod tests {
                     let after = before.clone().counting_files(count);
                     assert_eq!(before.is_safe(), after.is_safe(), "{remote:?} {dirty}");
                     assert_eq!(before.consequence(), after.consequence());
-                    assert_eq!(before.items().len(), after.items().len());
+                    assert_eq!(before.losses().len(), after.losses().len());
                 }
             }
         }
@@ -525,7 +519,7 @@ mod tests {
             divergent: true,
             empty: false,
         };
-        assert_eq!(jj(RemoteState::in_sync(), both).items().len(), 2);
+        assert_eq!(jj(RemoteState::in_sync(), both).losses().len(), 2);
     }
 
     /// An empty jj change is jj's version of "clean", not a warning.
@@ -600,7 +594,7 @@ mod tests {
             let risk = DeletionRisk::assess(backend, &status);
             assert_eq!(
                 risk.is_safe(),
-                risk.items().is_empty(),
+                risk.losses().is_empty(),
                 "wording and gate disagree for {status:?}"
             );
             assert_eq!(risk.aftermath().is_none(), risk.is_safe(), "for {status:?}");

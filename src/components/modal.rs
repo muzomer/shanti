@@ -16,10 +16,12 @@ use ratatui::{
 
 use tracing::debug;
 
-use crate::{cli, hooks::HookPlan, keymap::InputMode, space_meta::SpaceMeta, vcs, vcs::Backend};
+use crate::{
+    cli, hooks::HookPlan, jobs::Job, keymap::InputMode, space_meta::SpaceMeta, vcs, vcs::Backend,
+};
 
 use super::{
-    notify::Notifications, worktrees::SpaceEntry, Action, EventState, HelpEntry,
+    notify::Notifications, worktrees::SpaceEntry, Action, EventState, HelpEntry, PrStep,
     RepositoriesComponent, WorktreesComponent,
 };
 
@@ -36,13 +38,14 @@ pub struct AppContext<'a> {
     /// done, and its news has to outlive it by the few seconds it takes to read.
     pub notify: &'a mut Notifications,
     pub args: &'a cli::Args,
-    /// Where a created space leaves the setup work it cannot do itself.
+    /// The one seam a modal defers background work through.
     ///
-    /// The same seam the PR flow uses for its jobs, in its smallest form: a
-    /// modal must not reach the worker — running `npm install` on the key
-    /// handler is exactly the freeze the job pool exists to prevent — so it
-    /// leaves the plan here and `App` submits it as soon as the stack settles.
-    pub pending_hooks: &'a mut Vec<HookPlan>,
+    /// A modal must not reach the worker — running `npm install`, or waiting on
+    /// GitHub, on the key handler is exactly the freeze the job pool exists to
+    /// prevent — so it leaves a [`BackgroundWork`] here and `App` submits it as
+    /// soon as the stack settles. One channel for every flow: post-create hooks,
+    /// the PR lookup, the clone. See [`AppContext::run_in_background`].
+    pub background: &'a mut Vec<BackgroundWork>,
     /// What shanti remembers about the spaces it made, so a flow that knows
     /// something no backend can tell — which pull request a space is for — has
     /// somewhere to put it.
@@ -85,7 +88,7 @@ impl AppContext<'_> {
         // A user with no hooks configured pays nothing: no job, no id to track,
         // no spinner.
         if !plan.is_empty() {
-            self.pending_hooks.push(plan);
+            self.run_in_background(BackgroundWork::Hooks(Box::new(plan)));
         }
 
         // The path is returned rather than the whole space: it is the key
@@ -110,6 +113,38 @@ impl AppContext<'_> {
             debug!(space = %path.display(), %error, "could not record the pull request of a space");
         }
     }
+
+    /// The one way a modal asks `App` to run slow work on its behalf.
+    ///
+    /// A modal cannot reach the worker — this context lends it UI state and
+    /// nothing else — so it leaves the request here and returns to the loop,
+    /// which drains it the moment the stack settles. What kind of work it is, and
+    /// whether its answer must come back, is carried by the [`BackgroundWork`]
+    /// itself.
+    pub fn run_in_background(&mut self, work: BackgroundWork) {
+        self.background.push(work);
+    }
+}
+
+/// Background work a modal defers to `App`.
+///
+/// Two mechanisms used to do this — a `Vec<HookPlan>` for hooks and a one-slot
+/// cell for the PR flow — one seam described twice. This is that seam, once: a
+/// modal leaves work here through [`AppContext::run_in_background`] and `App`
+/// drains it after the stack settles. The variants are the two shapes of need,
+/// no more:
+///
+/// * `Hooks` — fire and forget. A hook's result is about a directory that
+///   exists, not about a modal that may have closed, so it is never cancelled
+///   and never routed; its report flows back through the ordinary result arms.
+/// * `Routed` — a slow step of a flow. Its answer must reach the step that
+///   asked (`step`), a new request supersedes the job still out, and abandoning
+///   the modal cancels it. This is the PR flow, cut across a lookup or a clone.
+/// * `Abandon` — the routed flow's modal is gone; cancel whatever is out.
+pub enum BackgroundWork {
+    Hooks(Box<HookPlan>),
+    Routed { job: Job, step: PrStep },
+    Abandon,
 }
 
 /// Work a modal defers to whoever confirms it. The confirming modal is generic;

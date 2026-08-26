@@ -47,6 +47,10 @@ use std::{
 use color_eyre::eyre;
 use tracing::debug;
 
+mod in_flight;
+
+pub use in_flight::{InFlight, Kind, Tracked};
+
 use crate::{
     events::AppEvent,
     github::{self, PrFetcher, PrInfo, PrUrl},
@@ -160,7 +164,7 @@ pub enum Job {
     ///
     /// Boxed like `Completion::PullRequest`, and for the same reason: a plan is
     /// wide (two paths, two names and two lists) and an enum is as big as its
-    /// widest arm — including the `PrCommand` this job travels inside.
+    /// widest arm — including the `BackgroundWork` this job travels inside.
     ///
     /// [`HookSettings::plan`]: crate::hooks::HookSettings::plan
     RunHooks(Box<HookPlan>),

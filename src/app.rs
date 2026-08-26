@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    path::PathBuf,
-};
+use std::{collections::HashSet, path::PathBuf};
 
 use color_eyre::eyre::Result;
 use crossterm::event::KeyEvent;
@@ -15,14 +12,14 @@ use crate::{
     cli,
     components::{
         detail, repositories_pane_bindings, resume_pr_flow, spaces_of, worktrees_bindings, Action,
-        Activity, AppContext, ConfirmComponent, CreateWorktreeComponent, EventState, HelpComponent,
-        Modal, ModalFlow, ModalKind, Notifications, PrCommand, PrRequests, PrStep,
+        Activity, AppContext, BackgroundWork, ConfirmComponent, CreateWorktreeComponent,
+        EventState, HelpComponent, Modal, ModalFlow, ModalKind, Notifications, PrStep,
         PrWorktreeComponent, RepositoriesComponent, RepositoriesModal, SpaceEntry, ThemeModal,
         WorktreesComponent, MIN_HEIGHT, MIN_WIDTH,
     },
     github,
     hooks::{self, HookOutcome, HookPlan, HookReport},
-    jobs::{Completion, Job, JobId, JobResult, Worker},
+    jobs::{Completion, InFlight, Job, JobId, JobResult, Kind, Tracked, Worker},
     keymap::{self, InputMode},
     space_meta::SpaceMeta,
     vcs::{now_seconds, BoxedVcs, Consequence, DeletionRisk, RepoId, Space},
@@ -114,7 +111,21 @@ pub struct App {
     /// its id is in here. Anything else — a fetch for a repos dir the user has
     /// since changed, a PR lookup for a popup they closed — is dropped without
     /// touching state, so a slow answer can never overwrite a newer one.
-    outstanding: HashSet<JobId>,
+    /// Every job that has been submitted and whose answer is still wanted,
+    /// each carrying what it is for.
+    ///
+    /// This is the whole staleness rule: a [`JobResult`] is applied **only** if
+    /// [`InFlight::finish`] returns its category. Anything else — a fetch for a
+    /// repos dir the user has since changed, a lookup for a popup they closed —
+    /// is dropped without touching state, so a slow answer can never overwrite a
+    /// newer one.
+    ///
+    /// One map, not five sets. The category travels with the id rather than
+    /// being implied by which set it was dropped into, so forgetting a job is
+    /// one removal that cannot be half-done — and adding a job kind is one
+    /// [`Tracked`] variant rather than a field, an initialiser and four sync
+    /// sites that fail silently when one is missed.
+    in_flight: InFlight,
     /// The repos dirs still to be walked.
     ///
     /// Held rather than walked in the constructor: discovery is a job now, so
@@ -124,48 +135,24 @@ pub struct App {
     /// Kept out of the walk — the worktrees dir, so the spaces living inside it
     /// are not rediscovered as repositories in their own right.
     excluded: Vec<PathBuf>,
-    /// The scan jobs still running; a subset of `outstanding`.
-    ///
-    /// Tracked apart from `outstanding` because the spinner is about the *scan*
-    /// specifically: a fetch still running behind a finished scan must not keep the
-    /// list saying "scanning".
-    scans: HashSet<JobId>,
     /// How many repositories the current scan has reported — the spinner's count.
     scan_found: usize,
-    /// The re-reads still out; a subset of `outstanding`.
-    ///
-    /// One per repository, so the indicator can count down and a second press of
-    /// `r` can abandon exactly the previous round without touching a fetch or a
-    /// clone that is also in flight.
-    refreshes: HashSet<JobId>,
-    /// The fetches still out, each remembering *which* repository it is for.
-    ///
-    /// The path is the half a set could not carry, and it is needed twice: to
-    /// refuse a second fetch of a repository already being fetched, and to
-    /// re-read that one repository when the fetch lands.
-    fetches: HashMap<JobId, PathBuf>,
-    /// Where the PR flow raises the work it cannot run itself.
-    ///
-    /// One handle for the whole session, cloned into every PR prompt: only one
-    /// PR flow can be on screen at a time, so one slot is one flow's worth.
-    pr_requests: PrRequests,
     /// The PR flow's job, while one is out. See [`PrFlow`].
     pr_flow: Option<PrFlow>,
-    /// Setup work left behind by a space that was just created, waiting to be
-    /// submitted. Drained by [`App::pump_hooks`] the moment the stack settles,
-    /// so it is only ever non-empty inside one key press.
-    pending_hooks: Vec<HookPlan>,
+    /// Background work a modal has deferred, waiting to be submitted.
+    ///
+    /// The one seam every flow uses — a created space's hooks, a PR lookup, a
+    /// clone — drained by [`App::pump_background`] the moment the stack settles,
+    /// so it is only ever non-empty inside one key press. Its two shapes carry
+    /// exactly what each needs: hooks are fire-and-forget, while the PR flow's
+    /// routed work is cancelled if its modal goes away and its answer handed back
+    /// to the step that asked.
+    background: Vec<BackgroundWork>,
     /// What shanti remembers about the spaces it made — which pull request each
     /// came from. Loaded once at construction and lent to every modal, so the
     /// detail pane can answer "why does this space exist?" without asking the
     /// disk on every frame.
     space_meta: SpaceMeta,
-    /// The hook jobs still running; a subset of `outstanding`.
-    ///
-    /// Counted for the indicator: `npm install` runs for minutes, and a user
-    /// about to `cd` into a space that is still being set up should be able to
-    /// see that from the list.
-    hook_jobs: HashSet<JobId>,
 }
 
 /// A PR flow suspended on a background job.
@@ -228,17 +215,12 @@ impl App {
             two_pane: false,
             selected_path: None,
             jobs: None,
-            outstanding: HashSet::new(),
             scan_roots,
             excluded,
-            scans: HashSet::new(),
             scan_found: 0,
-            refreshes: HashSet::new(),
-            fetches: HashMap::new(),
-            pr_requests: PrRequests::new(),
+            in_flight: InFlight::new(),
             pr_flow: None,
-            pending_hooks: Vec::new(),
-            hook_jobs: HashSet::new(),
+            background: Vec::new(),
         }
     }
 
@@ -255,11 +237,7 @@ impl App {
 
     /// Drops the pool, cancelling everything queued.
     pub fn detach_worker(&mut self) {
-        self.outstanding.clear();
-        self.scans.clear();
-        self.refreshes.clear();
-        self.fetches.clear();
-        self.hook_jobs.clear();
+        self.in_flight.clear();
         // Nothing can answer the PR flow any more, so it is not left holding a
         // step for a job that will never come back. It is only ever detached on
         // the way out, so there is no modal left to tell.
@@ -274,7 +252,7 @@ impl App {
     /// above all — cannot otherwise tell: while this is true an empty list means
     /// "not found yet", and once it is false it means "there are none".
     pub fn is_scanning(&self) -> bool {
-        !self.scans.is_empty()
+        self.in_flight.any(Kind::Scan)
     }
 
     /// How many modals are stacked over the list. Zero means the list owns the
@@ -320,13 +298,13 @@ impl App {
     /// first, so a second call can neither leave behind repositories that are no
     /// longer there nor show anything twice.
     fn start_scan(&mut self) {
-        for id in std::mem::take(&mut self.scans) {
+        for id in self.in_flight.ids(Kind::Scan) {
             self.abandon(id);
         }
         // A rescan re-reads everything a refresh would have, so any refresh
         // still out is answering a question that no longer needs asking — and
         // would answer it about repositories the scan is about to replace.
-        for id in std::mem::take(&mut self.refreshes) {
+        for id in self.in_flight.ids(Kind::Refresh) {
             self.abandon(id);
         }
         self.repositories_component.replace_backends(Vec::new());
@@ -349,9 +327,7 @@ impl App {
             };
             // `None` means there is no worker, so the root was simply not
             // walked; it stays in `scan_roots` and attaching one later scans it.
-            if let Some(id) = self.submit(job) {
-                self.scans.insert(id);
-            }
+            self.submit(job, Tracked::Scan);
         }
         self.update_scan_indicator();
     }
@@ -380,10 +356,10 @@ impl App {
             debug!("a scan is already re-reading everything; ignoring the refresh");
             return;
         }
-        for id in std::mem::take(&mut self.refreshes) {
+        for id in self.in_flight.ids(Kind::Refresh) {
             self.abandon(id);
         }
-        for path in self.repositories_component.repository_paths() {
+        for path in self.repositories_component.store().paths() {
             self.refresh_repository(path);
         }
         self.update_scan_indicator();
@@ -395,9 +371,7 @@ impl App {
     /// which changed exactly one repository's remotes and so has exactly one
     /// repository's rows to correct.
     fn refresh_repository(&mut self, path: PathBuf) {
-        if let Some(id) = self.submit(Job::SpaceStatus { path }) {
-            self.refreshes.insert(id);
-        }
+        self.submit(Job::SpaceStatus { path }, Tracked::Refresh);
     }
 
     /// Fetches the remotes of the repository the selected space belongs to.
@@ -419,6 +393,7 @@ impl App {
         };
         let Some(path) = self
             .repositories_component
+            .store()
             .backend_for(&space)
             .map(|backend| backend.repo().path.clone())
         else {
@@ -429,13 +404,14 @@ impl App {
             return;
         };
 
-        if self.fetches.values().any(|fetching| fetching == &path) {
+        if self.in_flight.is_fetching(&path) {
             debug!(repo = %path.display(), "already fetching");
             return;
         }
-        if let Some(id) = self.submit(Job::FetchRemotes { path: path.clone() }) {
-            self.fetches.insert(id, path);
-        }
+        self.submit(
+            Job::FetchRemotes { path: path.clone() },
+            Tracked::Fetch(path),
+        );
         self.update_scan_indicator();
     }
 
@@ -443,9 +419,9 @@ impl App {
     ///
     /// `None` means there is no worker, and therefore that the job did not run —
     /// callers must treat that as "not now", never as "already done".
-    fn submit(&mut self, job: Job) -> Option<JobId> {
+    fn submit(&mut self, job: Job, what: Tracked) -> Option<JobId> {
         let id = self.jobs.as_ref()?.submit(job);
-        self.outstanding.insert(id);
+        self.in_flight.track(id, what);
         Some(id)
     }
 
@@ -456,11 +432,7 @@ impl App {
     fn abandon(&mut self, id: JobId) {
         // A job nobody is waiting for is also one the indicator must stop
         // counting, or an abandoned root would leave it turning forever.
-        self.scans.remove(&id);
-        self.refreshes.remove(&id);
-        self.fetches.remove(&id);
-        self.hook_jobs.remove(&id);
-        if self.outstanding.remove(&id) {
+        if self.in_flight.forget(id) {
             if let Some(worker) = &self.jobs {
                 worker.cancel(id);
             }
@@ -470,17 +442,13 @@ impl App {
     /// Takes in a finished job, or ignores it if the app has moved on.
     pub fn handle_job(&mut self, result: JobResult) {
         let kind = result.kind;
-        if !self.outstanding.remove(&result.id) {
+        if self.in_flight.finish(result.id).is_none() {
             debug!(id = ?result.id, %kind, "ignoring the result of an abandoned job");
             return;
         }
         // A job is over whether it succeeded or failed trying, so these are
         // taken here rather than in the arms below: a spinner left running by an
         // error would be a spinner that never stops.
-        self.scans.remove(&result.id);
-        self.refreshes.remove(&result.id);
-        self.fetches.remove(&result.id);
-        self.hook_jobs.remove(&result.id);
 
         // The PR flow's own job goes to the flow, not to the arms below: only it
         // knows what its answer means, and only it can put the next step on
@@ -558,9 +526,10 @@ impl App {
 
         if self.args.run_fetch {
             for path in fetch {
-                if let Some(id) = self.submit(Job::FetchRemotes { path: path.clone() }) {
-                    self.fetches.insert(id, path);
-                }
+                self.submit(
+                    Job::FetchRemotes { path: path.clone() },
+                    Tracked::Fetch(path),
+                );
             }
         }
     }
@@ -576,7 +545,7 @@ impl App {
     /// screen, and inventing a row for it would resurrect what the user removed.
     fn spaces_refreshed(&mut self, path: PathBuf, spaces: Vec<Space>) {
         let id = RepoId::from_path(&path);
-        let Some(repo) = self.repositories_component.repository(&id).cloned() else {
+        let Some(repo) = self.repositories_component.store().repository(&id).cloned() else {
             debug!(repo = %path.display(), "no longer listed; dropping its spaces");
             return;
         };
@@ -604,15 +573,16 @@ impl App {
         // Hooks come first: they are the only work the user asked for by name
         // and are waiting on, and the only work whose result changes a
         // directory they are about to open.
-        let busy = if !self.hook_jobs.is_empty() {
-            Some((Activity::SettingUp, self.hook_jobs.len()))
-        } else if !self.refreshes.is_empty() {
-            Some((Activity::Refreshing, self.refreshes.len()))
-        } else if !self.fetches.is_empty() {
-            Some((Activity::Fetching, self.fetches.len()))
-        } else {
-            None
-        };
+        let busy = [
+            (Activity::SettingUp, Kind::Hooks),
+            (Activity::Refreshing, Kind::Refresh),
+            (Activity::Fetching, Kind::Fetch),
+        ]
+        .into_iter()
+        .find_map(|(activity, kind)| match self.in_flight.count(kind) {
+            0 => None,
+            n => Some((activity, n)),
+        });
         self.worktrees_component.set_busy(busy);
     }
 
@@ -694,7 +664,7 @@ impl App {
             modals,
             args,
             focus_pane,
-            pending_hooks,
+            background,
             space_meta,
             ..
         } = self;
@@ -760,7 +730,7 @@ impl App {
             args,
             // Drawing creates nothing, so nothing is ever left here by a draw;
             // the field is part of the context, not of this call.
-            pending_hooks,
+            background,
             meta: space_meta,
         };
         // Bottom-to-top: each modal clears its own area, so the one on top wins.
@@ -871,7 +841,7 @@ impl App {
             .selected_repository()
             .map(|r| (r.repo().name.clone(), r.repo().id.clone(), r.backend()));
         if let Some((name, id, backend)) = selected {
-            let colocated = self.repositories_component.backends_of(&id).len() > 1;
+            let colocated = self.repositories_component.store().backends_of(&id).len() > 1;
             self.modals.push(Box::new(CreateWorktreeComponent::new(
                 name, backend, colocated,
             )));
@@ -928,7 +898,7 @@ impl App {
             notifications,
             modals,
             args,
-            pending_hooks,
+            background,
             space_meta,
             ..
         } = self;
@@ -939,7 +909,7 @@ impl App {
                 repositories: repositories_component,
                 notify: notifications,
                 args,
-                pending_hooks,
+                background,
                 meta: space_meta,
             };
             match modals.last_mut() {
@@ -951,8 +921,7 @@ impl App {
         let state = self.apply_flow(flow);
         // Right after the stack settled, so a modal that raised work is the one
         // the depth below is measured against.
-        self.pump_pr();
-        self.pump_hooks();
+        self.pump_background();
         state
     }
 
@@ -973,25 +942,48 @@ impl App {
         }
     }
 
-    /// Runs whatever the PR flow raised while it had the keyboard.
+    /// Submits whatever a modal deferred while it had the keyboard.
     ///
-    /// The flow cannot reach the worker itself, so this is where its requests
-    /// become jobs. Any job already out is abandoned first: a new request
-    /// supersedes it, and a closed modal wants nothing at all. That is the same
-    /// rule the rest of `App` follows — [`App::abandon`] both forgets the id and
-    /// cancels the work, so a late answer can never arrive for a flow that is no
-    /// longer on screen.
-    fn pump_pr(&mut self) {
-        let Some(command) = self.pr_requests.take() else {
-            return;
-        };
+    /// The one drain for the one seam: hooks and the PR flow both leave their
+    /// work on [`Self::background`], and neither can reach the worker itself.
+    /// Called right after the stack settles, so a modal that raised routed work
+    /// is the one the depth below is measured against.
+    ///
+    /// The two shapes are handled apart because they genuinely differ — the PR
+    /// flow's job is cancelled if its modal goes away and its answer routed back
+    /// to the step that asked, while a hook's result is about a directory that
+    /// exists, so it needs neither.
+    fn pump_background(&mut self) {
+        // Asked once, before the loop: the answer is the same for every hook
+        // plan, and with no worker a plan is run blocking rather than dropped.
+        let has_worker = self.jobs.is_some();
+        for work in std::mem::take(&mut self.background) {
+            match work {
+                BackgroundWork::Hooks(plan) => self.pump_hooks(*plan, has_worker),
+                BackgroundWork::Routed { job, step } => self.pump_routed(job, step),
+                // A closed flow wants nothing at all. `abandon` both forgets the
+                // id and cancels the work, so a late answer can never arrive for
+                // a flow that is no longer on screen.
+                BackgroundWork::Abandon => {
+                    if let Some(flow) = self.pr_flow.take() {
+                        self.abandon(flow.id);
+                    }
+                }
+            }
+        }
+        self.update_scan_indicator();
+    }
+
+    /// Starts one routed job — a step of the PR flow — and remembers it.
+    ///
+    /// Any job already out is abandoned first: a new request supersedes it. That
+    /// is the same rule the rest of `App` follows — [`App::abandon`] both forgets
+    /// the id and cancels the work.
+    fn pump_routed(&mut self, job: Job, step: PrStep) {
         if let Some(flow) = self.pr_flow.take() {
             self.abandon(flow.id);
         }
-        let PrCommand::Run { job, step } = command else {
-            return;
-        };
-        match self.submit(job) {
+        match self.submit(job, Tracked::Routed) {
             Some(id) => {
                 self.pr_flow = Some(PrFlow {
                     id,
@@ -1021,7 +1013,7 @@ impl App {
             repositories_component,
             notifications,
             args,
-            pending_hooks,
+            background,
             space_meta,
             ..
         } = self;
@@ -1031,17 +1023,16 @@ impl App {
                 repositories: repositories_component,
                 notify: notifications,
                 args,
-                pending_hooks,
+                background,
                 meta: space_meta,
             };
             resume_pr_flow(&mut ctx, flow.step, outcome)
         };
         self.apply_flow(next);
-        // The step may itself have raised the next job — a confirmed clone does.
-        self.pump_pr();
-        // ...and the last step of the PR flow creates a space, which is the
-        // other place hooks are left behind.
-        self.pump_hooks();
+        // The step may itself have deferred work: a confirmed clone raises the
+        // next routed job, and the last step of the flow creates a space, whose
+        // hooks are left on the same seam.
+        self.pump_background();
     }
 
     fn handle_worktrees_action(&mut self, action: Action) -> EventState {
@@ -1058,17 +1049,17 @@ impl App {
                 EventState::Consumed
             }
             Action::OpenPrWorktree => {
-                self.modals.push(Box::new(
-                    PrWorktreeComponent::new(false, self.pr_fetcher.clone())
-                        .sending_to(self.pr_requests.clone()),
-                ));
+                self.modals.push(Box::new(PrWorktreeComponent::new(
+                    false,
+                    self.pr_fetcher.clone(),
+                )));
                 EventState::Consumed
             }
             Action::OpenPrWorktreeAutoClone => {
-                self.modals.push(Box::new(
-                    PrWorktreeComponent::new(true, self.pr_fetcher.clone())
-                        .sending_to(self.pr_requests.clone()),
-                ));
+                self.modals.push(Box::new(PrWorktreeComponent::new(
+                    true,
+                    self.pr_fetcher.clone(),
+                )));
                 EventState::Consumed
             }
             // 'D' skips the *question*, never the guard: a space holding work
@@ -1131,41 +1122,33 @@ impl App {
         // verdict; it just gets it without a count.
         let files = self
             .repositories_component
+            .store()
             .backend_for(&space)
             .and_then(|vcs| vcs.uncommitted_files(&space));
         let risk = DeletionRisk::of(&space).counting_files(files);
         Some((space, risk))
     }
 
-    /// Submits the setup work of whatever spaces were just created.
+    /// Submits the setup work of one freshly created space.
     ///
-    /// Called wherever a modal can have created one, right after the stack
-    /// settles. Nothing is cancelled here and nothing supersedes anything: two
-    /// spaces created in a row are two independent pieces of work, and unlike a
-    /// PR lookup a hook's result is not about a modal that may have closed — it
-    /// is about a directory that exists.
+    /// Nothing is cancelled and nothing supersedes anything: two spaces created
+    /// in a row are two independent pieces of work, and unlike a PR lookup a
+    /// hook's result is not about a modal that may have closed — it is about a
+    /// directory that exists.
     ///
     /// With no worker there is nothing to run the plan on. Rather than silently
     /// dropping it — a space that quietly never gets its `.env` — the plan is
     /// run **blocking**, which is exactly the case that never has a UI to
-    /// freeze: no worker means nobody is drawing.
-    fn pump_hooks(&mut self) {
-        // Asked once, before the loop, because the answer is the same for every
-        // plan and the alternative is handing a plan to `submit` and needing it
-        // back when there was nowhere to put it.
-        let has_worker = self.jobs.is_some();
-        for plan in std::mem::take(&mut self.pending_hooks) {
-            debug!(space = %plan.target.space_name, "post-create hooks");
-            if !has_worker {
-                let report = hooks::run_and_log(&plan);
-                self.hooks_finished(report);
-                continue;
-            }
-            if let Some(id) = self.submit(Job::RunHooks(Box::new(plan))) {
-                self.hook_jobs.insert(id);
-            }
+    /// freeze: no worker means nobody is drawing. The answer is passed in rather
+    /// than asked for here so a batch of plans only queries it once.
+    fn pump_hooks(&mut self, plan: HookPlan, has_worker: bool) {
+        debug!(space = %plan.target.space_name, "post-create hooks");
+        if !has_worker {
+            let report = hooks::run_and_log(&plan);
+            self.hooks_finished(report);
+            return;
         }
-        self.update_scan_indicator();
+        self.submit(Job::RunHooks(Box::new(plan)), Tracked::Hooks);
     }
 
     /// Reports what the hooks of one space did.
@@ -1393,7 +1376,11 @@ mod tests {
         let (sender, _results) = mpsc::channel();
         app.attach_worker(Worker::with_threads(sender, 1));
 
-        assert_eq!(app.scans.len(), 2, "one scan per configured repos dir");
+        assert_eq!(
+            app.in_flight.count(Kind::Scan),
+            2,
+            "one scan per configured repos dir"
+        );
         assert!(app.is_scanning());
     }
 
@@ -1410,12 +1397,12 @@ mod tests {
         let (sender, results) = mpsc::channel();
         app.attach_worker(Worker::with_threads(sender, 1));
         // Only the scan so far: no remote has been talked to.
-        assert_eq!(app.outstanding.len(), 1);
+        assert_eq!(app.in_flight.len(), 1);
 
         app.handle_job(next_result(&results));
 
         assert!(!app.is_scanning(), "the scan never finished");
-        assert_eq!(app.outstanding.len(), 2, "the fetches were never queued");
+        assert_eq!(app.in_flight.len(), 2, "the fetches were never queued");
     }
 
     /// The list fills from the scan, and stops saying "scanning" when it lands.
@@ -1460,7 +1447,10 @@ mod tests {
     #[test]
     fn a_failed_job_becomes_a_message() {
         let (mut app, results) = app_with_worker();
-        app.submit(Job::Custom(Box::new(|| Err(eyre::eyre!("no such remote")))));
+        app.submit(
+            Job::Custom(Box::new(|| Err(eyre::eyre!("no such remote")))),
+            Tracked::Refresh,
+        );
 
         app.handle_job(next_result(&results));
 
@@ -1477,7 +1467,10 @@ mod tests {
     fn a_result_the_app_stopped_waiting_for_is_dropped() {
         let (mut app, results) = app_with_worker();
         let id = app
-            .submit(Job::Custom(Box::new(|| Err(eyre::eyre!("far too late")))))
+            .submit(
+                Job::Custom(Box::new(|| Err(eyre::eyre!("far too late")))),
+                Tracked::Refresh,
+            )
             .expect("a worker is attached");
 
         // Abandoned only *after* the result was produced — the case cancelling
@@ -1507,22 +1500,27 @@ mod tests {
         let one = repos.path().join("one");
 
         let path = one.clone();
-        app.submit(Job::Custom(Box::new(move || {
-            Ok(Completion::Fetched { path })
-        })));
+        app.submit(
+            Job::Custom(Box::new(move || Ok(Completion::Fetched { path }))),
+            Tracked::Refresh,
+        );
         app.handle_job(next_result(&results));
 
         assert_eq!(
-            app.refreshes.len(),
+            app.in_flight.count(Kind::Refresh),
             1,
             "the fetch queued no re-read of its repository"
         );
         app.on_tick();
-        assert_eq!(app.refreshes.len(), 1, "a tick re-read the list itself");
+        assert_eq!(
+            app.in_flight.count(Kind::Refresh),
+            1,
+            "a tick re-read the list itself"
+        );
 
         // And the re-read itself lands without disturbing anything else.
         app.handle_job(next_result(&results));
-        assert!(app.refreshes.is_empty() && app.outstanding.is_empty());
+        assert!(!app.in_flight.any(Kind::Refresh) && app.in_flight.is_empty());
         assert!(app.notifications.current().is_none());
     }
 
@@ -1535,7 +1533,11 @@ mod tests {
 
         app.handle_key(ch('r'));
 
-        assert_eq!(app.refreshes.len(), 2, "one re-read per repository");
+        assert_eq!(
+            app.in_flight.count(Kind::Refresh),
+            2,
+            "one re-read per repository"
+        );
         assert!(!app.is_scanning(), "a refresh must not claim to be a scan");
     }
 
@@ -1547,13 +1549,17 @@ mod tests {
         let (mut app, _results) = scanned(args);
 
         app.handle_key(ch('r'));
-        let first: Vec<JobId> = app.refreshes.iter().copied().collect();
+        let first: Vec<JobId> = app.in_flight.ids(Kind::Refresh);
         app.handle_key(ch('r'));
 
-        assert_eq!(app.refreshes.len(), 2, "the second round never started");
+        assert_eq!(
+            app.in_flight.count(Kind::Refresh),
+            2,
+            "the second round never started"
+        );
         for id in first {
-            assert!(!app.refreshes.contains(&id), "the first round survived");
-            assert!(!app.outstanding.contains(&id), "its answer is still wanted");
+            assert!(!app.in_flight.contains(id), "the first round survived");
+            assert!(!app.in_flight.contains(id), "its answer is still wanted");
         }
     }
 
@@ -1570,7 +1576,10 @@ mod tests {
         assert!(app.is_scanning(), "this must be tested mid-scan");
         app.handle_key(ch('r'));
 
-        assert!(app.refreshes.is_empty(), "a refresh raced the scan");
+        assert!(
+            !app.in_flight.any(Kind::Refresh),
+            "a refresh raced the scan"
+        );
     }
 
     /// `R` walks the repos dirs again. The roots therefore have to survive the
@@ -1584,7 +1593,11 @@ mod tests {
 
         app.handle_key(ch('R'));
 
-        assert_eq!(app.scans.len(), 1, "the repos dir was not walked again");
+        assert_eq!(
+            app.in_flight.count(Kind::Scan),
+            1,
+            "the repos dir was not walked again"
+        );
         assert!(app.is_scanning(), "the spinner must say so");
         assert_eq!(app.scan_found, 0, "a rescan counts from zero");
     }
@@ -1597,16 +1610,12 @@ mod tests {
         let (mut app, _results) = scanned(args);
         // The fixture's repositories have no spaces, so a row is added by hand:
         // `f` fetches the repository behind the *selected* space.
-        let Some(entry) = app
-            .repositories_component
-            .repository_paths()
-            .first()
-            .cloned()
-        else {
+        let Some(entry) = app.repositories_component.store().paths().first().cloned() else {
             panic!("the scan found no repository");
         };
         let repo = app
             .repositories_component
+            .store()
             .repository(&RepoId::from_path(&entry))
             .expect("the repository is listed")
             .clone();
@@ -1623,10 +1632,14 @@ mod tests {
         });
 
         app.handle_key(ch('f'));
-        assert_eq!(app.fetches.len(), 1, "the fetch was never queued");
+        assert_eq!(
+            app.in_flight.count(Kind::Fetch),
+            1,
+            "the fetch was never queued"
+        );
         app.handle_key(ch('f'));
         assert_eq!(
-            app.fetches.len(),
+            app.in_flight.count(Kind::Fetch),
             1,
             "the same repository was fetched twice"
         );
