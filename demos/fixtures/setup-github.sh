@@ -9,10 +9,10 @@ set -euo pipefail
 
 DEMOS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPOS_DIR="$DEMOS_DIR/repos-dir"
-WORKTREES_DIR="$DEMOS_DIR/worktrees-dir"
+SPACES_DIR="$DEMOS_DIR/spaces-dir"
 
-rm -rf "$REPOS_DIR" "$WORKTREES_DIR"
-mkdir -p "$REPOS_DIR" "$WORKTREES_DIR"
+rm -rf "$REPOS_DIR" "$SPACES_DIR"
+mkdir -p "$REPOS_DIR" "$SPACES_DIR"
 
 for demo_repo in first-repo second-repo; do
   git clone --quiet "git@github.com:muzomer/${demo_repo}.git" "$REPOS_DIR/$demo_repo"

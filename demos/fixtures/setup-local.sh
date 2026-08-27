@@ -10,11 +10,11 @@ set -euo pipefail
 
 DEMOS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPOS_DIR="$DEMOS_DIR/repos-dir"
-WORKTREES_DIR="$DEMOS_DIR/worktrees-dir"
+SPACES_DIR="$DEMOS_DIR/spaces-dir"
 REMOTES_DIR="$DEMOS_DIR/.remotes"
 
-rm -rf "$REPOS_DIR" "$WORKTREES_DIR" "$REMOTES_DIR"
-mkdir -p "$REPOS_DIR" "$WORKTREES_DIR" "$REMOTES_DIR"
+rm -rf "$REPOS_DIR" "$SPACES_DIR" "$REMOTES_DIR"
+mkdir -p "$REPOS_DIR" "$SPACES_DIR" "$REMOTES_DIR"
 
 make_git_repo() {
   local name="$1"

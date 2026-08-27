@@ -38,12 +38,12 @@ The output path is whatever `Output` says at the top of the `.tape` file, and la
 
 1. Decide if it needs GitHub. If not, write against `demos/repos-dir/` as populated by `setup-local.sh` — don't invent new fixture repos in the tape itself; extend `setup-local.sh` if the demo needs a repo shape that doesn't exist yet (e.g. a repo with local uncommitted changes, to show jj's auto-commit behavior).
 2. Copy the header block from `demos/features.tape` (`FontSize 20`, `Theme TokyoNight`, `Padding 2`, `BorderRadius 8`, `TypingSpeed 75ms`) so every demo shares one look. Don't invent a new theme or font size per-demo.
-3. Hide the `export SHANTI_REPOS_DIR=...` / `SHANTI_WORKTREES_DIR=...` preamble (`Hide` / `Show`) — viewers don't need to see env setup.
+3. Hide the `export SHANTI_REPOS_DIR=...` / `SHANTI_SPACES_DIR=...` preamble (`Hide` / `Show`) — viewers don't need to see env setup.
 4. Keep one tape scoped to one story. Prefer a new small `.tape` file over growing `features.tape` further — it's already the README hero and doesn't need to carry every feature.
 5. Run it, watch the GIF, iterate on `Sleep` durations — vhs doesn't wait for shanti to finish rendering a frame, so an action immediately followed by too short a `Sleep` gets cut off in the recording even though the real app rendered it fine.
 
 ## Rules
 
-- Never commit `demos/repos-dir/`, `demos/worktrees-dir/`, or `demos/.remotes/` — all gitignored, regenerate don't hand-edit.
+- Never commit `demos/repos-dir/`, `demos/spaces-dir/`, or `demos/.remotes/` — all gitignored, regenerate don't hand-edit.
 - Don't add Docker back. The old pipeline built shanti and ran vhs inside a container to get a consistent environment; running `cargo build --release` + the system `vhs` binary directly is simpler and was the whole point of replacing it.
 - If `jj` isn't on `PATH`, `setup-local.sh` skips the `infra-repo` fixture rather than failing — mirrors how `src/vcs/jj/testing.rs` skips jj tests when `jj` is missing. Don't make a demo hard-depend on the jj fixture existing without checking for this.

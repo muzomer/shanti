@@ -22,12 +22,12 @@ Set Height 600
 Hide
 Type@0s "export SHANTI_REPOS_DIR=./repos-dir"
 Enter
-Type@0s "export SHANTI_WORKTREES_DIR=./worktrees-dir"
+Type@0s "export SHANTI_SPACES_DIR=./spaces-dir"
 Enter
 Sleep 2s
 Show
 
-Type@0s "tree -d ./worktrees-dir/"
+Type@0s "tree -d ./spaces-dir/"
 Enter
 Sleep 2s
 
@@ -123,6 +123,6 @@ Type@0s "cd -"
 Enter
 Sleep 1s
 
-Type@0s "tree -d worktrees-dir/"
+Type@0s "tree -d spaces-dir/"
 Enter
 Sleep 4s
