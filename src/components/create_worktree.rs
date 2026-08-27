@@ -1,37 +1,66 @@
-use ratatui::{
-    layout::{Constraint, Layout, Rect},
-    style::{
-        palette::tailwind::{AMBER, GREEN, RED, SLATE},
-        Color, Style, Stylize,
-    },
-    text::{Line, Span},
-    widgets::{Block, BorderType, Clear, Padding, Paragraph, Widget},
-    Frame,
-};
+use crate::keymap::InputMode;
+use ratatui::{layout::Rect, Frame};
 
-use super::{Action, EventState};
+use super::{
+    footer_entries, popup_area,
+    prompt::{prompt_width, Prompt, PROMPT_HEIGHT},
+    Action, AppContext, EventState, Extent, HelpEntry, Modal, ModalFlow, ModalKind, KEYS_SECTION,
+};
+use crate::theme;
+use crate::vcs::Backend;
+
+/// Title case for a backend's own word for a space ("worktree" -> "Worktree").
+fn capitalised(word: &str) -> String {
+    let mut chars = word.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
 
 pub struct CreateWorktreeComponent {
     character_index: usize,
     pub new_worktree_name: String,
     repo_name: String,
+    /// The backend this prompt will create through.
+    ///
+    /// Carried rather than looked up at draw time because it is what the prompt
+    /// *promises*: on a colocated repository "new space" is ambiguous, and a
+    /// prompt that says "worktree" while creating a jj workspace would be a lie
+    /// the user only discovers afterwards.
+    backend: Backend,
+    /// Whether the repository is driven by more than one backend. Purely so the
+    /// prompt can explain why it picked one, instead of silently choosing.
+    colocated: bool,
     pub base_branch_hint: Option<String>,
     pub warning: Option<String>,
+    /// The pull request this prompt was opened for, when it was.
+    ///
+    /// Carried through the prompt rather than recorded when the flow opened it,
+    /// because the space does not exist until the user presses Enter here — and
+    /// a PR the user then abandoned must not be remembered against a space that
+    /// was never made.
+    pub pr_url: Option<String>,
 }
 
 impl CreateWorktreeComponent {
-    pub fn new(repo_name: String) -> Self {
+    pub fn new(repo_name: String, backend: Backend, colocated: bool) -> Self {
         Self {
             character_index: 0,
             new_worktree_name: String::new(),
             repo_name,
+            backend,
+            colocated,
             base_branch_hint: None,
             warning: None,
+            pr_url: None,
         }
     }
 
     pub fn new_with_branch(
         repo_name: String,
+        backend: Backend,
+        colocated: bool,
         branch_name: String,
         warning: Option<String>,
     ) -> Self {
@@ -40,72 +69,63 @@ impl CreateWorktreeComponent {
             character_index,
             new_worktree_name: branch_name,
             repo_name,
+            backend,
+            colocated,
             base_branch_hint: None,
             warning,
+            pr_url: None,
         }
     }
 
     pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
-        frame.render_widget(Clear, area);
+        // A name that is merely unfinished is not an error: only an outright
+        // invalid one turns the box red.
+        let valid =
+            self.new_worktree_name.is_empty() || is_valid_branch_name(&self.new_worktree_name);
 
-        let input_border_style =
-            if self.new_worktree_name.is_empty() || is_valid_branch_name(&self.new_worktree_name) {
-                super::ACTIVE_BORDER_STYLE
-            } else {
-                Style::new().fg(Color::Red)
-            };
-
-        let outer_block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(super::POPUP_BORDER_STYLE)
-            .title(Line::from(" New Worktree ").style(Style::new().fg(GREEN.c300).bold()))
-            .title_top(
-                Line::from(format!(" repo: {} ", self.repo_name))
-                    .style(Style::new().fg(SLATE.c400))
-                    .right_aligned(),
+        // A colocated repository could take either backend, so the prompt says
+        // out loud which one it picked rather than leaving the user to discover
+        // it in the list afterwards.
+        let aside = self.colocated.then(|| {
+            (
+                // Kept short so it survives the fit check on a narrow popup: this
+                // is the one thing about a colocated repository the user cannot
+                // work out from the rest of the prompt. `Tab` switches which
+                // backend the space is made through.
+                format!("colocated → {} · Tab to switch", self.backend.space_noun()),
+                theme::warning_text(),
             )
-            .title_bottom(keybinding_hint());
+        });
 
-        let inner_area = outer_block.inner(area);
-        outer_block.render(area, frame.buffer_mut());
+        // A warning about the branch outranks a note about where it will start.
+        let status = match (&self.warning, &self.base_branch_hint) {
+            (Some(warning), _) => Some((warning.clone(), theme::warning_text())),
+            (None, Some(hint)) => Some((hint.clone(), theme::secondary())),
+            (None, None) => None,
+        };
 
-        let [_, label_area, input_area, hint_area] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(3),
-            Constraint::Length(1),
-        ])
-        .horizontal_margin(4)
-        .areas(inner_area);
+        // Titled in the vocabulary of the backend that will do the work, so a jj
+        // user is not offered a "worktree" they will never see.
+        let title = format!("New {}", capitalised(self.backend.space_noun()));
 
-        Paragraph::new("Branch name:")
-            .style(Style::new().fg(SLATE.c300))
-            .render(label_area, frame.buffer_mut());
-
-        Paragraph::new(self.new_worktree_name.as_str())
-            .block(
-                Block::bordered()
-                    .border_type(BorderType::Rounded)
-                    .border_style(input_border_style)
-                    .padding(Padding::horizontal(1)),
-            )
-            .render(input_area, frame.buffer_mut());
-
-        if let Some(warning) = &self.warning {
-            Paragraph::new(warning.as_str())
-                .style(Style::new().fg(AMBER.c300))
-                .render(hint_area, frame.buffer_mut());
-        } else if let Some(hint) = &self.base_branch_hint {
-            Paragraph::new(hint.as_str())
-                .style(Style::new().fg(SLATE.c400))
-                .render(hint_area, frame.buffer_mut());
+        Prompt {
+            title: &title,
+            context: Some(format!("{} · {}", self.repo_name, self.backend)),
+            label: match self.backend {
+                Backend::Git => "Branch name",
+                Backend::Jj => "Bookmark name",
+            },
+            aside,
+            value: &self.new_worktree_name,
+            placeholder: "type a name…",
+            cursor: self.character_index,
+            valid,
+            status,
+            // Read off the same table the help popup shows, so the prompt cannot
+            // promise one thing here and another there.
+            footer: footer_entries(&self.help(), KEYS_SECTION),
         }
-
-        // input_area: border(1) + padding(1) = offset 2; y+1 skips top border row
-        frame.set_cursor_position((
-            input_area.x + 2 + self.character_index as u16,
-            input_area.y + 1,
-        ));
+        .render(frame, area);
     }
 
     pub fn handle_action(&mut self, action: Action) -> EventState {
@@ -173,14 +193,100 @@ impl CreateWorktreeComponent {
     }
 }
 
-fn keybinding_hint() -> Line<'static> {
-    Line::from(vec![
-        Span::styled("[Enter] ", Style::new().fg(GREEN.c400).bold()),
-        Span::styled("confirm", Style::new().fg(SLATE.c500)),
-        Span::styled("  [Esc] ", Style::new().fg(RED.c400).bold()),
-        Span::styled("cancel ", Style::new().fg(SLATE.c500)),
-    ])
-    .right_aligned()
+impl Modal for CreateWorktreeComponent {
+    fn kind(&self) -> ModalKind {
+        ModalKind::CreateWorktree
+    }
+
+    fn area(&self, full: Rect) -> Rect {
+        // A branch name is short; the floor is set by the base-branch sentence
+        // beneath it, which is the longest thing this popup ever says.
+        popup_area(full, prompt_width(55, 36, 90), Extent::fixed(PROMPT_HEIGHT))
+    }
+
+    fn draw(&mut self, frame: &mut Frame, area: Rect, _ctx: &mut AppContext) {
+        CreateWorktreeComponent::draw(self, frame, area);
+    }
+
+    fn mode(&self) -> InputMode {
+        InputMode::Insert
+    }
+
+    fn handle(&mut self, action: Action, ctx: &mut AppContext) -> ModalFlow {
+        match action {
+            Action::Select => {
+                if !self.new_worktree_name.is_empty() {
+                    match ctx.create_space_via(&self.new_worktree_name, self.backend) {
+                        // The new row is the success message; all that is left
+                        // to do is retire a failure the user has since fixed.
+                        Ok(path) => {
+                            if let Some(url) = &self.pr_url {
+                                ctx.remember_pr(&path, url);
+                            }
+                            ctx.notify.clear()
+                        }
+                        Err(e) => ctx.notify.error(format!("{:#}", e)),
+                    }
+                }
+                ModalFlow::Close
+            }
+            Action::ClosePopup | Action::ExitInsertMode => ModalFlow::Close,
+            // Tab switches the target backend, but only where there is a choice:
+            // a colocated repository can take a git worktree or a jj workspace.
+            // The base branch is backend-specific, so it is recomputed here.
+            Action::FocusNext if self.colocated => {
+                self.backend = match self.backend {
+                    Backend::Jj => Backend::Git,
+                    Backend::Git => Backend::Jj,
+                };
+                self.base_branch_hint = (!self.new_worktree_name.is_empty())
+                    .then(|| {
+                        ctx.repositories
+                            .selected_backend(self.backend)
+                            .map(|r| r.resolve_base(&self.new_worktree_name))
+                    })
+                    .flatten();
+                ModalFlow::Consumed
+            }
+            _ => {
+                let result = self.handle_action(action);
+                if result == EventState::Consumed {
+                    // The base branch is derived from the name, so it is
+                    // recomputed on every accepted keystroke.
+                    self.base_branch_hint = if self.new_worktree_name.is_empty() {
+                        None
+                    } else {
+                        ctx.repositories
+                            .selected_backend(self.backend)
+                            .map(|r| r.resolve_base(&self.new_worktree_name))
+                    };
+                }
+                result.into()
+            }
+        }
+    }
+
+    fn help(&self) -> Vec<HelpEntry> {
+        let mut entries = vec![
+            HelpEntry::Section(KEYS_SECTION),
+            HelpEntry::bind("Enter", "Create worktree").hint("Enter", "create"),
+            HelpEntry::bind("F1", "Show this help")
+                .hint("F1", "help")
+                .aside(),
+            HelpEntry::bind("Esc", "Cancel")
+                .hint("Esc", "cancel")
+                .safe()
+                .essential(),
+            HelpEntry::bind("Backspace", "Delete character"),
+            HelpEntry::bind("Ctrl+C", "Quit"),
+        ];
+        // Only a colocated repository has a backend to switch between.
+        if self.colocated {
+            entries
+                .push(HelpEntry::bind("Tab", "Switch backend (git / jj)").hint("Tab", "backend"));
+        }
+        entries
+    }
 }
 
 fn is_valid_branch_char(c: char) -> bool {

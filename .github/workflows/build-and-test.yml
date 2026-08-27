@@ -6,18 +6,29 @@ on:
       - main
     tags:
       - "v*.*.*"
+  # Verify a branch *before* it lands, not after it has already been merged.
+  pull_request:
+    branches:
+      - main
+
+# A new push to a PR makes the in-flight run obsolete; cancel it to keep the
+# queue short. Pushes to main and tags are never cancelled — each one is a
+# distinct group and must produce its own artifacts/release.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  # Pinned jujutsu release used by the jj integration tests. Bump deliberately.
+  JJ_VERSION: "0.40.0"
 
 jobs:
-  build_and_test:
-    name: build and test on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            artifact_name: shanti-linux-latest
-          - os: macos-latest
-            artifact_name: shanti-macos-latest
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
     steps:
       - name: Check out repository code
         uses: actions/checkout@v4
@@ -26,13 +37,88 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
-          profile: minimal
+          components: rustfmt
+          # Formatting never compiles the crate, so a cargo cache would only
+          # cost upload/download time.
+          cache: false
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: clippy
+          # Distinct key: this job builds debug artifacts, the build job builds
+          # release ones. Sharing one cache entry would thrash both.
+          cache-key: clippy
+
+      # --all-targets covers tests and examples, not just the library/binary.
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  build_and_test:
+    name: build and test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: shanti-linux-latest
+            # Target triple of the prebuilt jj release asset for this runner.
+            jj_target: x86_64-unknown-linux-musl
+          - os: macos-latest
+            artifact_name: shanti-macos-latest
+            jj_target: aarch64-apple-darwin
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          # Caches ~/.cargo (registry, git DB) and ./target, keyed per OS, so
+          # the jobs added above do not double the wall-clock time of CI.
+          cache-key: release
+
+      # The jj integration tests drive a real `jj` binary and skip themselves
+      # when there is none, so without this step the whole jj backend would be
+      # silently untested here. The upstream release ships prebuilt binaries;
+      # use them rather than paying for a source build on every run. The
+      # version is pinned so a broken upstream release cannot break CI on its
+      # own schedule, and is kept well above src/vcs/jj/version.rs's
+      # MINIMUM_JJ_VERSION.
+      - name: Install jujutsu ${{ env.JJ_VERSION }}
+        run: |
+          set -euo pipefail
+          asset="jj-v${JJ_VERSION}-${{ matrix.jj_target }}.tar.gz"
+          url="https://github.com/jj-vcs/jj/releases/download/v${JJ_VERSION}/${asset}"
+          mkdir -p "$RUNNER_TEMP/jj"
+          curl --proto '=https' --tlsv1.2 -fsSL "$url" | tar -xz -C "$RUNNER_TEMP/jj"
+          echo "$RUNNER_TEMP/jj" >> "$GITHUB_PATH"
+
+      - name: Verify jujutsu is on PATH
+        run: jj --version
 
       - name: Build
         run: cargo build --verbose --release
 
       - name: Test
         run: cargo test --verbose --release
+        env:
+          # jj is installed above, so a jj test that skips itself here means CI
+          # has regressed to the silent-pass this variable exists to prevent:
+          # turn that skip into a failure.
+          SHANTI_REQUIRE_JJ: "1"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -43,42 +129,34 @@ jobs:
 
   release:
     name: release
-    needs: build_and_test
+    needs: [fmt, clippy, build_and_test]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
+      # action-gh-release uploads assets under their on-disk basename and has
+      # no rename option, so give each binary its final asset name here
+      # before the release step, preserving the old asset_name values.
+      - name: Rename release assets
+        run: |
+          mv artifacts/shanti-linux-latest/shanti artifacts/shanti-linux-latest/shanti-linux-latest
+          mv artifacts/shanti-macos-latest/shanti artifacts/shanti-macos-latest/shanti-macos-latest
+
       - name: Create release
-        id: create_release
-        uses: actions/create-release@v1
+        uses: softprops/action-gh-release@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ github.ref_name }}
-          release_name: Release ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
           draft: false
           prerelease: false
-
-      - name: Upload Linux release asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: artifacts/shanti-linux-latest/shanti
-          asset_name: shanti-linux-latest
-          asset_content_type: application/octet-stream
-
-      - name: Upload macOS release asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: artifacts/shanti-macos-latest/shanti
-          asset_name: shanti-macos-latest
-          asset_content_type: application/octet-stream
+          files: |
+            artifacts/shanti-linux-latest/shanti-linux-latest
+            artifacts/shanti-macos-latest/shanti-macos-latest

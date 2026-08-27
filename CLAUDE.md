@@ -1,10 +1,42 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Orientation for coding agents working in this repository.
 
 # Shanti
 
-Rust CLI tool for creating and managing git worktrees across multiple repositories. Uses a ratatui TUI, git2 for git operations, and color-eyre for error handling.
+Rust TUI for creating and managing **spaces** — git worktrees and jujutsu workspaces — across many repositories, so several concurrent features or PRs each get their own checked-out directory that is easy to switch between.
+
+Three files, three jobs, no overlap:
+
+- **`README.md`** — the tool for the person _using_ it: features, keybindings,
+  configuration, environment variables, status glyphs.
+- **`CONTEXT.md`** — the vocabulary. What a *space*, a *backend* or an *inbox
+  item* means here. Use those words; the code is named after them.
+- **this file** — how to build, test and write code that fits in.
+
+How the source is arranged is deliberately written down nowhere: it is
+discoverable from the tree, and a description of it in prose is a description
+that goes stale.
+
+## Tech Stack & Tooling
+
+- Language: Rust
+- UI: Ratatui (v0.30+) + Crossterm
+- git: the `git2` library. jujutsu: the `jj` **command-line tool** (never a linked library).
+
+## UI & Design Guidelines
+
+- Avoid generic plain-text or default block layouts.
+- **Colour is chosen in one place, and by meaning.** A component asks for the
+  role it is drawing — a title, a muted detail, a selected row, a destructive
+  border — never for a hue. That is what lets the user change scheme while the
+  app is running and have the next frame repaint.
+- Bold accent colours for active headers, dimmed text for secondary detail, a
+  high-contrast band for the selected row.
+- Constraint-based layouts with strict minimums, so resizing degrades in a way
+  that was chosen rather than clipped. Content that no longer fits is hidden,
+  not cut in half.
+- Every screen carries a vim-style keybinding footer.
 
 ## Build & Test
 
@@ -17,57 +49,26 @@ cargo fmt --check                # format check (must pass)
 cargo fmt                        # auto-format
 ```
 
-## Project Structure
-
-```
-src/
-  main.rs                        # entry point, terminal setup/teardown, event loop
-  app.rs                         # App struct: holds all components, routes key events, manages Focus
-  cli.rs                         # clap CLI args (--repos-dir, --worktrees-dir, --run-fetch)
-  keymap.rs                      # key→Action resolution; InputMode (Normal/Insert)
-  github.rs                      # GitHub PR URL parsing, PR info fetching, repo cloning
-  lib.rs                         # re-exports
-  logs.rs                        # tracing setup
-  dirs.rs                        # directory resolution helpers
-  git/
-    mod.rs                       # public API: list_repositories, worktrees_of_repositories
-    repository.rs                # Repository wrapper around git2::Repository; worktree creation, fetch
-    worktree.rs                  # Worktree wrapper; delete_worktree
-  components/
-    mod.rs                       # Action enum, EventState enum, shared style constants
-    worktrees.rs                 # WorktreesComponent — main list view (default focus)
-    repositories.rs              # RepositoriesComponent — popup for repo selection
-    create_worktree.rs           # CreateWorktreeComponent — popup text input for branch name
-    confirm.rs                   # ConfirmComponent — generic yes/no confirmation dialog
-    help.rs                      # HelpComponent — context-sensitive keybinding help popup
-    pr_worktree.rs               # PrWorktreeComponent — popup text input for GitHub PR URL
-    list.rs                      # generic list widget used by worktrees/repositories components
-    filter.rs                    # filter/search logic for lists
-```
-
-## Key Concepts
-
-- **Focus** (`app.rs`): six variants — `Worktrees`, `Repositories`, `CreateWorktree`, `Confirm`, `Help`, `PrWorktree`. Only one has keyboard focus at a time.
-- **InputMode** (`keymap.rs`): `Normal` (vi-style nav) or `Insert` (text entry). `keymap::resolve(mode, key)` maps a `KeyEvent` to an `Action`.
-- **Action** (`components/mod.rs`): enum of all user intents (e.g. `MoveDown`, `Select`, `Delete`, `OpenPrWorktree`). `App::handle_key` resolves keys to actions then dispatches to the focused component handler.
-- **EventState** (`components/mod.rs`): `Consumed`, `NotConsumed`, `Exit`. Components return this from `handle_action` to indicate whether they handled the event.
-- **Worktrees** are stored under `SHANTI_WORKTREES_DIR/<repo-name>/<branch-name>/`.
-- **Repositories** are discovered by recursively scanning `SHANTI_REPOS_DIR` for `.git` directories.
-- **`has_remote_branch`** on `Worktree` indicates whether the local branch has a tracking upstream.
-- **GitHub integration** (`github.rs`): `p` opens a PR URL prompt; `P` does the same but auto-creates the worktree. Auth uses `gh` CLI first (with `GITHUB_TOKEN` if set), then falls back to `ureq` + `GITHUB_TOKEN`. If the repo isn't found locally, the user is prompted to clone it via SSH.
-
-## Environment Variables
-
-| Variable | CLI flag | Description |
-|---|---|---|
-| `SHANTI_REPOS_DIR` | `--repos-dir` | Directory containing git repositories |
-| `SHANTI_WORKTREES_DIR` | `--worktrees-dir` | Directory where worktrees are created |
+The jj tests need a real `jj` (0.28.0+) on `PATH`; when it is missing the
+fixtures in `src/vcs/jj/testing.rs` make those tests **skip**, not fail.
 
 ## Conventions
 
 - Use `color-eyre` for error propagation: `eyre::Result`, `.wrap_err("...")`.
-- Use `tracing` macros (`debug!`, `error!`) for logging — no `println!` in library code.
-- SSH agent auth is used for git fetch (`Cred::ssh_key_from_agent`). HTTPS auth is not yet implemented (see TODO in `repository.rs`).
-- New TUI components should implement `draw(&mut self, frame: &mut Frame, area: Rect)` and `handle_key(&mut self, key: KeyEvent) -> EventState`.
-- Tests use `tempfile::tempdir()` for filesystem isolation.
+- Use `tracing` macros (`debug!`, `error!`) for logging — no `println!` in library
+  code. `main.rs` is the only place that writes to stdout (the selected path,
+  which `cd $(shanti)` consumes) or stderr.
+- Comment the _why_ — intent, trade-offs, gotchas — not the _what_. The house
+  style is a module-level doc comment stating the rule the module exists to
+  enforce.
+- A failed fetch costs a stale view of the remotes and nothing else: never drop a
+  repository from the list or abort a flow because of it.
+- git fetch authenticates through the **SSH agent** only; HTTPS credentials are
+  not implemented.
+- A new popup is a new `Modal` implementation, not another field on `App`.
+- Tests use `tempfile::tempdir()` for filesystem isolation, and a local _bare_
+  repository stands in for `origin` so the suite runs offline.
 
+## Issue tracking
+
+This project uses **bd (beads)**. See the `beads` skill for the full workflow.

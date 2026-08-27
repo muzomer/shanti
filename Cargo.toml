@@ -1,29 +1,32 @@
 [package]
 name = "shanti"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 authors = ["Muzaffar Omer <muzaffar.omer@gmail.com>"]
-description = "Tool to create and manage git worktrees"
+description = "Tool to create and manage git worktrees and jujutsu workspaces"
 readme = "README.md"
 repository = "https://github.com/muzomer/shanti"
 license-file = "LICENSE"
-keywords = ["git", "worktree", "workspace"]
+keywords = ["git", "jujutsu", "worktree", "workspace", "tui"]
 categories = ["command-line-utilities"]
 
 [dependencies]
 clap = { version = "4.5.29", features = ["derive", "env"] }
 color-eyre = "0.6.3"
-crossterm = "0.28.1"
+crossterm = "0.29.0"
 directories = "6.0.0"
 expand-tilde = "0.6.1"
 git2 = "0.20.0"
 lazy_static = "1.5.0"
 nucleo-matcher = "0.3.1"
-ratatui = "0.29.0"
+ratatui = "0.30.2"
 rayon = "1.10.0"
 tracing = "0.1.41"
 tracing-error = "0.2.1"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.8"
+toml_edit = "0.22"
 ureq = { version = "3", features = ["json"] }
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 
