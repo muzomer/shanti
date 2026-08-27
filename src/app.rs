@@ -1081,11 +1081,17 @@ impl App {
                 }
                 EventState::Consumed
             }
-            // 'D' deletes right away, no matter what it would cost — the
-            // confirmed path ('d') is one keypress away for anyone who wants the
-            // dialog first.
+            // 'D' skips the dialog only when there is nothing to lose; a space
+            // holding unsaved work still raises the same guard 'd' would, so an
+            // override can never destroy work the user never saw named.
             Action::ForceDelete => {
-                self.delete_selected_worktree();
+                match self.selected_space_risk() {
+                    Some((space, risk)) if !risk.is_safe() => {
+                        self.modals.push(Box::new(confirm_delete(&space, risk)));
+                    }
+                    Some(_) => self.delete_selected_worktree(),
+                    None => {}
+                }
                 EventState::Consumed
             }
             Action::DeleteWithConfirmation => {
