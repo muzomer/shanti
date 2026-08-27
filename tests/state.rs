@@ -462,7 +462,7 @@ fn starts_on_the_worktree_list_in_normal_mode() {
     let mut f = Fixture::new();
     f.assert_at_worktree_list();
     assert!(
-        f.screen().contains("Worktrees (1/1)"),
+        f.screen().contains("Spaces (1/1)"),
         "fixture worktree should be listed:\n{}",
         f.screen()
     );
@@ -683,13 +683,13 @@ fn worktrees_insert_mode_types_into_the_filter() {
     f.press_char('i');
     f.type_str("feature");
     assert!(
-        f.screen().contains("Worktrees (1/1)"),
+        f.screen().contains("Spaces (1/1)"),
         "matching filter should keep the worktree visible"
     );
 
     f.type_str("-zzz");
     assert!(
-        f.screen().contains("Worktrees (0/0)"),
+        f.screen().contains("Spaces (0/0)"),
         "non-matching filter should empty the list:\n{}",
         f.screen()
     );
@@ -698,7 +698,7 @@ fn worktrees_insert_mode_types_into_the_filter() {
     for _ in 0.."-zzz".len() {
         f.press(key(KeyCode::Backspace));
     }
-    assert!(f.screen().contains("Worktrees (1/1)"));
+    assert!(f.screen().contains("Spaces (1/1)"));
 }
 
 #[test]
@@ -992,7 +992,7 @@ fn create_worktree_with_an_empty_name_is_a_no_op_that_closes_the_prompt() {
 
     f.assert_at_worktree_list();
     assert!(
-        f.screen().contains("Worktrees (1/1)"),
+        f.screen().contains("Spaces (1/1)"),
         "no worktree should have been created:\n{}",
         f.screen()
     );
@@ -1143,7 +1143,7 @@ fn cancelling_the_confirm_modal_leaves_the_worktree_untouched() {
     assert_eq!(f.press(key(KeyCode::Esc)), CONSUMED);
     f.assert_at_worktree_list();
     assert!(path.exists(), "cancelling must not delete the worktree");
-    assert!(f.screen().contains("Worktrees (1/1)"));
+    assert!(f.screen().contains("Spaces (1/1)"));
 }
 
 /// A space that is clean and pushed still deletes in one confirmation: the
@@ -1161,7 +1161,7 @@ fn confirming_the_delete_removes_the_worktree_and_returns_to_the_list() {
     assert_eq!(f.modal(), None);
     assert!(!path.exists(), "the worktree directory should be gone");
     assert!(
-        f.screen().contains("Worktrees (0/0)"),
+        f.screen().contains("Spaces (0/0)"),
         "the deleted worktree should be gone from the list:\n{}",
         f.screen()
     );
@@ -1185,7 +1185,7 @@ fn enter_cannot_delete_a_worktree_that_was_never_pushed() {
         "the dialog must stay up until the override is given"
     );
     assert!(path.exists(), "Enter alone must not delete unpushed work");
-    assert!(f.screen().contains("Worktrees (1/1)"));
+    assert!(f.screen().contains("Spaces (1/1)"));
 }
 
 /// The override for permanent loss: one deliberate key that is not Enter.
@@ -1202,7 +1202,7 @@ fn the_override_deletes_a_worktree_that_was_never_pushed() {
 
     assert_eq!(f.modal(), None);
     assert!(!path.exists(), "the worktree directory should be gone");
-    assert!(f.screen().contains("Worktrees (0/0)"));
+    assert!(f.screen().contains("Spaces (0/0)"));
 }
 
 /// Stray typing is swallowed, and Enter behind it still decides nothing.
@@ -1369,7 +1369,7 @@ fn delete_with_confirmation_on_an_empty_list_does_not_open_the_modal() {
 
     // Remove the only worktree first, deliberately.
     f.delete_deliberately("feature-one");
-    assert!(f.screen().contains("Worktrees (0/0)"));
+    assert!(f.screen().contains("Spaces (0/0)"));
 
     assert_eq!(f.press_char('d'), CONSUMED);
     assert_eq!(
@@ -1801,7 +1801,7 @@ fn multiple_repos_dirs_still_start_on_the_worktree_list() {
     // driven in the PR-flow tests above, through the stubbed lookup.
     let mut f = Fixture::with_two_repos_dirs();
     f.assert_at_worktree_list();
-    assert!(f.screen().contains("Worktrees (1/1)"));
+    assert!(f.screen().contains("Spaces (1/1)"));
 
     f.press_char('n');
     assert_eq!(f.modal(), Some(ModalKind::Repositories));
@@ -1868,7 +1868,7 @@ fn the_first_frame_is_drawn_before_any_repository_is_found() {
 
     assert!(f.app.is_scanning(), "the scan should still be running");
     let screen = f.screen();
-    assert!(screen.contains("Worktrees (0/0)"), "{screen}");
+    assert!(screen.contains("Spaces (0/0)"), "{screen}");
     assert!(
         screen.contains("scanning"),
         "an empty list must say why it is empty: {screen}"
@@ -1906,13 +1906,13 @@ fn the_list_can_be_navigated_during_a_scan() {
     assert!(f.app.is_scanning(), "this must be tested mid-scan");
 
     assert!(
-        f.screen().contains("Worktrees (1/2)"),
+        f.screen().contains("Spaces (1/2)"),
         "the first root's rows should already be selectable"
     );
     assert_eq!(f.press_char('j'), CONSUMED);
-    assert!(f.screen().contains("Worktrees (2/2)"), "j did not move");
+    assert!(f.screen().contains("Spaces (2/2)"), "j did not move");
     assert_eq!(f.press_char('k'), CONSUMED);
-    assert!(f.screen().contains("Worktrees (1/2)"), "k did not move");
+    assert!(f.screen().contains("Spaces (1/2)"), "k did not move");
 
     // And selecting one mid-scan hands back its path, as it would at rest.
     assert_eq!(f.press(key(KeyCode::Enter)), EXIT);
@@ -1934,7 +1934,7 @@ fn a_filter_typed_during_a_scan_survives_the_next_batch() {
     f.type_str("feature-alpha");
     let filtered = f.screen();
     assert!(
-        filtered.contains("Worktrees (1/1)"),
+        filtered.contains("Spaces (1/1)"),
         "the filter should narrow the arrived rows: {filtered}"
     );
 
@@ -1943,7 +1943,7 @@ fn a_filter_typed_during_a_scan_survives_the_next_batch() {
 
     let after = f.screen();
     assert!(
-        after.contains("Worktrees (1/1)"),
+        after.contains("Spaces (1/1)"),
         "the filter was lost when the second batch arrived: {after}"
     );
     assert!(
@@ -1957,7 +1957,7 @@ fn a_filter_typed_during_a_scan_survives_the_next_batch() {
         f.press(key(KeyCode::Backspace));
     }
     assert!(
-        f.screen().contains("Worktrees (1/4)"),
+        f.screen().contains("Spaces (1/4)"),
         "every row of both roots should be back"
     );
 }
@@ -2442,7 +2442,7 @@ fn a_short_terminal_drops_the_pane_and_keeps_the_list() {
         "the pane must be gone:\n{screen}"
     );
     assert!(
-        screen.contains("Worktrees"),
+        screen.contains("Spaces"),
         "the list must survive:\n{screen}"
     );
 }

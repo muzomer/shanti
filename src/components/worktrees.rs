@@ -628,7 +628,7 @@ impl WorktreesComponent {
         let title = {
             let mut spans = vec![
                 Span::raw(" "),
-                Span::styled("Worktrees", theme::title()),
+                Span::styled("Spaces", theme::title()),
                 Span::styled(format!(" ({}/{}) ", current, total), theme::secondary()),
             ];
             if !self.filter.value.is_empty() && matches!(mode, InputMode::Normal) {

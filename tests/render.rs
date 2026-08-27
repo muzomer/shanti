@@ -980,7 +980,7 @@ fn below_the_floor_the_whole_frame_is_the_message() {
 
     // One cell larger in both directions, and the interface is back.
     assert!(
-        f.screen(FLOOR).contains("Worktrees"),
+        f.screen(FLOOR).contains("Spaces"),
         "the floor itself must draw the interface"
     );
 }
