@@ -1,17 +1,17 @@
 //! What the app has to tell the user, how loudly, and for how long.
 //!
-//! This replaces `WorktreesComponent::last_error`, one `Option<String>` that
-//! was doing three jobs at once: it was the error channel, the warning channel
-//! *and* the success channel, so "PR is merged — existing worktree selected"
-//! was drawn in bold red as though something had broken. It also never cleared
-//! itself — the only thing that removed a message was the next action that
-//! happened to set one, so a stale failure could sit on the border for the rest
-//! of the session.
+//! A message needs three things, and each is a field here rather than a
+//! convention a caller has to remember:
 //!
-//! Three things are fixed here, and each is a field rather than a convention:
-//! the [`Severity`] says how loud the message is, the timestamp says when it
-//! stops being news, and the owner is [`Notifications`] — no component holds a
-//! message of its own any more.
+//! * a [`Severity`], so "PR is merged — existing space selected" is not drawn in
+//!   the same alarming red as a failure. One string doing duty as the error, the
+//!   warning *and* the success channel can only ever be one colour, and it will
+//!   be the wrong one most of the time;
+//! * a timestamp, so a message clears itself. A notice that waits to be
+//!   overwritten by the next action can sit on the border for the rest of the
+//!   session, long after it stopped being true;
+//! * a single owner, [`Notifications`]. No component keeps a message of its own,
+//!   so there is one place to look and one place to clear.
 //!
 //! # Why not `vcs::Tone`
 //!

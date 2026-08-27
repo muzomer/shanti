@@ -107,8 +107,7 @@ impl Base {
 /// ref points at nothing, so `remote_bookmarks(...)` resolves to the empty
 /// revset and `jj workspace add --revision` fails outright. Skipping it here is
 /// what makes recreating a space for a *merged* pull request fall through to
-/// `trunk()` instead of erroring, which is the case shanti-nhe.6 put in front
-/// of it (shanti-nhe.8).
+/// `trunk()` instead of erroring.
 pub fn remote_carrying(records: &[Record], bookmark: &str) -> eyre::Result<Option<String>> {
     let mut found: Option<String> = None;
     for record in records {

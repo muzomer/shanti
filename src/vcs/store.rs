@@ -1,18 +1,14 @@
 //! The repositories shanti has open, and the questions callers ask about them.
 //!
-//! This used to live inside `RepositoriesComponent`, which meant one type was
-//! two things at once: the owner of every open backend, *and* a list widget with
-//! a cursor, a filter and a focus. Anything that needed a domain answer — which
-//! backend owns this space? what is this repository called? — had to reach
-//! through a widget to get it.
+//! Kept apart from the widget that lists them, because they are two different
+//! jobs: this owns the open backends and answers questions about them, while a
+//! list widget owns a cursor, a filter and a focus. Fold them together and
+//! anything wanting a domain answer — which backend owns this space? what is
+//! this repository called? — has to reach through a widget to get it, and every
+//! new surface takes a dependency on the list.
 //!
-//! That was tolerable while the spaces list was the only caller. It stops being
-//! tolerable as soon as a second surface needs the same answers, because an
-//! inbox item naming a repository is not a list and should not have to know
-//! about cursors to find its backend.
-//!
-//! So the store is here and knows nothing about selection. A widget owns one and
-//! adds the cursor on top; anything else borrows one and just asks.
+//! So the store knows nothing about selection. A widget owns one and adds the
+//! cursor on top; anything else borrows one and just asks.
 //!
 //! # Colocated repositories are open twice
 //!
@@ -64,8 +60,8 @@ impl RepoStore {
     /// Swap the whole set.
     ///
     /// What a scan result needs and [`RepoStore::merge`] cannot do: the set is
-    /// *replaced*, so restarting a scan cannot leave behind repositories that
-    /// are no longer on disk.
+    /// *replaced*, so a repository that has since left the disk does not survive
+    /// the rescan that failed to find it.
     pub fn replace(&mut self, backends: Vec<BoxedVcs>) {
         self.backends = backends;
     }

@@ -3,9 +3,9 @@
 //!
 //! A row can carry two status glyphs and a name. Deciding whether a space is
 //! still needed takes more than that — what was last done in it, how long ago,
-//! how far it has drifted from the remote, where it actually lives — and
-//! finding that out used to mean leaving shanti for a shell, which is the
-//! context switch the tool exists to remove.
+//! how far it has drifted from the remote, where it actually lives. Without a
+//! pane for it, answering that question means leaving shanti for a shell, which
+//! is the context switch the tool exists to remove.
 //!
 //! Nothing here reads the disk or spawns anything. Every field comes out of the
 //! [`Space`] snapshot the list is already holding, so moving the selection costs

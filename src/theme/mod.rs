@@ -337,7 +337,7 @@ pub fn success_text() -> Style {
 }
 /// An informational message: news, not a problem. The only one of the four
 /// that is not bold — an announcement that shouts reads as a failure, which is
-/// the confusion `shanti-nbt.3` exists to end.
+/// exactly the confusion this module exists to end.
 pub fn info_text() -> Style {
     Style::new().fg(info())
 }

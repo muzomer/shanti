@@ -182,7 +182,7 @@ impl JjBackend {
     /// going to push this work back.
     ///
     /// [`Vcs::create_space`] deliberately creates no bookmark of its own (see
-    /// shanti-nhe.3): in jj a bookmark is only needed at push time, and a
+    /// in jj a bookmark is only needed at push time, and a
     /// workspace started from `trunk()` has nothing to name yet. A workspace
     /// started from a *remote* bookmark is the exception, because the name it
     /// would push to already exists upstream — that is the whole point of

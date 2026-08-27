@@ -1,35 +1,32 @@
 //! The jobs whose answers still matter, and what each one is for.
 //!
-//! `App` used to keep this in five collections at once — `outstanding`, `scans`,
-//! `refreshes`, `fetches`, `hook_jobs` — held together by an unwritten rule that
-//! the last four were subsets of the first. The rule was re-applied by hand at
-//! four sites (detaching the worker, abandoning a job, taking in a result, and
-//! every submit), and missing one was **silent**: the job finished, the set it
-//! was still in never emptied, and the activity indicator span forever.
-//!
-//! One map, keyed by [`JobId`], replaces all five. The category travels with the
-//! id instead of being implied by which set it was dropped into, so "forget this
-//! job" is one removal that cannot be half-done.
+//! One map, keyed by [`JobId`], with the category carried alongside the id. The
+//! alternative — a set per category, plus one holding every id — needs the rule
+//! "each category is a subset of the whole" re-applied by hand at every submit,
+//! every cancellation and every result. Missing one of those is **silent**: the
+//! job finishes, the set it is still in never empties, and the activity
+//! indicator spins forever. Here, forgetting a job is one removal that cannot be
+//! half-done.
 //!
 //! # What belongs here, and what does not
 //!
-//! This answers *what is running and what for*. It deliberately does **not**
+//! This answers *what is running, and what for*. It deliberately does **not**
 //! know:
 //!
-//! * how to cancel — that is the [`Worker`](super::Worker)'s, and `App` still
-//!   calls it. This only says whether an id was still wanted, which is what
-//!   makes cancelling safe to skip;
-//! * what a category should look like on screen. Mapping a [`Kind`] to a
-//!   spinner label is UI policy and stays in `App`.
+//! * how to cancel — that is the [`Worker`](super::Worker)'s. This only says
+//!   whether an id was still wanted, which is what makes cancelling safe to
+//!   skip;
+//! * what a category looks like on screen. Mapping a [`Kind`] to a spinner label
+//!   is UI policy and belongs where the spinner is drawn.
 //!
 //! # The staleness rule
 //!
 //! A [`JobResult`](super::JobResult) is applied **only** if [`finish`] returns
 //! its category. Anything else — a fetch for a repos dir the user has since
 //! changed, a lookup for a popup they closed — is dropped without touching
-//! state, so a slow answer can never overwrite a newer one. That rule now lives
-//! in one method rather than in a `HashSet::remove` that a caller had to
-//! remember to check.
+//! state, so a slow answer can never overwrite a newer one. Returning the
+//! category rather than a bool is what keeps that rule enforceable: a caller
+//! cannot act on the result without first receiving proof it is still wanted.
 //!
 //! [`finish`]: InFlight::finish
 
@@ -175,8 +172,8 @@ mod tests {
         (0..n).map(JobId).collect()
     }
 
-    /// The rule the five sets existed to enforce, now enforceable in one place:
-    /// finishing a job forgets it completely, whatever it was for.
+    /// Finishing a job forgets it completely, whatever it was for — there is no
+    /// second place it could still be counted.
     #[test]
     fn finishing_a_job_forgets_it_once() {
         let id = ids(1)[0];

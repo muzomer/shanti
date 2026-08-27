@@ -28,7 +28,7 @@ use super::Backend;
 /// A snapshot of what a space looks like right now.
 ///
 /// Owned and plain by design: the UI holds these across frames, and a later
-/// background refresh (Track D) will want to send them between threads.
+/// background refresh will want to send them between threads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpaceStatus {
     /// Relationship to the upstream/remote. Shared vocabulary across backends.
@@ -327,17 +327,18 @@ mod tests {
         assert_eq!(status.remote, RemoteState::Unknown);
     }
 
-    /// Acceptance criterion: every state of the old `RemoteStatus` + `is_dirty`
-    /// pair survives the move, and distinct old states stay distinct.
+    /// Every distinct git situation stays distinct once expressed as a
+    /// `RemoteState` and a dirty flag. Two situations that collapsed onto one
+    /// value would make the two spaces indistinguishable in the list.
     #[test]
-    fn the_old_git_model_converts_losslessly() {
-        let old_remotes = [
-            RemoteState::in_sync(), // was RemoteStatus::Exists
-            RemoteState::Gone,      // was RemoteStatus::Gone
-            RemoteState::Untracked, // was RemoteStatus::NeverPushed
+    fn distinct_git_situations_stay_distinct() {
+        let remotes = [
+            RemoteState::in_sync(),
+            RemoteState::Gone,
+            RemoteState::Untracked,
         ];
 
-        let converted: Vec<SpaceStatus> = old_remotes
+        let converted: Vec<SpaceStatus> = remotes
             .into_iter()
             .flat_map(|remote| [false, true].map(|dirty| SpaceStatus::git(remote, dirty)))
             .collect();
@@ -456,8 +457,8 @@ mod tests {
         assert!(RemoteState::Untracked.has_unpushed_work());
     }
 
-    /// The point of the two slots: remote and local no longer fight over one
-    /// character cell.
+    /// The point of having two slots: a space can be behind its upstream *and*
+    /// dirty, and one cell could only report whichever the code checked first.
     #[test]
     fn both_slots_can_speak_at_once() {
         let status = SpaceStatus::git(RemoteState::Gone, true);

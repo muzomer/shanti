@@ -158,7 +158,7 @@ pub(super) fn remove_workspace(cli: &JjCli, name: &str, root: &Path) -> eyre::Re
 /// Best-effort on purpose. This is a safety net, not a precondition: a
 /// workspace whose directory was already removed by hand has nothing left to
 /// snapshot, and failing here would strand its registration forever. Whether to
-/// *refuse* deleting a space that still holds work belongs to shanti-7q6.1 and
+/// *refuse* deleting a space that still holds work is a separate question, and
 /// is asked before we ever get here.
 fn snapshot(cli: &JjCli, name: &str, root: &Path) {
     // A second adapter, bound to the workspace rather than to the repository:

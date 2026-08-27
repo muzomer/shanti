@@ -1,10 +1,9 @@
 //! The shape every single-field popup in shanti takes.
 //!
-//! Two popups ask the user for one string — a space name and a PR URL — and
-//! before this they each hand-rolled a block, a four-row layout and a cursor
-//! calculation. Identical code drifts, and the drift showed as inconsistent
-//! hierarchy: the same kind of information rendered at a different weight
-//! depending on which popup you were in.
+//! Two popups ask the user for one string — a space name and a PR URL. Left to
+//! hand-roll their own block, layout and cursor placement they drift, and the
+//! drift shows as inconsistent hierarchy: the same kind of information drawn at
+//! a different weight depending on which popup you are in.
 //!
 //! So the hierarchy is stated once, here, as four distinct levels:
 //!

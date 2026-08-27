@@ -384,7 +384,7 @@ impl RepositoriesComponent {
     /// The picker asks "which repository?", not "which backend?", so a colocated
     /// repository must appear once rather than twice. The entry kept is the jj
     /// one, which is also what makes a new space on a colocated repo a jj
-    /// workspace by default — shanti-12z.5's rule that jj owns such a repo.
+    /// workspace by default, since jj owns such a repository.
     fn repository_choices(&self) -> Vec<&BoxedVcs> {
         self.store.choices()
     }
@@ -471,10 +471,10 @@ pub fn repositories_pane_bindings() -> Vec<HelpEntry> {
 /// One row: the repository name, nothing else.
 ///
 /// The backend is not named here on purpose. A repository is one thing however
-/// it is driven, and each row is now one repository (a colocated repo is
-/// deduplicated to its jj owner), so a per-row backend tag only added noise. The
-/// backend is still visible where it decides something: per space in the
-/// Worktrees pane, and in the create prompt, which names the backend it uses.
+/// it is driven, and each row is one repository — a colocated repo is
+/// deduplicated to its jj owner — so a per-row backend tag would be noise on
+/// every row to describe the rare one. The backend is named where it decides
+/// something instead: per space in the spaces pane, and in the create prompt.
 fn repo_row(name: &str) -> ListItem<'static> {
     ListItem::new(Line::from(Span::styled(name.to_string(), theme::text())))
 }

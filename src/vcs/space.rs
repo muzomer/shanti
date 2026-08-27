@@ -19,10 +19,11 @@ pub struct Space {
     /// that can act on it.
     ///
     /// A colocated repository (`.git` *and* `.jj`) is driven by both backends at
-    /// once, and both are listed, so the repo id alone no longer identifies who
-    /// to route a deletion to: a git worktree and a jj workspace of the same
-    /// repository share an id. This field is what keeps a `git worktree remove`
-    /// from being handed to jj, which knows nothing about it.
+    /// once and both are listed, so the repo id alone cannot say where to route
+    /// a deletion: a git worktree and a jj workspace of the same repository
+    /// share an id, because the id comes from the path. This field is what keeps
+    /// a `git worktree remove` from being handed to jj, which knows nothing
+    /// about it.
     pub backend: Backend,
     /// User-facing name of the space — in practice the branch or bookmark it
     /// was created for. Unique within a repository.

@@ -264,8 +264,8 @@ impl RowLayout {
     /// Each column asks for what its longest name needs. When both fit, both get
     /// it. When they do not, whichever fits in half the space keeps its full
     /// width and the other takes the remainder — so one very long repository
-    /// name costs the space names at most half the row, instead of pushing them
-    /// off the edge as the old free-flowing layout did.
+    /// name costs the space names at most half the row, rather than pushing them
+    /// off the edge entirely.
     fn measure<'a>(labels: impl Iterator<Item = &'a RowLabel> + Clone, width: u16) -> RowLayout {
         let budget = (width as usize).saturating_sub(PREFIX_WIDTH);
         let repo_natural = labels
@@ -409,10 +409,10 @@ impl WorktreesComponent {
     /// Replaces every row, keeping the user where they were.
     ///
     /// The filter text, the cursor in it and the focused pane are all left
-    /// alone, because none of them is about the *data*: rebuilding the whole
-    /// component instead — which is what this replaces — silently threw away a
-    /// filter the user had typed, and could do so at any moment, since the
-    /// rebuild is triggered by a background job rather than by a keystroke.
+    /// alone, because none of them is about the *data*. Rebuilding the whole
+    /// component would throw away a filter the user had typed, and could do it
+    /// at any moment: the rebuild is triggered by a background job landing, not
+    /// by a keystroke, so there is no moment the user could see coming.
     pub fn set_spaces(&mut self, spaces: Vec<SpaceEntry>) {
         let anchor = self.selected_key();
         self.spaces = spaces;
@@ -1037,9 +1037,9 @@ impl ListComponent<SpaceEntry> for WorktreesComponent {
 }
 /// Why the list is empty — which decides what the pane says instead of rows.
 ///
-/// An empty pane is an instruction, not a void: each of these is a different
-/// situation with a different next step, and the old single "no spaces yet"
-/// answered for all of them at once.
+/// An empty pane is an instruction, not a void. Each of these is a different
+/// situation with a different next step, so a single "no spaces yet" would be
+/// wrong for most of them.
 #[derive(Debug, PartialEq, Eq)]
 enum EmptyState {
     /// Repositories are still being discovered; anything else would be a lie
@@ -1145,16 +1145,16 @@ fn elide(text: &str, budget: usize) -> String {
 
 /// The left zone of the bottom border, and how many columns it claims.
 ///
-/// The border has exactly two ends, and `shanti-hq6.3` spent them both: the
-/// right one is the keybinding footer, this is the left one. A notification
-/// therefore *shares* this zone with the mode indicator rather than taking a
-/// row of its own — a row would have to come out of the list, which is the
-/// point of the screen, and the issue's own guideline is that `hq6.3` settles
+/// The border has exactly two ends and both are spoken for: the right one is
+/// the keybinding footer, this is the left one. A notification therefore
+/// *shares* this zone with the mode indicator rather than taking a row of its
+/// own — a row would have to come out of the list, which is the point of the
+/// screen, and the layout guideline settles
 /// the arrangement and this must honour it.
 ///
 /// Sharing, not replacing: the mode indicator is drawn first and always, so a
-/// message no longer costs the user their mode feedback the way `last_error`
-/// did. The message follows it after a divider, in its severity's colour.
+/// message never costs the user the feedback telling them which mode they are
+/// typing in. The message follows it after a divider, in its severity's colour.
 ///
 /// The cap is half the border, and it applies to the pair. A message is never a
 /// reason to stop telling the user which key gets them out of the situation it
@@ -1812,8 +1812,8 @@ mod tests {
         );
     }
 
-    /// The half-border cap `shanti-hq6.3` set: whatever is said, the footer
-    /// keeps its own half of the border to say which keys get the user out.
+    /// The half-border cap: whatever is said, the footer keeps its own half of
+    /// the border to say which keys get the user out.
     #[test]
     fn the_zone_never_takes_more_than_half_the_border() {
         let notice = notice(

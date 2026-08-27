@@ -103,7 +103,8 @@ fn checked_out_branch(repo: &Repository, name: &str) -> Option<String> {
 ///
 /// A branch that is already gone is not a failure: deleting a space twice, or
 /// after deleting its branch by hand, should still converge on "removed". A
-/// delete that is attempted and *fails* is now reported instead of logged away.
+/// delete that is attempted and *fails* is reported, because then something is
+/// left behind that the user has to know about.
 fn delete_branch(repo: &Repository, refname: &str, name: &str) -> eyre::Result<()> {
     match repo.find_reference(refname) {
         Err(e) => {

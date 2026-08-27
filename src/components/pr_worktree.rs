@@ -214,10 +214,10 @@ fn after_clone(
     // neither the "clone with git?" confirm dialog nor the directory picker —
     // there is nothing to confirm and nothing to pick — so this is the only
     // chance to tell a jj user their brand-new repository is a plain git clone.
-    // It lives here, in the clone's *result* handler, on purpose: shanti-hml.4
-    // moves the clone onto a background worker, and there it arrives as a job
-    // result rather than inline, so a notification set here survives the move
-    // while anything wired into the synchronous key handler would not.
+    // It lives here, in the clone's *result* handler, rather than beside the
+    // key press that started it: the clone runs on a background worker, so its
+    // outcome arrives as a job result. Only a handler on that path can know the
+    // clone actually happened.
     if let Some(notice) = git_clone_notice(url, auto, &ctx.args.repos_dirs) {
         // One slot, newest wins: an advisory about the clone's shape must not
         // paint over a real problem raised while opening the worktree — a failed

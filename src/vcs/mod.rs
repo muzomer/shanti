@@ -78,7 +78,7 @@ pub type BoxedVcs = Box<dyn Vcs>;
 /// All methods are blocking. Callers that must stay responsive are expected to
 /// run them off the render thread, which the owned return types allow — hence
 /// the `Send` bound: opening repositories is already done in parallel, and the
-/// background refresh of Track D will want to own a backend on a worker thread.
+/// background refresh will want to own a backend on a worker thread.
 pub trait Vcs: Send {
     /// The repository this instance drives.
     ///

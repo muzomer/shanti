@@ -73,12 +73,11 @@ fn tip_of_branch(branch: &git2::Branch) -> Option<SpaceTip> {
 /// what `git status` shows and what keeps a fresh `node_modules` from reading as
 /// forty thousand losses.
 ///
-/// This answers the git question and only the git question. It used to answer
-/// `false` for anything holding a `.jj` directory, because the old status model
-/// had no way to say "this space is driven by jj" — so it said "clean", which
-/// was a lie rather than an absence. jj spaces now carry their own state (see
-/// [`crate::vcs::LocalState`]) and never reach this function: discovery hands
-/// every colocated repository to the jj backend.
+/// This answers the git question and only the git question. A jj space has no
+/// uncommitted state to count — it auto-commits — so answering for one could
+/// only produce "clean", which is a lie rather than an absence. It never has to:
+/// jj spaces carry their own [`crate::vcs::LocalState`], and discovery hands
+/// every colocated repository to the jj backend, so none reaches this function.
 fn count_uncommitted(worktree_path: &Path) -> Option<u32> {
     let repo = git2::Repository::open(worktree_path).ok()?;
     let mut opts = git2::StatusOptions::new();
@@ -454,7 +453,7 @@ mod tests {
         assert_eq!(repo.name_str(), "bare-repo");
     }
 
-    /// The repo snapshot is what the UI will key on after shanti-12z.6, so its
+    /// The repo snapshot is what the UI keys on, so its
     /// identity must match the path the repository was discovered at.
     #[test]
     fn test_repo_snapshot_describes_the_repository() {

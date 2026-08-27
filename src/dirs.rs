@@ -13,8 +13,6 @@ use std::path::{Path, PathBuf};
 /// logs and other persistent-but-not-precious data under state, while share is
 /// for data whose loss would matter. `XDG_STATE_HOME` is honoured first so the
 /// choice stays the user's, then `~/.local/state/shanti`.
-///
-/// Decided in shanti-1xq.5, after [`get_config_dir`] moved in shanti-1xq.4.
 pub fn get_data_dir() -> eyre::Result<PathBuf> {
     let base =
         BaseDirs::new().ok_or_else(|| eyre::eyre!("Unable to find a home directory for shanti"))?;
@@ -54,8 +52,9 @@ fn state_dir_from(
 /// to look in. `XDG_CONFIG_HOME` is honoured first so the choice stays the
 /// user's, then `~/.config/shanti`.
 ///
-/// Note this diverges from [`get_data_dir`], which still follows the platform
-/// convention — see shanti-1xq.5.
+/// Note this diverges from [`get_data_dir`]: a config file is edited by hand and
+/// must be easy to find, while a log is not, so only this one leaves the
+/// platform convention.
 pub fn get_config_dir() -> eyre::Result<PathBuf> {
     let base =
         BaseDirs::new().ok_or_else(|| eyre::eyre!("Unable to find a home directory for shanti"))?;
@@ -123,18 +122,17 @@ mod tests {
         assert_eq!(dir, PathBuf::from("/xdg/shanti"));
     }
 
-    /// The decision recorded in shanti-1xq.5: state, not share — the log is
-    /// persistent but not precious — and not `~/Library/Application Support`,
-    /// which is where nobody looks for the file they need when shanti misbehaves.
+    /// State, not share: the log is persistent but not precious. And not
+    /// `~/Library/Application Support`, which is where nobody looks for the file
+    /// they need when shanti misbehaves.
     #[test]
     fn the_data_default_is_the_xdg_state_directory() {
         let dir = state_dir_from(None, None, Path::new("/home/someone"));
         assert_eq!(dir, PathBuf::from("/home/someone/.local/state/shanti"));
     }
 
-    /// The decision recorded in shanti-1xq.4: a dotfile directory, not
-    /// `~/Library/Application Support`, because shanti is a terminal tool whose
-    /// users edit this file by hand.
+    /// A dotfile directory, not `~/Library/Application Support`: shanti is a
+    /// terminal tool whose users edit this file by hand.
     #[test]
     fn the_default_is_a_dotfile_directory() {
         let dir = config_dir_from(None, None, Path::new("/home/someone"));

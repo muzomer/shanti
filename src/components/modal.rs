@@ -128,11 +128,12 @@ impl AppContext<'_> {
 
 /// Background work a modal defers to `App`.
 ///
-/// Two mechanisms used to do this — a `Vec<HookPlan>` for hooks and a one-slot
-/// cell for the PR flow — one seam described twice. This is that seam, once: a
-/// modal leaves work here through [`AppContext::run_in_background`] and `App`
-/// drains it after the stack settles. The variants are the two shapes of need,
-/// no more:
+/// One seam for every flow: a modal leaves work here through
+/// [`AppContext::run_in_background`] and `App` drains it after the stack
+/// settles. Giving each flow its own channel would mean each also inventing its
+/// own drain, and its own answer to what happens when the modal closes first.
+///
+/// The variants are the two shapes of need, no more:
 ///
 /// * `Hooks` — fire and forget. A hook's result is about a directory that
 ///   exists, not about a modal that may have closed, so it is never cancelled
@@ -179,10 +180,10 @@ impl From<EventState> for ModalFlow {
 
 /// Which modal is on top, as a value rather than a rendered title.
 ///
-/// There is no `Focus` enum any more — focus is "whatever is on top of the modal
-/// stack" — so this is what an observer (a test above all) names instead. It is
-/// the stable identity of a modal, independent of what the modal paints, so an
-/// assertion on it does not break when a title is reworded.
+/// Focus is "whatever is on top of the modal stack", so this is how an observer
+/// — a test above all — names it. Being the modal's identity rather than its
+/// appearance is the point: an assertion on it does not break when a title is
+/// reworded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModalKind {
     Repositories,
@@ -402,7 +403,7 @@ mod tests {
 
     /// Every real popup, drawn at every size on the ladder.
     ///
-    /// The point is not what it looks like — that is `shanti-b03.2`'s job — but
+    /// The point is not what it looks like but
     /// that no size on the way down produces a panic, and that below the floor
     /// each popup declines to draw so the base pane's message survives.
     #[test]

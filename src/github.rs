@@ -146,7 +146,7 @@ fn fetch_via_ureq(pr: &PrUrl, token: &str) -> eyre::Result<PrInfo> {
 ///   decided, and deciding it *for* someone who never chose jj is not shanti's
 ///   call to make. git is the shape GitHub itself hands out.
 /// * **Adopting jj afterwards is one command and costs nothing.** Since
-///   shanti-nhe.9 a colocated repository is driven fully through jj, so a user
+///   a colocated repository is driven fully through jj, so a user
 ///   who wants it runs `jj git init --colocate` in the clone and shanti picks it
 ///   up on the next scan — no re-clone, no lost work, no configuration here.
 ///

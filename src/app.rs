@@ -115,14 +115,8 @@ pub struct App {
     /// The pool slow work is handed to, once a main loop exists to receive its
     /// results. `None` in a test, where every job is simply never submitted.
     jobs: Option<Worker>,
-    /// The jobs whose answers still matter.
-    ///
-    /// This is the whole staleness rule: a [`JobResult`] is applied **only** if
-    /// its id is in here. Anything else — a fetch for a repos dir the user has
-    /// since changed, a PR lookup for a popup they closed — is dropped without
-    /// touching state, so a slow answer can never overwrite a newer one.
-    /// Every job that has been submitted and whose answer is still wanted,
-    /// each carrying what it is for.
+    /// Every job that has been submitted and whose answer is still wanted, each
+    /// carrying what it is for.
     ///
     /// This is the whole staleness rule: a [`JobResult`] is applied **only** if
     /// [`InFlight::finish`] returns its category. Anything else — a fetch for a
@@ -130,11 +124,10 @@ pub struct App {
     /// is dropped without touching state, so a slow answer can never overwrite a
     /// newer one.
     ///
-    /// One map, not five sets. The category travels with the id rather than
-    /// being implied by which set it was dropped into, so forgetting a job is
-    /// one removal that cannot be half-done — and adding a job kind is one
-    /// [`Tracked`] variant rather than a field, an initialiser and four sync
-    /// sites that fail silently when one is missed.
+    /// One map rather than a set per category: the category travels with the id,
+    /// so forgetting a job is a single removal that cannot be half-done, and a
+    /// new job kind is one [`Tracked`] variant rather than a field plus the
+    /// bookkeeping to keep it in step.
     in_flight: InFlight,
     /// The repos dirs still to be walked.
     ///
@@ -197,10 +190,10 @@ impl App {
     /// lookup — without disturbing any other test running beside it.
     pub fn with_args(args: cli::Args, pr_fetcher: github::PrFetcher) -> App {
         // Nothing here touches the disk. Walking the repos dirs, opening every
-        // repository and reading every space all used to happen right here,
-        // before the first frame — which is why a large repos dir opened onto a
-        // blank terminal. All of it is a job now: this builds an empty list, and
-        // the loop draws it immediately.
+        // repository and reading every space are all jobs, so construction is
+        // instant and the loop draws an empty list immediately. Doing that work
+        // inline would hold the first frame back for as long as the largest
+        // repos dir takes to walk, showing a blank terminal until it finished.
         let excluded = vec![PathBuf::from(&args.worktrees_dir)];
         let scan_roots = args.repos_dirs.iter().map(PathBuf::from).collect();
 
@@ -266,8 +259,8 @@ impl App {
     }
 
     /// How many modals are stacked over the list. Zero means the list owns the
-    /// screen. This is the modal-stack equivalent of the old `Focus`: an
-    /// observer names the state directly instead of reading it back off a paint.
+    /// screen. Lets an observer — a test above all — name the focus state
+    /// directly instead of inferring it from what was painted.
     pub fn modal_depth(&self) -> usize {
         self.modals.len()
     }
@@ -484,8 +477,9 @@ impl App {
             }
             // The refreshed refs are on disk; the list is what has to catch up.
             // Only *this* repository's rows can have changed, so it re-reads
-            // that one on a worker rather than rebuilding every row here — which
-            // is what it used to do, on the render thread, once per fetch.
+            // that one on a worker. Rebuilding every row here would put the
+            // whole list's status back on the render thread to answer a fetch
+            // that touched one repository.
             Ok(Completion::Fetched { path }) => {
                 debug!(repo = %path.display(), "fetched");
                 self.refresh_repository(path);
@@ -527,9 +521,8 @@ impl App {
 
         self.repositories_component.add_repositories(found);
         self.worktrees_component.extend(entries);
-        // Only spoken when something actually failed. The old code had to take
-        // the previous message and put it back so a clean batch would not wipe
-        // it; a notification that nobody raises is simply not raised.
+        // Raised only when something actually failed. A clean batch says
+        // nothing, so it cannot wipe the message a previous batch left.
         if let Some(notice) = listing_failure_notice(&failed) {
             self.notifications.error(notice);
         }
@@ -598,11 +591,10 @@ impl App {
 
     /// Advances everything the clock drives.
     ///
-    /// Nothing is re-read here any more. A fetch used to mark the whole list
-    /// stale and have the next idle tick rebuild it — every repository's status,
-    /// on the render thread, for a fetch that touched one of them. The fetch now
-    /// queues a re-read of its own repository instead, so this is the spinner's
-    /// clock and nothing else.
+    /// The spinner's clock, and nothing else. Nothing is re-read here: a fetch
+    /// queues a re-read of its own repository, so the tick never has to rebuild
+    /// the list — which it could only do on the render thread, for every
+    /// repository, to reflect a change in one.
     pub fn on_tick(&mut self) {
         // The spinner's only clock; see `WorktreesComponent::tick`.
         self.worktrees_component.tick();
@@ -756,8 +748,8 @@ impl App {
             None => return EventState::NotConsumed,
         };
 
-        // Quit and help are stack-wide, so no layer has to remember to handle
-        // them — the gap that used to make '?' dead inside some popups.
+        // Quit and help are handled stack-wide, so no layer has to remember
+        // them. A modal that forgot would leave '?' dead while it was open.
         match action {
             Action::Quit => return EventState::Exit,
             Action::ShowHelp => {
@@ -1198,8 +1190,8 @@ impl App {
         } = self;
         match worktrees_component.delete_selected_space(repositories_component) {
             // A delete that worked needs no words — the row is gone, which is
-            // the whole message — but it does take down a previous failure that
-            // is now untrue.
+            // the whole message — but it does clear a failure left over from an
+            // earlier attempt, which this success has just made untrue.
             Ok(()) => notifications.clear(),
             // The row is deliberately left in place on failure, so the message
             // is the only thing saying why it is still there.
@@ -1499,10 +1491,10 @@ mod tests {
     /// A fetch that lands re-reads *its own* repository, and does it on a
     /// worker.
     ///
-    /// This replaces the rule it used to follow — mark the whole list stale and
-    /// have the next idle tick rebuild every repository's status on the render
-    /// thread. One fetch changed one repository's refs; correcting two hundred
-    /// rows to show it, in the middle of a frame, was the wrong shape of answer.
+    /// One fetch changes one repository's refs, so only that repository is
+    /// re-read. Marking the whole list stale and rebuilding every repository's
+    /// status on the next tick would put two hundred rows' worth of work on the
+    /// render thread to reflect a change in one.
     #[test]
     fn a_landed_fetch_re_reads_the_repository_it_fetched() {
         let (repos, args) = two_repositories();
@@ -1592,9 +1584,9 @@ mod tests {
         );
     }
 
-    /// `R` walks the repos dirs again. The roots therefore have to survive the
-    /// first scan — they used to be consumed by it, which made every rescan
-    /// after the first one walk nothing at all.
+    /// `R` walks the repos dirs again, so the roots have to survive the first
+    /// scan. A scan that consumed them would leave every later rescan walking
+    /// nothing at all.
     #[test]
     fn rescanning_walks_the_repos_dirs_again() {
         let (_repos, args) = two_repositories();
