@@ -142,7 +142,7 @@ struct Fixture {
     /// dropping it would make later results vanish rather than arrive.
     _results: Receiver<AppEvent>,
     _repos_dir: TempDir,
-    _worktrees_dir: TempDir,
+    _spaces_dir: TempDir,
     /// The bare repositories standing in for `origin`, one per worktree that
     /// needed one. Kept alive; dropping them would delete the remotes.
     _remotes: Vec<TempDir>,
@@ -153,7 +153,7 @@ impl Fixture {
     /// state it asked for.
     fn with_worktrees(worktrees: &[Wt]) -> Self {
         let repos_dir = tempdir().expect("could not create repos dir");
-        let worktrees_dir = tempdir().expect("could not create worktrees dir");
+        let spaces_dir = tempdir().expect("could not create worktrees dir");
         let mut remotes = Vec::new();
 
         let mut built: Vec<&str> = Vec::new();
@@ -165,7 +165,7 @@ impl Fixture {
         }
         for wt in worktrees {
             let repo_path = repos_dir.path().join(wt.repo);
-            let target = worktrees_dir.path().join(wt.repo).join(wt.branch);
+            let target = spaces_dir.path().join(wt.repo).join(wt.branch);
             git(
                 &repo_path,
                 &[
@@ -183,7 +183,7 @@ impl Fixture {
         }
 
         let (app, results) = boot(&Args::for_dirs(
-            worktrees_dir.path().display().to_string(),
+            spaces_dir.path().display().to_string(),
             vec![repos_dir.path().display().to_string()],
         ));
 
@@ -191,7 +191,7 @@ impl Fixture {
             app,
             _results: results,
             _repos_dir: repos_dir,
-            _worktrees_dir: worktrees_dir,
+            _spaces_dir: spaces_dir,
             _remotes: remotes,
         }
     }
@@ -216,7 +216,7 @@ impl Fixture {
         }
 
         let repos_dir = tempdir().expect("could not create repos dir");
-        let worktrees_dir = tempdir().expect("could not create worktrees dir");
+        let spaces_dir = tempdir().expect("could not create worktrees dir");
         let root = repos_dir.path().join("lotus");
         std::fs::create_dir_all(&root).expect("could not create the repository directory");
 
@@ -238,7 +238,7 @@ impl Fixture {
         // A git repository beside it, so the list mixes both backends the way a
         // real repos dir does and every row has to say which one owns it.
         init_repo(repos_dir.path(), "garden");
-        let garden = worktrees_dir.path().join("garden").join("bed");
+        let garden = spaces_dir.path().join("garden").join("bed");
         git(
             &repos_dir.path().join("garden"),
             &[
@@ -251,7 +251,7 @@ impl Fixture {
             ],
         );
 
-        let spaces = worktrees_dir.path().join("lotus");
+        let spaces = spaces_dir.path().join("lotus");
         std::fs::create_dir_all(&spaces).expect("could not create the spaces dir");
         for name in ["conflicted", "working"] {
             let dest = spaces.join(name);
@@ -299,14 +299,14 @@ impl Fixture {
         jj(&dest, &["new", &theirs, &ours]);
 
         let (app, results) = boot(&Args::for_dirs(
-            worktrees_dir.path().display().to_string(),
+            spaces_dir.path().display().to_string(),
             vec![repos_dir.path().display().to_string()],
         ));
         Some(Self {
             app,
             _results: results,
             _repos_dir: repos_dir,
-            _worktrees_dir: worktrees_dir,
+            _spaces_dir: spaces_dir,
             _remotes: Vec::new(),
         })
     }
@@ -314,19 +314,19 @@ impl Fixture {
     /// Repositories with no spaces at all.
     fn with_bare_repos(names: &[&str]) -> Self {
         let repos_dir = tempdir().expect("could not create repos dir");
-        let worktrees_dir = tempdir().expect("could not create worktrees dir");
+        let spaces_dir = tempdir().expect("could not create worktrees dir");
         for name in names {
             init_repo(repos_dir.path(), name);
         }
         let (app, results) = boot(&Args::for_dirs(
-            worktrees_dir.path().display().to_string(),
+            spaces_dir.path().display().to_string(),
             vec![repos_dir.path().display().to_string()],
         ));
         Self {
             app,
             _results: results,
             _repos_dir: repos_dir,
-            _worktrees_dir: worktrees_dir,
+            _spaces_dir: spaces_dir,
             _remotes: Vec::new(),
         }
     }
@@ -852,17 +852,17 @@ fn column_widths_are_counted_in_cells_not_bytes() {
 #[test]
 fn a_scan_in_flight_says_so() {
     let repos_dir = tempdir().expect("could not create repos dir");
-    let worktrees_dir = tempdir().expect("could not create worktrees dir");
+    let spaces_dir = tempdir().expect("could not create worktrees dir");
     init_repo(repos_dir.path(), "alpha");
     let (app, results) = booting(&Args::for_dirs(
-        worktrees_dir.path().display().to_string(),
+        spaces_dir.path().display().to_string(),
         vec![repos_dir.path().display().to_string()],
     ));
     let mut f = Fixture {
         app,
         _results: results,
         _repos_dir: repos_dir,
-        _worktrees_dir: worktrees_dir,
+        _spaces_dir: spaces_dir,
         _remotes: Vec::new(),
     };
     assert!(

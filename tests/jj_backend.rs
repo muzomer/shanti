@@ -52,7 +52,7 @@ struct JjFixture {
     base: PathBuf,
     /// Root of the repository under test.
     root: PathBuf,
-    /// Where spaces are created, mirroring `SHANTI_WORKTREES_DIR`.
+    /// Where spaces are created, mirroring `SHANTI_SPACES_DIR`.
     spaces_dir: PathBuf,
     /// The located jj, so fixture setup and the code under test agree on which
     /// binary they mean when `SHANTI_JJ_BIN` points somewhere unusual.
@@ -136,7 +136,7 @@ impl JjFixture {
     }
 
     /// Where a space named `name` should be created, following shanti's own
-    /// `<worktrees dir>/<repo>/<name>` layout.
+    /// `<spaces dir>/<repo>/<name>` layout.
     fn dest(&self, name: &str) -> PathBuf {
         self.spaces_dir
             .join(self.root.file_name().expect("repository has a name"))

@@ -105,7 +105,7 @@ pub trait Vcs: Send {
     ///
     /// `name` is the user's branch/bookmark name; `dest` is the directory shanti
     /// chose for it. Passing the destination in rather than deriving it keeps
-    /// the layout policy (`<worktrees dir>/<repo>/<name>`) in one place instead
+    /// the layout policy (`<spaces dir>/<repo>/<name>`) in one place instead
     /// of duplicated per backend.
     fn create_space(&self, name: &str, dest: &Path) -> eyre::Result<Space>;
 
@@ -170,10 +170,8 @@ pub fn refresh(vcs: &dyn Vcs) {
 /// The one place that knows shanti's layout. [`Vcs::create_space`] deliberately
 /// takes the destination rather than deriving it, so the policy is not
 /// re-implemented — and allowed to drift — once per backend.
-pub fn space_dest(worktrees_dir: &str, repo_name: &str, space_name: &str) -> PathBuf {
-    PathBuf::from(worktrees_dir)
-        .join(repo_name)
-        .join(space_name)
+pub fn space_dest(spaces_dir: &str, repo_name: &str, space_name: &str) -> PathBuf {
+    PathBuf::from(spaces_dir).join(repo_name).join(space_name)
 }
 
 /// Create a space and say what should happen to it next.

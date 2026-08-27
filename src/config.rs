@@ -17,7 +17,7 @@
 //!
 //! ```toml
 //! repos_dirs = ["~/src", "~/work"]
-//! worktrees_dir = "~/worktrees"
+//! spaces_dir = "~/spaces"
 //! run_fetch = true
 //! backend = "jujutsu"
 //! editor = "nvim"
@@ -87,9 +87,9 @@ pub struct Config {
     /// Kept exactly as written: `~` expansion and canonicalisation happen in
     /// `cli::resolve`, once, for whichever layer wins the precedence contest.
     pub repos_dirs: Vec<PathBuf>,
-    /// Directory under which worktrees/workspaces are created. Also normalised
-    /// by `cli::resolve` rather than here.
-    pub worktrees_dir: Option<PathBuf>,
+    /// Directory under which spaces (worktrees/workspaces) are created. Also
+    /// normalised by `cli::resolve` rather than here.
+    pub spaces_dir: Option<PathBuf>,
     /// Whether to fetch every repository at startup.
     pub run_fetch: bool,
     /// Backend preferred for a repository that genuinely offers a choice.
@@ -338,7 +338,7 @@ mod tests {
         let (_dir, path) = write_config(
             r#"
             repos_dirs = ["/src", "/work"]
-            worktrees_dir = "/worktrees"
+            spaces_dir = "/worktrees"
             run_fetch = true
             backend = "jujutsu"
             editor = "nvim"
@@ -350,7 +350,7 @@ mod tests {
             config.repos_dirs,
             vec![PathBuf::from("/src"), PathBuf::from("/work")]
         );
-        assert_eq!(config.worktrees_dir, Some(PathBuf::from("/worktrees")));
+        assert_eq!(config.spaces_dir, Some(PathBuf::from("/worktrees")));
         assert!(config.run_fetch);
         assert_eq!(config.backend, Backend::Jujutsu);
         assert_eq!(config.editor.as_deref(), Some("nvim"));
@@ -364,7 +364,7 @@ mod tests {
         assert!(config.run_fetch);
         assert_eq!(config.backend, Backend::Git);
         assert!(config.repos_dirs.is_empty());
-        assert_eq!(config.worktrees_dir, None);
+        assert_eq!(config.spaces_dir, None);
     }
 
     #[test]
@@ -381,12 +381,12 @@ mod tests {
         let (_dir, path) = write_config(
             r#"
             repos_dirs = ["~/src"]
-            worktrees_dir = "~/worktrees"
+            spaces_dir = "~/spaces"
             "#,
         );
         let config = Config::load_from(&path).unwrap();
         assert_eq!(config.repos_dirs, vec![PathBuf::from("~/src")]);
-        assert_eq!(config.worktrees_dir, Some(PathBuf::from("~/worktrees")));
+        assert_eq!(config.spaces_dir, Some(PathBuf::from("~/spaces")));
     }
 
     #[test]

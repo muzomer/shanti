@@ -450,6 +450,9 @@ pub fn worktrees_bindings() -> Vec<HelpEntry> {
         HelpEntry::bind("t", "Choose a colour scheme")
             .hint("t", "theme")
             .aside(),
+        HelpEntry::bind("Ctrl+R", "Jump to a recent space (any repository)")
+            .hint("^R", "recent")
+            .aside(),
         HelpEntry::bind("d", "Delete with confirmation")
             .hint("d", "delete")
             .destructive(),
@@ -500,5 +503,25 @@ pub fn worktrees_bindings() -> Vec<HelpEntry> {
         HelpEntry::bind("≠", "Change is divergent (jj)"),
         HelpEntry::bind("∅", "Working copy is empty (jj)"),
         HelpEntry::bind("·", "Not checked yet"),
+        HelpEntry::Blank,
+        // The field-by-field explanation of the detail pane below the spaces
+        // list — kept here rather than in the README, since the pane is only
+        // ever seen inside shanti.
+        HelpEntry::Section("Detail pane"),
+        HelpEntry::bind(
+            "Latest",
+            "Subject of the last commit (jj: the working-copy change)",
+        ),
+        HelpEntry::bind("When", "How long ago that was, e.g. `40m ago`, `5h ago`"),
+        HelpEntry::bind(
+            "Remote",
+            "Upstream in words, e.g. `2 ahead, 1 behind — diverged`",
+        ),
+        HelpEntry::bind(
+            "Local",
+            "Local status spelled out, e.g. `uncommitted changes`",
+        ),
+        HelpEntry::bind("Path", "Where the space lives on disk"),
+        HelpEntry::bind("PR", "The pull request the space was created from, if any"),
     ]
 }

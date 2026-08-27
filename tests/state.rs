@@ -83,7 +83,7 @@ struct Fixture {
     /// result vanish rather than arrive.
     results: Receiver<AppEvent>,
     repos_dir: TempDir,
-    worktrees_dir: TempDir,
+    spaces_dir: TempDir,
     /// Second repos dir, only populated by [`Fixture::with_two_repos_dirs`].
     _extra_repos_dir: Option<TempDir>,
     /// Bare repository standing in for a remote, only populated by
@@ -134,14 +134,14 @@ impl Fixture {
     /// a repository is present.
     fn empty(with_repository: bool) -> Self {
         let repos_dir = tempdir().expect("could not create repos dir");
-        let worktrees_dir = tempdir().expect("could not create worktrees dir");
+        let spaces_dir = tempdir().expect("could not create worktrees dir");
 
         if with_repository {
             init_repo(repos_dir.path(), "alpha");
         }
 
         let args = Args::for_dirs(
-            worktrees_dir.path().display().to_string(),
+            spaces_dir.path().display().to_string(),
             vec![repos_dir.path().display().to_string()],
         );
         let (app, results) = boot(&args);
@@ -150,7 +150,7 @@ impl Fixture {
             app,
             results,
             repos_dir,
-            worktrees_dir,
+            spaces_dir,
             _extra_repos_dir: None,
             _remote_dir: None,
             args,
@@ -167,7 +167,7 @@ impl Fixture {
     fn streaming() -> Self {
         let repos_dir = tempdir().expect("could not create repos dir");
         let extra = tempdir().expect("could not create second repos dir");
-        let worktrees_dir = tempdir().expect("could not create worktrees dir");
+        let spaces_dir = tempdir().expect("could not create worktrees dir");
 
         for (dir, repos) in [
             (repos_dir.path(), ["alpha", "beta"]),
@@ -175,12 +175,12 @@ impl Fixture {
         ] {
             for repo in repos {
                 init_repo(dir, repo);
-                add_worktree(dir, repo, worktrees_dir.path(), &format!("feature-{repo}"));
+                add_worktree(dir, repo, spaces_dir.path(), &format!("feature-{repo}"));
             }
         }
 
         let args = Args::for_dirs(
-            worktrees_dir.path().display().to_string(),
+            spaces_dir.path().display().to_string(),
             vec![
                 repos_dir.path().display().to_string(),
                 extra.path().display().to_string(),
@@ -192,7 +192,7 @@ impl Fixture {
             app,
             results,
             repos_dir,
-            worktrees_dir,
+            spaces_dir,
             _extra_repos_dir: Some(extra),
             _remote_dir: None,
             args,
@@ -202,16 +202,11 @@ impl Fixture {
 
     fn build(two_dirs: bool) -> Self {
         let repos_dir = tempdir().expect("could not create repos dir");
-        let worktrees_dir = tempdir().expect("could not create worktrees dir");
+        let spaces_dir = tempdir().expect("could not create worktrees dir");
 
         init_repo(repos_dir.path(), "alpha");
         init_repo(repos_dir.path(), "beta");
-        add_worktree(
-            repos_dir.path(),
-            "alpha",
-            worktrees_dir.path(),
-            "feature-one",
-        );
+        add_worktree(repos_dir.path(), "alpha", spaces_dir.path(), "feature-one");
 
         let extra = if two_dirs {
             Some(tempdir().expect("could not create second repos dir"))
@@ -222,7 +217,7 @@ impl Fixture {
         let mut repos_dirs = vec![repos_dir.path().display().to_string()];
         repos_dirs.extend(extra.iter().map(|d| d.path().display().to_string()));
 
-        let args = Args::for_dirs(worktrees_dir.path().display().to_string(), repos_dirs);
+        let args = Args::for_dirs(spaces_dir.path().display().to_string(), repos_dirs);
 
         let (app, results) = boot(&args);
 
@@ -230,7 +225,7 @@ impl Fixture {
             app,
             results,
             repos_dir,
-            worktrees_dir,
+            spaces_dir,
             _extra_repos_dir: extra,
             _remote_dir: None,
             args,
@@ -343,7 +338,7 @@ impl Fixture {
     }
 
     fn worktree_path(&self, repo: &str, branch: &str) -> std::path::PathBuf {
-        self.worktrees_dir.path().join(repo).join(branch)
+        self.spaces_dir.path().join(repo).join(branch)
     }
 
     fn repo_path(&self, repo: &str) -> std::path::PathBuf {
@@ -442,9 +437,9 @@ impl Fixture {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn add_worktree(repos_dir: &Path, repo: &str, worktrees_dir: &Path, branch: &str) {
+fn add_worktree(repos_dir: &Path, repo: &str, spaces_dir: &Path, branch: &str) {
     let repo_path = repos_dir.join(repo);
-    let target = worktrees_dir.join(repo).join(branch);
+    let target = spaces_dir.join(repo).join(branch);
     git(
         &repo_path,
         &[
@@ -729,6 +724,42 @@ fn worktrees_enter_selects_a_path_and_exits() {
     assert_eq!(
         std::fs::canonicalize(selected.trim_end_matches('/')).unwrap(),
         expected
+    );
+}
+
+#[test]
+fn ctrl_r_opens_the_recent_spaces_jump_list() {
+    let mut f = Fixture::new();
+    assert_eq!(f.press(ctrl('r')), CONSUMED);
+    assert_eq!(f.modal(), Some(ModalKind::RecentSpaces));
+    assert!(f.screen().contains("Recent Spaces"));
+}
+
+#[test]
+fn recent_spaces_enter_selects_a_path_and_exits() {
+    let mut f = Fixture::new();
+    let expected = std::fs::canonicalize(f.worktree_path("alpha", "feature-one"))
+        .expect("worktree should exist");
+
+    assert_eq!(f.press(ctrl('r')), CONSUMED);
+    assert_eq!(f.press(key(KeyCode::Enter)), EXIT);
+
+    let selected = f.app.selected_path.clone().expect("a path was selected");
+    assert_eq!(
+        std::fs::canonicalize(selected.trim_end_matches('/')).unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn recent_spaces_esc_closes_without_exiting() {
+    let mut f = Fixture::new();
+    assert_eq!(f.press(ctrl('r')), CONSUMED);
+    assert_eq!(f.press(key(KeyCode::Esc)), CONSUMED);
+    assert_eq!(
+        f.modal(),
+        None,
+        "Esc should close the jump list, not exit shanti"
     );
 }
 
@@ -2101,7 +2132,7 @@ fn refresh_picks_up_a_worktree_created_externally() {
     add_worktree(
         f.repos_dir.path(),
         "alpha",
-        f.worktrees_dir.path(),
+        f.spaces_dir.path(),
         "feature-two",
     );
 
@@ -2225,7 +2256,7 @@ fn rescanning_finds_a_repository_cloned_since_launch() {
     add_worktree(
         f.repos_dir.path(),
         "gamma",
-        f.worktrees_dir.path(),
+        f.spaces_dir.path(),
         "feature-gamma",
     );
 
@@ -2281,7 +2312,7 @@ fn the_theme_picker_previews_restores_and_persists() {
     // The picker writes to the configuration file named by `Args`, so the test
     // points that at its own temp directory. Nothing here can reach the user's
     // real `~/.config/shanti/config.toml`.
-    let config_path = f.worktrees_dir.path().join("config.toml");
+    let config_path = f.spaces_dir.path().join("config.toml");
     f.args = f.args.clone().with_config_path(&config_path);
     f.reload();
 
@@ -2433,7 +2464,7 @@ fn a_space_created_from_a_pr_remembers_which_pr() {
     let mut f = Fixture::new();
     // Points the memory at this test's own temp directory: nothing here can
     // reach the file under the user's real data directory.
-    let state_path = f.worktrees_dir.path().join("spaces.toml");
+    let state_path = f.spaces_dir.path().join("spaces.toml");
     f.args = f.args.clone().with_state_path(&state_path);
     f.reload();
     f.stub_pr_branch("feature-from-pr", false);
@@ -2460,7 +2491,7 @@ fn a_space_created_from_a_pr_remembers_which_pr() {
 #[test]
 fn a_space_created_by_hand_shows_no_pr() {
     let mut f = Fixture::new();
-    let state_path = f.worktrees_dir.path().join("spaces.toml");
+    let state_path = f.spaces_dir.path().join("spaces.toml");
     f.args = f.args.clone().with_state_path(&state_path);
     f.reload();
 

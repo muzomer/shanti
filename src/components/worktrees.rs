@@ -89,6 +89,7 @@ impl Activity {
 /// produced the space is the one that knows the human name, so the two are
 /// paired at the moment of collection — rather than having the list reach back
 /// into the repository list every time it draws a row.
+#[derive(Debug, Clone)]
 pub struct SpaceEntry {
     pub repo_name: String,
     /// Root of the repository on disk, as the owning backend reports it.
@@ -117,7 +118,7 @@ impl SpaceEntry {
     /// always `false` for one. That is also the right answer — a linked worktree
     /// carries a name the user chose, and that name is the only thing telling
     /// two rows of the same repository apart.
-    fn is_default_space(&self) -> bool {
+    pub fn is_default_space(&self) -> bool {
         self.space.path == self.repo_path
     }
 
@@ -888,6 +889,15 @@ impl WorktreesComponent {
                 .get(index)
                 .map(|entry| entry.space.clone())
         })
+    }
+
+    /// Every known space, independent of the current repo scope.
+    ///
+    /// `filtered_items` deliberately hides whatever the scope excludes — the
+    /// right list for the pane it draws. A picker that reaches across
+    /// repositories (the recent-spaces jump list) needs the whole thing.
+    pub fn spaces(&self) -> &[SpaceEntry] {
+        &self.spaces
     }
 }
 

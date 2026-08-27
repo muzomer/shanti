@@ -458,6 +458,9 @@ pub fn repositories_pane_bindings() -> Vec<HelpEntry> {
         HelpEntry::bind("t", "Choose a colour scheme")
             .hint("t", "theme")
             .aside(),
+        HelpEntry::bind("Ctrl+R", "Jump to a recent space (any repository)")
+            .hint("^R", "recent")
+            .aside(),
         HelpEntry::bind("? / F1", "Show this help")
             .hint("?", "help")
             .aside(),

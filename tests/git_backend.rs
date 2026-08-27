@@ -32,7 +32,7 @@ struct Fixture {
     _root: TempDir,
     /// Root of the working repository (the "clone").
     repo_path: PathBuf,
-    /// Where spaces are created, mirroring `SHANTI_WORKTREES_DIR`.
+    /// Where spaces are created, mirroring `SHANTI_SPACES_DIR`.
     spaces_dir: PathBuf,
     backend: GitBackend,
 }

@@ -57,6 +57,11 @@ fn resolve_normal(key: KeyEvent) -> Option<Action> {
         // user does while looking at the interface rather than a rare
         // administrative act, and it was the last free mnemonic in this table.
         (KeyCode::Char('t'), KeyModifiers::NONE) => Some(Action::OpenThemePicker),
+        // Ctrl+R rather than a plain letter: every unshifted mnemonic that reads
+        // as "recent" is already spoken for ('r' refreshes, 'R' rescans), and the
+        // combination echoes a shell's reverse-history search — also "jump to
+        // something recent without leaving where you are".
+        (KeyCode::Char('r'), KeyModifiers::CONTROL) => Some(Action::OpenRecentSpaces),
         (KeyCode::Esc, KeyModifiers::NONE) => Some(Action::ClosePopup),
         (KeyCode::Char('/'), KeyModifiers::NONE) | (KeyCode::Char('i'), KeyModifiers::NONE) => {
             Some(Action::EnterInsertMode)

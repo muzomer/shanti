@@ -80,7 +80,7 @@ impl AppContext<'_> {
             .ok_or_else(|| eyre!("no repository is selected"))?;
         let repo_name = repo.repo().name.clone();
         let repo_path = repo.repo().path.clone();
-        let dest = vcs::space_dest(&self.args.worktrees_dir, &repo_name, name);
+        let dest = vcs::space_dest(&self.args.spaces_dir, &repo_name, name);
         // Creating and planning happen together so no caller can create a space
         // and forget its setup. Planning is pure and cheap; only `HookPlan::run`
         // blocks, and that happens on a worker.
@@ -166,6 +166,11 @@ pub enum ModalFlow {
     /// Pop this modal and push another in its place — one step of a flow.
     /// (Stacking rather than replacing is what `App` does for the help popup.)
     Replace(Box<dyn Modal>),
+    /// A space was chosen; end the session on it, the same as `Enter` on the
+    /// base pane. Only a modal that picks a space from *outside* the pane's own
+    /// list — the recent-spaces jump list — has any use for this; every other
+    /// modal closes or replaces instead.
+    SelectSpace(PathBuf),
 }
 
 impl From<EventState> for ModalFlow {
@@ -193,6 +198,7 @@ pub enum ModalKind {
     PrWorktree,
     SelectReposDir,
     Theme,
+    RecentSpaces,
 }
 
 pub trait Modal {

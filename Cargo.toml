@@ -26,8 +26,6 @@ tracing-error = "0.2.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
-# The *writer* half of TOML: config.rs edits the user's file in place, keeping
-# their comments and formatting, which a serde round-trip would destroy.
 toml_edit = "0.22"
 ureq = { version = "3", features = ["json"] }
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }

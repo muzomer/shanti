@@ -14,8 +14,8 @@ use crate::{
         detail, repositories_pane_bindings, resume_pr_flow, spaces_of, worktrees_bindings, Action,
         Activity, AppContext, BackgroundWork, ConfirmComponent, CreateWorktreeComponent,
         EventState, HelpComponent, Modal, ModalFlow, ModalKind, Notifications, PrStep,
-        PrWorktreeComponent, RepositoriesComponent, RepositoriesModal, SpaceEntry, ThemeModal,
-        WorktreesComponent, MIN_HEIGHT, MIN_WIDTH,
+        PrWorktreeComponent, RecentSpacesModal, RepositoriesComponent, RepositoriesModal,
+        SpaceEntry, ThemeModal, WorktreesComponent, MIN_HEIGHT, MIN_WIDTH,
     },
     github,
     hooks::{self, HookOutcome, HookPlan, HookReport},
@@ -135,7 +135,7 @@ pub struct App {
     /// these are the *inputs* to that job and nothing reads the disk until there
     /// is a worker to read it on.
     scan_roots: Vec<PathBuf>,
-    /// Kept out of the walk — the worktrees dir, so the spaces living inside it
+    /// Kept out of the walk — the spaces dir, so the spaces living inside it
     /// are not rediscovered as repositories in their own right.
     excluded: Vec<PathBuf>,
     /// How many repositories the current scan has reported — the spinner's count.
@@ -194,7 +194,7 @@ impl App {
         // instant and the loop draws an empty list immediately. Doing that work
         // inline would hold the first frame back for as long as the largest
         // repos dir takes to walk, showing a blank terminal until it finished.
-        let excluded = vec![PathBuf::from(&args.worktrees_dir)];
+        let excluded = vec![PathBuf::from(&args.spaces_dir)];
         let scan_roots = args.repos_dirs.iter().map(PathBuf::from).collect();
 
         Self {
@@ -772,6 +772,15 @@ impl App {
                 self.modals.push(Box::new(ThemeModal::new()));
                 return EventState::Consumed;
             }
+            // Same reasoning as the theme picker: recency is a property of every
+            // space shanti knows about, not of whichever pane or scope happens to
+            // be focused, so it opens the same way from both.
+            if action == Action::OpenRecentSpaces {
+                self.modals.push(Box::new(RecentSpacesModal::new(
+                    self.worktrees_component.spaces().to_vec(),
+                )));
+                return EventState::Consumed;
+            }
             // The PR flow resolves its own repository from the URL the user
             // types, so it needs neither pane's selection — it opens the same
             // way from both rather than being reachable only after switching to
@@ -955,6 +964,13 @@ impl App {
                 self.modals.pop();
                 self.modals.push(next);
                 EventState::Consumed
+            }
+            // The same exit the base pane's `Enter` takes — see `Outcome` in
+            // `lib.rs`, which only prints a path off the back of `EventState::Exit`.
+            ModalFlow::SelectSpace(path) => {
+                self.modals.pop();
+                self.selected_path = Some(path.to_string_lossy().into_owned());
+                EventState::Exit
             }
         }
     }

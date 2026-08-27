@@ -45,15 +45,15 @@ use crate::theme::{scheme, Scheme};
 #[derive(Debug, Parser)]
 #[command(version, about, long_about = None)]
 struct Cli {
-    /// Directory where the new git worktrees will be stored
+    /// Directory where new spaces (git worktrees and jj workspaces) will be stored
     #[arg(
         short = 'd',
-        long = "worktrees-dir",
+        long = "spaces-dir",
         value_name = "DIR",
-        env = "SHANTI_WORKTREES_DIR"
+        env = "SHANTI_SPACES_DIR"
     )]
-    // TODO: list worktrees from the repositories directly instead of getting the worktrees_dir from user
-    worktrees_dir: Option<String>,
+    // TODO: list spaces from the repositories directly instead of getting the spaces_dir from user
+    spaces_dir: Option<String>,
 
     /// Directory of the git repositories (colon-separated for multiple)
     #[arg(
@@ -126,7 +126,7 @@ impl fmt::Display for Origin {
 /// "why is it using that directory?" without anyone reading the code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Origins {
-    pub worktrees_dir: Origin,
+    pub spaces_dir: Origin,
     pub repos_dirs: Origin,
     pub run_fetch: Origin,
     pub backend: Origin,
@@ -145,7 +145,7 @@ pub struct Origins {
 /// without building an `ArgMatches`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Sources {
-    worktrees_dir: Option<Origin>,
+    spaces_dir: Option<Origin>,
     repos_dirs: Option<Origin>,
     run_fetch: Option<Origin>,
     theme: Option<Origin>,
@@ -154,7 +154,7 @@ struct Sources {
 impl Sources {
     fn from_matches(matches: &ArgMatches) -> Self {
         Self {
-            worktrees_dir: clap_origin(matches, "worktrees_dir"),
+            spaces_dir: clap_origin(matches, "spaces_dir"),
             repos_dirs: clap_origin(matches, "repos_dirs"),
             run_fetch: clap_origin(matches, "run_fetch"),
             theme: clap_origin(matches, "theme"),
@@ -179,7 +179,7 @@ fn clap_origin(matches: &ArgMatches, id: &str) -> Option<Origin> {
 #[derive(Debug, Clone)]
 pub struct Args {
     /// Directory where new worktrees/workspaces are created.
-    pub worktrees_dir: String,
+    pub spaces_dir: String,
     /// Directories scanned for repositories.
     pub repos_dirs: Vec<String>,
     /// Whether to fetch every repository at startup.
@@ -241,16 +241,16 @@ impl Args {
     ///
     /// The paths are taken as given: the caller owns them, so there is nothing
     /// here to expand or validate.
-    pub fn for_dirs(worktrees_dir: impl Into<String>, repos_dirs: Vec<String>) -> Self {
+    pub fn for_dirs(spaces_dir: impl Into<String>, repos_dirs: Vec<String>) -> Self {
         Self {
-            worktrees_dir: worktrees_dir.into(),
+            spaces_dir: spaces_dir.into(),
             repos_dirs,
             run_fetch: false,
             backend: Backend::default(),
             editor: None,
             theme: default_scheme(),
             origins: Origins {
-                worktrees_dir: Origin::Default,
+                spaces_dir: Origin::Default,
                 repos_dirs: Origin::Default,
                 run_fetch: Origin::Default,
                 backend: Origin::Default,
@@ -323,11 +323,7 @@ impl Args {
         let mut out = format!("config file: {} ({state})\n\n", self.config_path.display());
 
         let origins = &self.origins;
-        out.push_str(&setting(
-            "worktrees_dir",
-            &self.worktrees_dir,
-            origins.worktrees_dir,
-        ));
+        out.push_str(&setting("spaces_dir", &self.spaces_dir, origins.spaces_dir));
 
         // A multi-valued setting still has a single origin: the layer that won.
         let first = self.repos_dirs.first().map(String::as_str).unwrap_or("");
@@ -406,7 +402,7 @@ fn resolve(cli: Cli, sources: Sources, config: Config, config_path: PathBuf) -> 
     // as an absence, and an empty path can never be resolved. Dropping the
     // blanks here lets `SHANTI_REPOS_DIR=` fall through to the next layer
     // instead of failing on a path that was never really given.
-    let cli_worktrees_dir = cli.worktrees_dir.filter(|dir| !dir.trim().is_empty());
+    let cli_spaces_dir = cli.spaces_dir.filter(|dir| !dir.trim().is_empty());
     let cli_repos_dirs: Vec<String> = cli
         .repos_dirs
         .into_iter()
@@ -434,18 +430,18 @@ fn resolve(cli: Cli, sources: Sources, config: Config, config_path: PathBuf) -> 
         (false, true) => Origin::ConfigFile,
     };
 
-    // --- worktrees_dir -----------------------------------------------------
-    let (worktrees_dir, worktrees_origin) = match (sources.worktrees_dir, cli_worktrees_dir) {
+    // --- spaces_dir -----------------------------------------------------
+    let (spaces_dir, spaces_origin) = match (sources.spaces_dir, cli_spaces_dir) {
         (Some(origin), Some(dir)) => (Some(PathBuf::from(dir)), origin),
-        _ => match config.worktrees_dir {
+        _ => match config.spaces_dir {
             Some(dir) => (Some(dir), Origin::ConfigFile),
             None => (None, Origin::Default),
         },
     };
-    let worktrees_dir = worktrees_dir.ok_or_else(|| {
+    let spaces_dir = spaces_dir.ok_or_else(|| {
         eyre!(
-            "no worktrees directory given: pass --worktrees-dir, set SHANTI_WORKTREES_DIR, \
-             or add worktrees_dir to {}",
+            "no spaces directory given: pass --spaces-dir, set SHANTI_SPACES_DIR, \
+             or add spaces_dir to {}",
             config_path.display()
         )
     })?;
@@ -511,7 +507,7 @@ fn resolve(cli: Cli, sources: Sources, config: Config, config_path: PathBuf) -> 
     };
 
     let origins = Origins {
-        worktrees_dir: worktrees_origin,
+        spaces_dir: spaces_origin,
         repos_dirs: repos_origin,
         run_fetch: fetch_origin,
         backend: backend_origin,
@@ -524,21 +520,16 @@ fn resolve(cli: Cli, sources: Sources, config: Config, config_path: PathBuf) -> 
     // Normalisation happens once, here, so it applies to whichever layer won.
     let repos_dirs = resolve_repos_dirs(&repos_dirs, &label("--repos-dir", repos_origin))?;
 
-    // The worktrees directory is an output location, so create it rather than
-    // making the user run `mkdir` before their first worktree.
-    let worktrees_label = label("--worktrees-dir", worktrees_origin);
-    let expanded = expand(&worktrees_dir).wrap_err_with(|| worktrees_label.clone())?;
-    std::fs::create_dir_all(&expanded).wrap_err_with(|| {
-        format!(
-            "{worktrees_label}: could not create '{}'",
-            expanded.display()
-        )
-    })?;
-    let worktrees_dir =
-        resolve_existing_dir(&worktrees_dir).wrap_err_with(|| worktrees_label.clone())?;
+    // The spaces directory is an output location, so create it rather than
+    // making the user run `mkdir` before their first space.
+    let spaces_label = label("--spaces-dir", spaces_origin);
+    let expanded = expand(&spaces_dir).wrap_err_with(|| spaces_label.clone())?;
+    std::fs::create_dir_all(&expanded)
+        .wrap_err_with(|| format!("{spaces_label}: could not create '{}'", expanded.display()))?;
+    let spaces_dir = resolve_existing_dir(&spaces_dir).wrap_err_with(|| spaces_label.clone())?;
 
     Ok(Args {
-        worktrees_dir,
+        spaces_dir,
         repos_dirs,
         run_fetch,
         backend: config.backend,
@@ -699,7 +690,7 @@ mod tests {
     fn clear_env() {
         for name in [
             "SHANTI_REPOS_DIR",
-            "SHANTI_WORKTREES_DIR",
+            "SHANTI_SPACES_DIR",
             "SHANTI_RUN_FETCH",
             "SHANTI_THEME",
         ] {
@@ -733,10 +724,10 @@ mod tests {
         )
     }
 
-    fn config_with(repos: &[&Path], worktrees: &Path) -> Config {
+    fn config_with(repos: &[&Path], spaces: &Path) -> Config {
         Config {
             repos_dirs: repos.iter().map(|dir| dir.to_path_buf()).collect(),
-            worktrees_dir: Some(worktrees.to_path_buf()),
+            spaces_dir: Some(spaces.to_path_buf()),
             ..Config::default()
         }
     }
@@ -803,7 +794,7 @@ mod tests {
         let args = resolve_with(&["shanti"], config_with(&[dir.path()], dir.path())).unwrap();
 
         assert_eq!(args.origins.repos_dirs, Origin::ConfigFile);
-        assert_eq!(args.origins.worktrees_dir, Origin::ConfigFile);
+        assert_eq!(args.origins.spaces_dir, Origin::ConfigFile);
         assert_eq!(args.repos_dirs, vec![canonical(dir.path())]);
     }
 
@@ -817,7 +808,7 @@ mod tests {
                 "shanti",
                 "--repos-dir",
                 from_flag.path().to_str().unwrap(),
-                "--worktrees-dir",
+                "--spaces-dir",
                 from_flag.path().to_str().unwrap(),
             ],
             config_with(&[from_config.path()], from_config.path()),
@@ -826,7 +817,7 @@ mod tests {
 
         assert_eq!(args.origins.repos_dirs, Origin::CommandLine);
         assert_eq!(args.repos_dirs, vec![canonical(from_flag.path())]);
-        assert_eq!(args.worktrees_dir, canonical(from_flag.path()));
+        assert_eq!(args.spaces_dir, canonical(from_flag.path()));
     }
 
     #[test]
@@ -836,7 +827,7 @@ mod tests {
         let env = from_env.path().to_str().unwrap();
 
         let args = resolve_with_env(
-            &[("SHANTI_REPOS_DIR", env), ("SHANTI_WORKTREES_DIR", env)],
+            &[("SHANTI_REPOS_DIR", env), ("SHANTI_SPACES_DIR", env)],
             &["shanti"],
             config_with(&[from_config.path()], from_config.path()),
         )
@@ -853,7 +844,7 @@ mod tests {
         let env = from_env.path().to_str().unwrap();
 
         let args = resolve_with_env(
-            &[("SHANTI_REPOS_DIR", env), ("SHANTI_WORKTREES_DIR", env)],
+            &[("SHANTI_REPOS_DIR", env), ("SHANTI_SPACES_DIR", env)],
             &["shanti", "--repos-dir", from_flag.path().to_str().unwrap()],
             Config::default(),
         )
@@ -862,7 +853,7 @@ mod tests {
         assert_eq!(args.origins.repos_dirs, Origin::CommandLine);
         assert_eq!(args.repos_dirs, vec![canonical(from_flag.path())]);
         // The setting the flag did not cover still comes from the environment.
-        assert_eq!(args.origins.worktrees_dir, Origin::Environment);
+        assert_eq!(args.origins.spaces_dir, Origin::Environment);
     }
 
     /// The regression this issue exists to prevent: clap always produces a
@@ -900,14 +891,14 @@ mod tests {
         let dir = temp();
 
         let args = resolve_with_env(
-            &[("SHANTI_REPOS_DIR", ""), ("SHANTI_WORKTREES_DIR", "")],
+            &[("SHANTI_REPOS_DIR", ""), ("SHANTI_SPACES_DIR", "")],
             &["shanti"],
             config_with(&[dir.path()], dir.path()),
         )
         .unwrap();
 
         assert_eq!(args.origins.repos_dirs, Origin::ConfigFile);
-        assert_eq!(args.origins.worktrees_dir, Origin::ConfigFile);
+        assert_eq!(args.origins.spaces_dir, Origin::ConfigFile);
     }
 
     // --- theme, the same four layers ---------------------------------------
@@ -1052,15 +1043,15 @@ mod tests {
     }
 
     #[test]
-    fn a_worktrees_dir_from_the_config_file_is_created() {
+    fn a_spaces_dir_from_the_config_file_is_created() {
         let dir = temp();
-        let worktrees = dir.path().join("worktrees").join("nested");
+        let spaces = dir.path().join("spaces").join("nested");
 
-        let args = resolve_with(&["shanti"], config_with(&[dir.path()], &worktrees)).unwrap();
+        let args = resolve_with(&["shanti"], config_with(&[dir.path()], &spaces)).unwrap();
 
-        assert!(worktrees.is_dir());
-        assert!(args.worktrees_dir.ends_with("nested"));
-        assert!(Path::new(&args.worktrees_dir).is_absolute());
+        assert!(spaces.is_dir());
+        assert!(args.spaces_dir.ends_with("nested"));
+        assert!(Path::new(&args.spaces_dir).is_absolute());
     }
 
     // --- errors ------------------------------------------------------------
@@ -1088,7 +1079,7 @@ mod tests {
                 "shanti",
                 "--repos-dir",
                 missing.to_str().unwrap(),
-                "--worktrees-dir",
+                "--spaces-dir",
                 dir.path().to_str().unwrap(),
             ],
             Config::default(),
@@ -1104,7 +1095,7 @@ mod tests {
     fn no_repos_dir_in_any_layer_is_rejected() {
         let dir = temp();
         let config = Config {
-            worktrees_dir: Some(dir.path().to_path_buf()),
+            spaces_dir: Some(dir.path().to_path_buf()),
             ..Config::default()
         };
 
@@ -1115,7 +1106,7 @@ mod tests {
     }
 
     #[test]
-    fn no_worktrees_dir_in_any_layer_is_rejected() {
+    fn no_spaces_dir_in_any_layer_is_rejected() {
         let dir = temp();
         let config = Config {
             repos_dirs: vec![dir.path().to_path_buf()],
@@ -1123,8 +1114,8 @@ mod tests {
         };
 
         let message = format!("{:#}", resolve_with(&["shanti"], config).unwrap_err());
-        assert!(message.contains("--worktrees-dir"), "{message}");
-        assert!(message.contains("worktrees_dir"), "{message}");
+        assert!(message.contains("--spaces-dir"), "{message}");
+        assert!(message.contains("spaces_dir"), "{message}");
     }
 
     /// A stale entry must not veto the entries that are still there: the
@@ -1139,7 +1130,7 @@ mod tests {
             resolve_with_env(
                 &[
                     ("SHANTI_REPOS_DIR", list.as_str()),
-                    ("SHANTI_WORKTREES_DIR", dir.path().to_str().unwrap()),
+                    ("SHANTI_SPACES_DIR", dir.path().to_str().unwrap()),
                 ],
                 &["shanti"],
                 Config::default(),
@@ -1165,7 +1156,7 @@ mod tests {
         let error = resolve_with_env(
             &[
                 ("SHANTI_REPOS_DIR", list.as_str()),
-                ("SHANTI_WORKTREES_DIR", dir.path().to_str().unwrap()),
+                ("SHANTI_SPACES_DIR", dir.path().to_str().unwrap()),
             ],
             &["shanti"],
             Config::default(),
@@ -1192,7 +1183,7 @@ mod tests {
                 "shanti",
                 "--repos-dir",
                 missing.to_str().unwrap(),
-                "--worktrees-dir",
+                "--spaces-dir",
                 dir.path().to_str().unwrap(),
             ],
             Config::default(),
@@ -1232,7 +1223,7 @@ mod tests {
             &[
                 "shanti",
                 "--show-config",
-                "--worktrees-dir",
+                "--spaces-dir",
                 from_flag.path().to_str().unwrap(),
             ],
             config,
@@ -1244,7 +1235,7 @@ mod tests {
         assert!(report.contains("not found"), "{report}");
         assert!(
             report.contains(&format!(
-                "worktrees_dir  = {}  (command line)",
+                "spaces_dir     = {}  (command line)",
                 canonical(from_flag.path())
             )),
             "{report}"

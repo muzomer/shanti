@@ -8,6 +8,7 @@ mod modal;
 mod notify;
 mod pr_worktree;
 mod prompt;
+mod recent_spaces;
 mod repositories;
 mod select_directory;
 mod theme_picker;
@@ -24,6 +25,7 @@ pub use modal::{
 };
 pub use notify::Notifications;
 pub use pr_worktree::{resume_pr_flow, PrStep, PrWorktreeComponent};
+pub use recent_spaces::RecentSpacesModal;
 pub use repositories::{
     repositories_pane_bindings, spaces_of, RepositoriesComponent, RepositoriesModal,
 };
@@ -54,6 +56,9 @@ pub enum Action {
     OpenPrWorktreeAutoClone,
     /// Open the colour scheme picker.
     OpenThemePicker,
+    /// Open the cross-repository jump list, sorted by how recently each space
+    /// was last committed to.
+    OpenRecentSpaces,
     ClosePopup,
     /// Re-read what is already known: every discovered repository's spaces and
     /// their status. Disk only — no repos dir is walked and no remote is

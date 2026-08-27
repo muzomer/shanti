@@ -57,7 +57,7 @@ impl Discovered {
 }
 
 /// Finds repository roots under `path`, skipping the `excluded` subtrees — pass
-/// the worktrees dir here so managed spaces nested in a repos dir are not
+/// the spaces dir here so managed spaces nested in a repos dir are not
 /// rediscovered as repositories of their own.
 pub fn discover(path: &Path, excluded: &[PathBuf]) -> Vec<Discovered> {
     // Compare canonical paths so `~/code/../code/wt` and `/Users/x/code/wt`
@@ -431,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_excludes_the_worktrees_dir() {
+    fn test_scan_excludes_the_spaces_dir() {
         let temp_dir = tempdir().expect("Could not create temporary directory");
         make_dirs(
             temp_dir.path(),
