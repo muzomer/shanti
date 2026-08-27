@@ -772,6 +772,21 @@ impl App {
                 self.modals.push(Box::new(ThemeModal::new()));
                 return EventState::Consumed;
             }
+            // The PR flow resolves its own repository from the URL the user
+            // types, so it needs neither pane's selection — it opens the same
+            // way from both rather than being reachable only after switching to
+            // the spaces pane.
+            if let Some(auto) = match action {
+                Action::OpenPrWorktree => Some(false),
+                Action::OpenPrWorktreeAutoClone => Some(true),
+                _ => None,
+            } {
+                self.modals.push(Box::new(PrWorktreeComponent::new(
+                    auto,
+                    self.pr_fetcher.clone(),
+                )));
+                return EventState::Consumed;
+            }
             return if self.two_pane && self.focus_pane == Pane::Repositories {
                 self.handle_repositories_action(action)
             } else {
@@ -1050,28 +1065,11 @@ impl App {
                 }
                 EventState::Consumed
             }
-            Action::OpenPrWorktree => {
-                self.modals.push(Box::new(PrWorktreeComponent::new(
-                    false,
-                    self.pr_fetcher.clone(),
-                )));
-                EventState::Consumed
-            }
-            Action::OpenPrWorktreeAutoClone => {
-                self.modals.push(Box::new(PrWorktreeComponent::new(
-                    true,
-                    self.pr_fetcher.clone(),
-                )));
-                EventState::Consumed
-            }
-            // 'D' skips the *question*, never the guard: a space holding work
-            // that exists nowhere else still raises the dialog that says so.
+            // 'D' deletes right away, no matter what it would cost — the
+            // confirmed path ('d') is one keypress away for anyone who wants the
+            // dialog first.
             Action::ForceDelete => {
-                match self.selected_space_risk() {
-                    Some((_, risk)) if risk.is_safe() => self.delete_selected_worktree(),
-                    Some((space, risk)) => self.modals.push(Box::new(confirm_delete(&space, risk))),
-                    None => {}
-                }
+                self.delete_selected_worktree();
                 EventState::Consumed
             }
             Action::DeleteWithConfirmation => {

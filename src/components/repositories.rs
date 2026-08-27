@@ -442,13 +442,17 @@ pub fn spaces_of(backends: &[BoxedVcs]) -> (Vec<SpaceEntry>, Vec<String>) {
 /// Footer bindings for the left pane of the two-pane layout. Unlike the picker
 /// (`repositories_bindings`), Enter does not pick a repository and Esc does not
 /// close a popup: the pane is always on screen. `n` makes a space in the
-/// highlighted repository, and `Tab` moves to the spaces pane beside it.
+/// highlighted repository, `p`/`P` open the PR flow (which resolves its own
+/// repository from the URL typed into it, so it needs no selection here), and
+/// `Tab` moves to the spaces pane beside it.
 pub fn repositories_pane_bindings() -> Vec<HelpEntry> {
     vec![
         HelpEntry::Section(KEYS_SECTION),
         HelpEntry::bind("j / ↓", "Move down").hint("j/k", "move"),
         HelpEntry::bind("k / ↑", "Move up"),
         HelpEntry::bind("n", "New space here").hint("n", "new"),
+        HelpEntry::bind("p", "New worktree from PR URL"),
+        HelpEntry::bind("P", "New worktree from PR URL (auto-clone)"),
         HelpEntry::bind("i", "Enter filter mode").hint("i", "filter"),
         HelpEntry::bind("Tab", "Focus spaces").hint("Tab", "spaces"),
         HelpEntry::bind("t", "Choose a colour scheme")

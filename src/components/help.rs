@@ -99,9 +99,8 @@ impl HelpEntry {
     /// Also carry this binding in the always-visible footer, in short form.
     ///
     /// The footer gets its own key and verb because the two are read at
-    /// different moments: `Delete (skips the question, not the guard)` is a
-    /// sentence for someone who stopped to ask, `[D] force` a reminder for
-    /// someone who did not.
+    /// different moments: `Delete without asking` is a sentence for someone
+    /// who stopped to ask, `[D] force` a reminder for someone who did not.
     ///
     /// The builder methods here apply to a binding; on a section or a blank they
     /// do nothing, because nothing else is ever chained onto those.
@@ -454,7 +453,7 @@ pub fn worktrees_bindings() -> Vec<HelpEntry> {
         HelpEntry::bind("d", "Delete with confirmation")
             .hint("d", "delete")
             .destructive(),
-        HelpEntry::bind("D", "Delete (skips the question, not the guard)")
+        HelpEntry::bind("D", "Delete without asking")
             .hint("D", "force")
             .destructive(),
         HelpEntry::bind("Enter", "Print path & exit").hint("Enter", "path"),
