@@ -43,9 +43,6 @@ pub enum Pane {
 /// render two columns too narrow to read.
 const REPOS_PANE_MIN: u16 = 28;
 
-/// Whether the frame has room for two panes side by side. Below the sum of the
-/// two pane minimums — or under the shared height floor — the layout drops to
-/// the single spaces list rather than draw two columns too narrow to use.
 /// Take the detail pane's rows off the bottom of the spaces area, when there are
 /// rows to spare.
 ///
@@ -66,6 +63,19 @@ fn split_off_detail(area: Rect) -> (Rect, Option<Rect>) {
     (list, Some(pane))
 }
 
+/// Whether the frame has room for both panes side by side.
+///
+/// Two panes are the normal view, and on any ordinary terminal this is always
+/// true. The single-pane view is the fallback for a frame too small to hold
+/// them: **narrower than 68 columns** (the repositories pane's 28 plus the
+/// spaces pane's own [`MIN_WIDTH`] of 40) **or shorter than 10 rows**. That
+/// happens in a vertically split terminal, a narrow tmux pane or an SSH session
+/// from a phone — rarely, but not never.
+///
+/// Below the floor the repositories pane is the one dropped, leaving the spaces
+/// list showing every space rather than two columns too narrow to read. `n` then
+/// falls back to the repositories *picker* modal, since there is no highlighted
+/// repository to create in.
 fn two_pane_fits(area: Rect) -> bool {
     area.height >= MIN_HEIGHT && area.width >= REPOS_PANE_MIN + MIN_WIDTH
 }

@@ -17,12 +17,9 @@
 # Features
 
 - **Manage spaces** — create, delete, and navigate git worktrees and jujutsu workspaces across different repositories.
-- **Two-pane layout** — repositories on the left, the highlighted repository's spaces on the right. It opens focused on the repositories pane (find the repository first); `Tab` moves focus to the spaces beside it, and `n` creates a space in the highlighted repository with no picker. A narrow terminal folds back to a single list.
 - **Both backends, one list** — shanti detects per repository whether it is driven by git or by jj; a repository colocated with both appears once, and each space says which backend owns it.
 - **Detail pane** — under the spaces list, everything the row has no room for: the last commit made in the highlighted space and how long ago, how far it stands from its upstream, its full path, and the pull request it was created from. See [The detail pane](#the-detail-pane).
-- **Status indicators** — every space shows two glyphs: one for its relationship to the upstream, one for its local state. See [Status indicators](#status-indicators).
 - **Create spaces from PR links** — paste a GitHub PR URL and shanti clones the repo and creates a space from the PR branch (requires `gh` CLI or read-only `GITHUB_TOKEN`).
-- **Configuration file** — a TOML file under `~/.config/shanti/`, layered with environment variables and CLI flags.
 - **Colour schemes** — seven built-in schemes, light and dark, plus one that follows your terminal's own colours. Press `t` to try them on the real interface and keep the one you like. See [Colour schemes](#colour-schemes).
 - **Vi-style navigation**
 
