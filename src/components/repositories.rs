@@ -450,11 +450,21 @@ pub fn repositories_pane_bindings() -> Vec<HelpEntry> {
         HelpEntry::Section(KEYS_SECTION),
         HelpEntry::bind("j / ↓", "Move down").hint("j/k", "move"),
         HelpEntry::bind("k / ↑", "Move up"),
+        HelpEntry::bind("g / Home", "Go to first"),
+        HelpEntry::bind("G / End", "Go to last"),
         HelpEntry::bind("n", "New space here").hint("n", "new"),
         HelpEntry::bind("p", "New worktree from PR URL"),
         HelpEntry::bind("P", "New worktree from PR URL (auto-clone)"),
         HelpEntry::bind("i", "Enter filter mode").hint("i", "filter"),
         HelpEntry::bind("Tab", "Focus spaces").hint("Tab", "spaces"),
+        HelpEntry::bind("Enter", "Focus the highlighted repository's spaces"),
+        // The same pair the spaces pane offers, and for the same reason: both
+        // act on every repository regardless of which pane is looking at them,
+        // so there is no separate "repositories-only" refresh to bind instead.
+        HelpEntry::bind("r", "Refresh spaces & status (no network)")
+            .hint("r", "refresh")
+            .aside(),
+        HelpEntry::bind("R", "Rescan the repos dirs for new repositories"),
         HelpEntry::bind("t", "Choose a colour scheme")
             .hint("t", "theme")
             .aside(),
