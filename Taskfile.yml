@@ -1,41 +1,39 @@
 version: "3"
 
 tasks:
-  build-demo-image:
-    desc: "Build the demos image"
+  build-shanti:
+    desc: "Build the shanti binary that demo tapes drive"
     cmds:
-      - docker build -f demos/Dockerfile --no-cache . -t shanti-demo:latest
+      - cargo build --release
 
-  shell-demo-image:
-    desc: "Open shell in the demos container"
-    cmds:
-      - docker run -v .:/shanti --entrypoint bash -it shanti-demo:latest
-
-  generate-gif:
-    desc: "Run vhs on tape file to generate gif. Pass the path for the .tape file"
-    cmds:
-      - docker run -v .:/shanti -w /shanti/demos/ -it shanti-demo:latest
-        {{.CLI_ARGS}}
-
-  setup-demo-env:
-    desc: "Setup the demo directories"
+  setup-demo-fixtures:
+    desc: "Set up local, offline fixtures for demos/features.tape"
     dir: ./demos/
-    cmd: |-
-      test -d repos-dir || mkdir repos-dir
-      pushd repos-dir
-      rm -rf *
+    cmds:
+      - ./fixtures/setup-local.sh
 
-      for demo_repo in first-repo second-repo
-      do
-        git clone git@github.com:muzomer/${demo_repo}.git
-      done
-      popd
-      test -d worktrees-dir && rm -rf worktrees-dir
-      mkdir worktrees-dir
+  setup-demo-fixtures-github:
+    desc: "Set up the GitHub-backed fixtures for demos/create-from-pr.tape (needs network + SSH auth)"
+    dir: ./demos/
+    cmds:
+      - ./fixtures/setup-github.sh
 
   create-demo:
-    desc: "Command to execute demo from the demos directory"
+    desc: "Regenerate demos/features.gif (offline)"
     dir: ./demos/
     deps:
-      - setup-demo-env
+      - build-shanti
+      - setup-demo-fixtures
+    env:
+      PATH: "{{.ROOT_DIR}}/target/release:{{.PATH}}"
     cmd: vhs features.tape
+
+  create-pr-demo:
+    desc: "Regenerate demos/create-from-pr.gif (needs network + SSH auth)"
+    dir: ./demos/
+    deps:
+      - build-shanti
+      - setup-demo-fixtures-github
+    env:
+      PATH: "{{.ROOT_DIR}}/target/release:{{.PATH}}"
+    cmd: vhs create-from-pr.tape
